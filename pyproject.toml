@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=67", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hil-bench"
+version = "0.1.0"
+description = "CLI utilities and automation helpers for the Raspberry Pi HIL bench."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "typer>=0.9",
+    "pytest>=7.4",
+]
+
+[project.scripts]
+hil = "tools.flash:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tools*"]

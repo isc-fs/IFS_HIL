@@ -1,0 +1,23 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+.env
+.env.*
+*.egg-info/
+
+# CMake build outputs
+build/
+CMakeFiles/
+CMakeCache.txt
+cmake-build-*/
+
+# Docker leftovers
+*.log
+*.tar
+docker-compose.override.yml
+
+# IDE files
+.vscode/
+.idea/

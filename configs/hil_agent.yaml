@@ -1,0 +1,10 @@
+agent:
+  poll_interval_seconds: 30
+  workspace: /srv/hil
+  scripts_dir: /srv/hil/scripts
+  firmware_build_dir: /srv/hil/build/firmware
+  logs_dir: /srv/hil/logs
+  can_channel: can0
+  targets:
+    - name: stm32f103
+      config: configs/ecu_stm32f103.yaml

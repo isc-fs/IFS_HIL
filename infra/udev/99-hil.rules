@@ -1,0 +1,5 @@
+# Grant access to ST-Link adapters.
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="374b", MODE="0660", GROUP="plugdev", SYMLINK+="stlink"
+
+# Assign a stable name for CAN adapters used by the HIL bench.
+SUBSYSTEM=="net", ACTION=="add", ATTRS{idVendor}=="1d50", ATTRS{idProduct}=="606f", NAME="can0", GROUP="netdev"

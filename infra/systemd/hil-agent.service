@@ -1,0 +1,15 @@
+[Unit]
+Description=HIL agent worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/srv/hil
+Environment=HIL_ENV=production
+ExecStart=/srv/hil/scripts/run_hil_job.sh
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
