@@ -33,6 +33,9 @@ This setup enables safe, repeatable testing of control logic and communication f
 
 ## 🧱 Repository Structure
 
+Top-level repository layout and brief explanations:
+
+```text
 IF08_HIL/
 ├── .github/                 # CI/CD workflows
 ├── configs/                 # Hardware and test configuration YAMLs
@@ -66,4 +69,14 @@ IF08_HIL/
 ├── pyproject.toml           # Python dependencies (optional)
 ├── README.md                # You are here
 └── .gitignore
+```
+
+Notable items:
+- docker/: reproducible build image and toolchain configuration.
+- firmware/: firmware sources and CMake build entrypoint.
+- scripts/: convenience wrappers for CI and on-device automation.
+- tests/: pytest-based HIL test cases and fixtures.
+- tools/: small Python utilities used by tests and scripts.
+- configs/: hardware mappings and test parameter YAMLs.
+- infra/: Raspberry Pi integration (systemd units, udev rules).
 
