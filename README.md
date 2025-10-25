@@ -1,36 +1,69 @@
-# HIL Test Bench Skeleton
+# 🧠 IF08_HIL – Hardware-in-the-Loop Test Environment
 
-This repository seeds a Raspberry Pi based hardware-in-the-loop (HIL) bench that builds STM32 firmware, flashes the ECU, and verifies behaviour with automated tests.
+This project implements a **Hardware-in-the-Loop (HIL)** testing framework for an **STM32-based ECU**, fully automated through a **Raspberry Pi** acting as the test orchestrator.
 
-## Quickstart
-- Install system dependencies: `./scripts/bootstrap_pi.sh /srv/hil`
-- Create a virtual environment and install the project in editable mode:
-  - `python3 -m venv .venv && source .venv/bin/activate`
-  - `pip install -e .`
-- Inspect the helper CLI: `hil --help`
-- Trigger the full bench workflow: `./scripts/run_hil_job.sh`
+It allows continuous integration of embedded firmware by automatically:
+1. Building new firmware revisions inside a reproducible Docker container.
+2. Flashing the ECU through OpenOCD or DFU.
+3. Simulating its environment (sensors, faults, CAN messages).
+4. Running automated functional tests.
+5. Producing structured reports for validation and regression tracking.
 
-## `hil` CLI Usage
-The Typer-based CLI offers a few placeholder commands to simulate end-to-end flows.
+---
 
-```bash
-# Flash the ECU with a firmware binary
-hil flash --firmware build/firmware/hil_firmware.bin --target stm32f103
+## ⚙️ Overview
 
-# Probe CAN connectivity
-hil probe --channel can0
+**HIL Concept:**  
+The ECU (real hardware) is connected to a simulated environment (virtual sensors, actuators, and power system). The Raspberry Pi manages both the build/test workflow and the simulation interface.
 
-# Toggle a power rail
-hil power --target ecu --state true
-```
+This setup enables safe, repeatable testing of control logic and communication features before integration into the real system.
 
-## Project Layout
-- `firmware/` — Minimal STM32 C project compiled with CMake.
-- `tools/` — Python utilities (flash, CAN probe, power control, CLI entrypoint).
-- `scripts/` — Automation scripts for bootstrapping, systemd integration, and running jobs.
-- `infra/` — systemd unit and udev rules applied on the Pi.
-- `tests/` — Placeholder pytest suite executed after flashing.
-- `docker/` — Container definitions for build, flash, and test environments.
-- `configs/` — YAML templates describing ECUs and agent behaviour.
-- `.github/workflows/` — CI pipeline targeting the Raspberry Pi runner.
-- `docs/` — Architecture notes and onboarding material.
+---
+
+## 🧩 System Architecture
+
+| Component | Role |
+|------------|------|
+| **ECU (STM32)** | Device under test; executes the firmware being validated. |
+| **Raspberry Pi (host)** | Orchestrates build, flash, and test. Runs simulation loops and analysis. |
+| **Docker container** | Provides a reproducible build & test environment (GCC toolchain, OpenOCD, pytest). |
+| **Test bench hardware** | Includes CAN adapter, DAC/ADC boards, relays for fault injection, PSU control, etc. |
+
+---
+
+## 🧱 Repository Structure
+
+IF08_HIL/
+├── .github/                 # CI/CD workflows
+├── configs/                 # Hardware and test configuration YAMLs
+├── docker/                  # Toolchain and build environment
+│   ├── Dockerfile
+│   ├── passthrough.sh
+│   └── toolchain-arm-none-eabi.cmake
+├── docs/                    # Design documentation and diagrams
+├── firmware/                # STM32 firmware source code
+│   ├── src/
+│   ├── include/
+│   └── CMakeLists.txt
+├── infra/                   # Raspberry Pi system-level integration
+│   ├── systemd/
+│   └── udev/
+├── scripts/                 # High-level automation (build, flash, test)
+│   ├── build.sh
+│   ├── flash_openocd.sh
+│   ├── test.sh
+│   └── run_hil_job.sh
+├── tests/                   # Automated HIL tests (pytest)
+│   └── hil/
+│       ├── test_example.py
+│       ├── test_can_faults.py
+│       └── …
+├── tools/                   # Reusable Python utilities (CAN, flashing, PSU control)
+│   ├── can_probe.py
+│   ├── flash.py
+│   ├── power_ctl.py
+│   └── init.py
+├── pyproject.toml           # Python dependencies (optional)
+├── README.md                # You are here
+└── .gitignore
+
