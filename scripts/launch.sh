@@ -6,7 +6,7 @@ set -euo pipefail
 # ==============================
 CAN_IFACE="${CAN_IFACE:-can0}"
 CAN_BITRATE="${CAN_BITRATE:-500000}"
-MCP_OSC_HZ="${MCP_OSC_HZ:-16000000}"
+MCP_OSC_HZ="${MCP_OSC_HZ:-8000000}"
 MCP_CS_GPIO="${MCP_CS_GPIO:-22}"
 MCP_IRQ_GPIO="${MCP_IRQ_GPIO:-25}"
 APP_PORT="${APP_PORT:-1111}"
@@ -118,17 +118,17 @@ bring_up_can_now() {
   fi
 }
 
+
+
 build_image() {
-  echo "[i] Construyendo imagen Docker ${IMAGE_NAME}:${IMAGE_TAG}"
+  echo "[i] Construyendo imagen Docker ${IMAGE_NAME}:${IMAGE_TAG} (plataforma nativa)"
   cd "$PROJECT_ROOT"
-  docker buildx create --use --name rpi-builder >/dev/null 2>&1 || true
-  docker buildx build \
-    --platform linux/arm/v7,linux/arm64 \
+  docker build \
     -t "${IMAGE_NAME}:${IMAGE_TAG}" \
     -f "$DOCKERFILE_PATH" \
-    --load \
     .
 }
+
 
 run_container() {
   echo "[i] Lanzando contenedor Docker"
@@ -172,4 +172,3 @@ echo
 echo "✅ Proyecto desplegado correctamente."
 echo "   - Interfaz CAN: ${CAN_IFACE} @ ${CAN_BITRATE} bit/s"
 echo "   - Contenedor: ${IMAGE_NAME}"
-echo "   - Panel web: http://<IP-de-la-raspberry>:${APP_PORT}"

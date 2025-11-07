@@ -43,7 +43,9 @@ RUN python -m pip install --upgrade pip setuptools wheel && \
       'pyserial>=3,<4' 'python-can>=4,<5'
 
 WORKDIR /workspace
-COPY passthrough.sh /usr/local/bin/passthrough.sh
+
+COPY docker/passthrough.sh /usr/local/bin/passthrough.sh
+
 RUN chmod +x /usr/local/bin/passthrough.sh
 
 ENTRYPOINT ["/usr/local/bin/passthrough.sh"]
