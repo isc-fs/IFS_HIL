@@ -1,0 +1,75 @@
+name: HIL Build Only
+
+on:
+  # Allow Repo A (or any caller) to trigger this workflow
+  workflow_call:
+    inputs:
+      firmware_repo: { type: string, required: true }  # e.g. org/firmware-repo
+      firmware_ref:  { type: string, required: true }  # refs/heads/main | refs/tags/v1.2.3
+      firmware_sha:  { type: string, required: true }  # 40-char SHA (safe name)
+    secrets:
+      TOKEN: { required: true }                         # PAT to read firmware repo if private
+
+  # For manual tests from the Actions UI (on Repo B)
+  workflow_dispatch:
+    inputs:
+      firmware_repo:
+        description: "org/repo of firmware"
+        required: true
+        type: string
+      firmware_ref:
+        description: "ref to build (refs/heads/branch or refs/tags/tag)"
+        required: true
+        type: string
+      firmware_sha:
+        description: "commit SHA for artifact naming"
+        required: true
+        type: string
+
+concurrency:
+  group: build-only-${{ inputs.firmware_sha }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout HIL repo (this repo)
+        uses: actions/checkout@v4
+
+      - name: Checkout Firmware repo (Repo A)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.firmware_repo }}
+          ref: ${{ inputs.firmware_ref }}
+          path: firmware-src
+          token: ${{ secrets.TOKEN }}
+
+      - name: Build toolchain image
+        run: docker build -t ifs08hil -f docker/Dockerfile docker
+
+      - name: Sync firmware into expected layout
+        run: rsync -a --delete firmware-src/ firmware/
+
+      - name: Build firmware (FLASH)
+        env:
+          IMAGE: ifs08hil
+          LD_VARIANT: FLASH
+        run: bash scripts/build.sh
+
+      - name: Package artifacts (+ checksums)
+        run: |
+          mkdir -p artifacts
+          cp -v build/firmware.elf artifacts/ || true
+          cp -v build/firmware.bin artifacts/ || true
+          cp -v build/firmware.hex artifacts/ || true
+          cp -v build/firmware.map artifacts/ || true
+          (cd artifacts && sha256sum * > SHA256SUMS.txt)
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ inputs.firmware_sha }}
+          path: artifacts
+          retention-days: 14
