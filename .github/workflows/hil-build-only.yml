@@ -44,7 +44,7 @@ jobs:
           repository: ${{ inputs.firmware_repo }}
           ref: ${{ inputs.firmware_ref }}
           path: firmware-src
-          token: ${{ secrets.TOKEN }}
+          token: ${{ secrets.HIL_CROSS_REPO_PAT }}
 
       - name: Build toolchain image
         run: docker build -t ifs08hil -f docker/Dockerfile docker
