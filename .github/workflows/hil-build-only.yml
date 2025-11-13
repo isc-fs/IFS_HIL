@@ -65,7 +65,7 @@ jobs:
         env:
           IMAGE: ifs08hil
           LD_VARIANT: FLASH
-        run: bash scripts/build.sh
+        run: bash scripts/build_stm32_binaries.sh
 
       - name: Package artifacts (+ checksums)
         run: |
