@@ -8,7 +8,7 @@ on:
       firmware_ref:  { type: string, required: true }  # refs/heads/main | refs/tags/v1.2.3
       firmware_sha:  { type: string, required: true }  # 40-char SHA (safe name)
     secrets:
-      TOKEN: { required: true }                         # PAT to read firmware repo if private
+      TOKEN: ${{ secrets.HIL_CROSS_REPO_PAT }}                        # PAT to read firmware repo if private
 
   # For manual tests from the Actions UI (on Repo B)
   workflow_dispatch:
@@ -44,7 +44,7 @@ jobs:
           repository: ${{ inputs.firmware_repo }}
           ref: ${{ inputs.firmware_ref }}
           path: firmware-src
-          token: ${{ secrets.HIL_CROSS_REPO_PAT }}
+          token: ${{ secrets.TOKEN }}
 
       - name: Build toolchain image
         run: docker build -t ifs08hil -f docker/Dockerfile docker
