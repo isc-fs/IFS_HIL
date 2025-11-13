@@ -4,11 +4,18 @@ on:
   # Allow Repo A (or any caller) to trigger this workflow
   workflow_call:
     inputs:
-      firmware_repo: { type: string, required: true }  # e.g. org/firmware-repo
-      firmware_ref:  { type: string, required: true }  # refs/heads/main | refs/tags/v1.2.3
-      firmware_sha:  { type: string, required: true }  # 40-char SHA (safe name)
+      firmware_repo:
+        type: string
+        required: true   # e.g. org/firmware-repo
+      firmware_ref:
+        type: string
+        required: true   # refs/heads/main | refs/tags/v1.2.3
+      firmware_sha:
+        type: string
+        required: true   # 40-char SHA (safe name)
     secrets:
-      TOKEN: ${{ secrets.HIL_CROSS_REPO_PAT }}                        # PAT to read firmware repo if private
+      TOKEN:
+        required: false  # optional: caller can pass a token, otherwise we fall back to this repo's secret
 
   # For manual tests from the Actions UI (on Repo B)
   workflow_dispatch:
@@ -34,6 +41,7 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     timeout-minutes: 20
+
     steps:
       - name: Checkout HIL repo (this repo)
         uses: actions/checkout@v4
@@ -44,7 +52,8 @@ jobs:
           repository: ${{ inputs.firmware_repo }}
           ref: ${{ inputs.firmware_ref }}
           path: firmware-src
-          token: ${{ secrets.TOKEN }}
+          # Prefer TOKEN passed by caller; if empty, fall back to this repo's secret HIL_CROSS_REPO_PAT
+          token: ${{ secrets.TOKEN || secrets.HIL_CROSS_REPO_PAT }}
 
       - name: Build toolchain image
         run: docker build -t ifs08hil -f docker/Dockerfile docker
