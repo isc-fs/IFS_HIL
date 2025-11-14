@@ -62,7 +62,7 @@ jobs:
         run: |
           rm -rf firmware
           mkdir -p firmware
-          rsync -a --delete firmware-src/firmware/
+          rsync -a --delete firmware-src/  firmware/
       - name: Build firmware (FLASH)
         env:
           IMAGE: ifs08hil
