@@ -81,10 +81,8 @@ jobs:
       - name: Package artifacts (+ checksums)
         run: |
           mkdir -p artifacts
-          cp -v build/firmware.elf artifacts/ || true
           cp -v build/firmware.bin artifacts/ || true
           cp -v build/firmware.hex artifacts/ || true
-          cp -v build/firmware.map artifacts/ || true
           (cd artifacts && sha256sum * > SHA256SUMS.txt)
 
       - name: Upload artifacts
