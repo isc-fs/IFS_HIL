@@ -62,7 +62,7 @@ jobs:
         run: |
           rm -rf firmware
           mkdir -p firmware
-          rsync -a --delete firmware-src/firmware  firmware/
+          rsync -a --delete firmware-src/firmware/  firmware/
 
       - name: Debug firmware layout before build
         run: |
