@@ -59,8 +59,10 @@ jobs:
         run: docker build -t ifs08hil -f docker/Dockerfile docker
 
       - name: Sync firmware into expected layout
-        run: rsync -a --delete firmware-src/ firmware/
-
+        run: |
+          rm -rf firmware
+          mkdir -p firmware
+          rsync -a --delete firmware-src/firmware/
       - name: Build firmware (FLASH)
         env:
           IMAGE: ifs08hil
