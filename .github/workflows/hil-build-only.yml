@@ -63,6 +63,15 @@ jobs:
           rm -rf firmware
           mkdir -p firmware
           rsync -a --delete firmware-src/firmware  firmware/
+
+      - name: Debug firmware layout before build
+        run: |
+          echo "Root:"
+          ls
+          echo "firmware/:"
+          ls firmware || echo "no firmware dir"
+          echo "CMakeLists in firmware?"
+          test -f firmware/CMakeLists.txt && echo "FOUND" || echo "NOT FOUND"
       - name: Build firmware (FLASH)
         env:
           IMAGE: ifs08hil
