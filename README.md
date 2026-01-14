@@ -1,4 +1,4 @@
-# 🧠 IF08_HIL – Hardware-in-the-Loop Test Environment
+# IF08_HIL – Hardware-in-the-Loop Test Environment
 
 This project implements a **Hardware-in-the-Loop (HIL)** testing framework for an **STM32-based ECU**, fully automated through a **Raspberry Pi** acting as the test orchestrator.
 
@@ -20,7 +20,7 @@ This setup enables safe, repeatable testing of control logic and communication f
 
 ---
 
-## 🧩 System Architecture
+## System Architecture
 
 | Component | Role |
 |------------|------|
@@ -31,7 +31,7 @@ This setup enables safe, repeatable testing of control logic and communication f
 
 ---
 
-## 🧱 Repository Structure
+## Repository Structure
 
 Top-level repository layout and brief explanations:
 
