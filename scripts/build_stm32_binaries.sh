@@ -33,4 +33,11 @@ export PATH="/opt/toolchains/arm-gcc/bin:$PATH"
 cmake -S firmware -B build -G Ninja \
   -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN"
 cmake --build build -j
+
+# Ensure .bin and .hex exist — some firmware CMakeLists.txt only produce .elf
+find /workspace/build -maxdepth 1 -name "*.elf" | while read -r elf; do
+  echo "Converting $elf -> .hex / .bin"
+  arm-none-eabi-objcopy -O ihex   "$elf" "${elf%.elf}.hex"
+  arm-none-eabi-objcopy -O binary "$elf" "${elf%.elf}.bin"
+done
 '
