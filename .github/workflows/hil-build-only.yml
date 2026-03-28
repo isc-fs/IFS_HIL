@@ -1,84 +1,88 @@
 name: HIL Build Only
 
 on:
-  # Allow Repo A (or any caller) to trigger this workflow
+  # Allow any repo to trigger this workflow
   workflow_call:
     inputs:
       firmware_repo:
         type: string
-        required: true   # e.g. org/firmware-repo
+        required: true        # e.g. isc-fs/IFS08-DV
       firmware_ref:
         type: string
-        required: true   # refs/heads/main | refs/tags/v1.2.3
-      firmware_sha:
+        required: true        # refs/heads/main | refs/tags/v1.2.3 | SHA
+      firmware_subdir:
         type: string
-        required: true   # 40-char SHA (safe name)
+        required: false
+        default: ""           # subfolder inside the repo (e.g. IMU_TEST). Leave empty if firmware is at repo root.
     secrets:
       TOKEN:
-        required: false  # optional: caller can pass a token, otherwise we fall back to this repo's secret
+        required: false       # PAT for private repos; not needed for public repos
 
-  # For manual tests from the Actions UI (on Repo B)
+  # Manual trigger from GitHub Actions UI
   workflow_dispatch:
     inputs:
       firmware_repo:
-        description: "org/repo of firmware"
+        description: "org/repo of firmware (e.g. isc-fs/IFS08-DV)"
         required: true
         type: string
       firmware_ref:
-        description: "ref to build (refs/heads/branch or refs/tags/tag)"
+        description: "branch, tag, or SHA to build"
         required: true
         type: string
-      firmware_sha:
-        description: "commit SHA for artifact naming"
-        required: true
+      firmware_subdir:
+        description: "subfolder inside the repo containing CMakeLists.txt (e.g. IMU_TEST). Leave empty if at root."
+        required: false
         type: string
+        default: ""
 
 concurrency:
-  group: build-only-${{ inputs.firmware_sha }}
+  group: build-only-${{ inputs.firmware_repo }}-${{ inputs.firmware_ref }}
   cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-22.04
     timeout-minutes: 20
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
-      - name: Checkout HIL repo (this repo)
+      - name: Checkout HIL repo
         uses: actions/checkout@v4
 
-      - name: Checkout Firmware repo (Repo A)
+      - name: Checkout firmware repo
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.firmware_repo }}
           ref: ${{ inputs.firmware_ref }}
           path: firmware-src
-          # Prefer TOKEN passed by caller; if empty, fall back to this repo's secret HIL_CROSS_REPO_PAT
-          token: ${{ secrets.TOKEN || secrets.HIL_CROSS_REPO_PAT }}
-
-      - name: Build toolchain image
-        run: docker build -t ifs08hil -f docker/Dockerfile docker
+          persist-credentials: false
+          token: ${{ secrets.TOKEN || secrets.HIL_CROSS_REPO_PAT || github.token }}
 
       - name: Sync firmware into expected layout
         run: |
-          rm -rf firmware
-          mkdir -p firmware
-          rsync -a --delete firmware-src/firmware/  firmware/
+          SUBDIR="${{ inputs.firmware_subdir }}"
+          SRC="firmware-src${SUBDIR:+/$SUBDIR}/"
+          echo "Syncing from: $SRC"
+          rm -rf firmware && mkdir -p firmware
+          rsync -a --delete "$SRC" firmware/
 
-      - name: Debug firmware layout before build
+      - name: Verify firmware layout
         run: |
-          echo "Root:"
-          ls
-          echo "firmware/:"
-          ls firmware || echo "no firmware dir"
-          echo "CMakeLists in firmware?"
-          test -f firmware/CMakeLists.txt && echo "FOUND" || echo "NOT FOUND"
+          echo "firmware/ contents:"
+          ls firmware
+          test -f firmware/CMakeLists.txt && echo "CMakeLists.txt FOUND" || { echo "ERROR: CMakeLists.txt NOT FOUND"; exit 1; }
+
+      - name: Build toolchain Docker image
+        run: docker build -t ifs08hil -f docker/Dockerfile docker
+
       - name: Build firmware (FLASH)
         env:
           IMAGE: ifs08hil
           LD_VARIANT: FLASH
         run: bash scripts/build_stm32_binaries.sh
 
-      - name: Package artifacts (+ checksums)
+      - name: Package artifacts
         run: |
           mkdir -p artifacts
           cp -v build/firmware.bin artifacts/ || true
@@ -88,6 +92,6 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: firmware-${{ inputs.firmware_sha }}
+          name: firmware-${{ inputs.firmware_repo != '' && inputs.firmware_repo || 'unknown' }}-${{ inputs.firmware_ref }}
           path: artifacts
           retention-days: 14
