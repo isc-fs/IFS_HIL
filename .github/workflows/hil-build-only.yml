@@ -85,8 +85,7 @@ jobs:
       - name: Package artifacts
         run: |
           mkdir -p artifacts
-          cp -v build/firmware.bin artifacts/ || true
-          cp -v build/firmware.hex artifacts/ || true
+          find build -maxdepth 1 \( -name "*.bin" -o -name "*.hex" \) -exec cp -v {} artifacts/ \;
           (cd artifacts && sha256sum * > SHA256SUMS.txt)
 
       - name: Upload artifacts
