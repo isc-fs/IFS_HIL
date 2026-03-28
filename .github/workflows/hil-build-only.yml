@@ -88,9 +88,14 @@ jobs:
           find build -maxdepth 1 \( -name "*.bin" -o -name "*.hex" \) -exec cp -v {} artifacts/ \;
           (cd artifacts && sha256sum * > SHA256SUMS.txt)
 
+      - name: Set artifact name
+        run: |
+          SAFE_NAME="firmware-$(echo '${{ inputs.firmware_repo }}-${{ inputs.firmware_ref }}' | tr '/' '-')"
+          echo "ARTIFACT_NAME=$SAFE_NAME" >> $GITHUB_ENV
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: firmware-${{ inputs.firmware_repo != '' && inputs.firmware_repo || 'unknown' }}-${{ inputs.firmware_ref }}
+          name: ${{ env.ARTIFACT_NAME }}
           path: artifacts
           retention-days: 14
