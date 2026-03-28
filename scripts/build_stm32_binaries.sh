@@ -16,7 +16,21 @@ docker run --rm "${TTY_OPTS[@]}" \
   "$IMAGE" \
   bash -lc '
 set -euo pipefail
+
+# Use the firmware'\''s own toolchain file if present (e.g. CubeMX-generated),
+# otherwise fall back to the HIL default toolchain.
+if [ -f /workspace/firmware/cmake/gcc-arm-none-eabi.cmake ]; then
+  TOOLCHAIN=/workspace/firmware/cmake/gcc-arm-none-eabi.cmake
+  echo "Using firmware toolchain: $TOOLCHAIN"
+else
+  TOOLCHAIN=/workspace/docker/toolchain-arm-none-eabi.cmake
+  echo "Using HIL default toolchain: $TOOLCHAIN"
+fi
+
+# Ensure our pinned ARM toolchain is found first regardless of which cmake file is used
+export PATH="/opt/toolchains/arm-gcc/bin:$PATH"
+
 cmake -S firmware -B build -G Ninja \
-  -DCMAKE_TOOLCHAIN_FILE=/workspace/docker/toolchain-arm-none-eabi.cmake
+  -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN"
 cmake --build build -j
 '
