@@ -8,7 +8,7 @@ on:
       firmware_ref:  { type: string, required: true }  # refs/heads/main | refs/tags/v1.2.3
       firmware_sha:  { type: string, required: true }  # 40-char SHA (safe name)
     secrets:
-      TOKEN: { required: true }                         # PAT to read firmware repo if private
+      TOKEN: { required: false }                         # PAT to read firmware repo if private
 
   # For manual tests from the Actions UI (on Repo B)
   workflow_dispatch:
