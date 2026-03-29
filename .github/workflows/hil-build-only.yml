@@ -118,6 +118,26 @@ jobs:
           path: artifacts
           retention-days: 14
 
+      - name: Get artifact download URL
+        if: always() && inputs.pr_number != ''
+        id: artifact
+        uses: actions/github-script@v7
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const { data } = await github.rest.actions.listWorkflowRunArtifacts({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.runId,
+            });
+            const artifact = data.artifacts[0];
+            if (artifact) {
+              core.setOutput('url', `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}/artifacts/${artifact.id}`);
+              core.setOutput('name', artifact.name);
+            }
+
       - name: Post result back to PR
         if: always() && inputs.pr_number != ''
         uses: actions/github-script@v7
@@ -131,15 +151,23 @@ jobs:
             const status  = success ? 'succeeded' : 'failed';
             const subdir  = '${{ inputs.firmware_subdir }}' || '(root)';
             const runUrl  = `${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`;
+            const artifactUrl  = '${{ steps.artifact.outputs.url }}';
+            const artifactName = '${{ steps.artifact.outputs.name }}';
+
+            const lines = [
+              `${emoji} HIL build **${status}** for \`${subdir}\` at \`${{ inputs.firmware_ref }}\``,
+              ``,
+              `[View run →](${runUrl})`,
+            ];
+
+            if (success && artifactUrl) {
+              lines.push(``, `**Artifacts** (.hex + .bin + SHA256):`, `[⬇️ ${artifactName}](${artifactUrl})`);
+            }
 
             const [owner, repo] = '${{ inputs.pr_repo }}'.split('/');
             await github.rest.issues.createComment({
               owner,
               repo,
               issue_number: parseInt('${{ inputs.pr_number }}'),
-              body: [
-                `${emoji} HIL build **${status}** for \`${subdir}\` at \`${{ inputs.firmware_ref }}\``,
-                ``,
-                `[View run →](${runUrl})`,
-              ].join('\n')
+              body: lines.join('\n'),
             });
