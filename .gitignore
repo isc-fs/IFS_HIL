@@ -22,6 +22,9 @@ docker-compose.override.yml
 .vscode/
 .idea/
 
+# Claude Code
+.claude/
+
 # Prerequisites
 *.d
 
