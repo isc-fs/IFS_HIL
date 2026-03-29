@@ -111,7 +111,8 @@ jobs:
 
       - name: Set artifact name
         run: |
-          SAFE_NAME="firmware-$(echo '${{ inputs.firmware_repo }}-${{ inputs.firmware_ref }}' | tr '/' '-')"
+          SUBDIR="${{ inputs.firmware_subdir }}"
+          SAFE_NAME="${SUBDIR:-firmware-$(echo '${{ inputs.firmware_repo }}-${{ inputs.firmware_ref }}' | tr '/' '-')}"
           echo "ARTIFACT_NAME=$SAFE_NAME" >> $GITHUB_ENV
 
       - name: Upload artifacts
