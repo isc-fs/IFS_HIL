@@ -1,0 +1,142 @@
+name: HIL Flash
+
+# Flashes a pre-built firmware artifact to a target ECU via the CAN bootloader.
+# Runs directly on the Raspberry Pi self-hosted runner (label: hil-rpi), which
+# has SocketCAN (can0) wired to the backplane MCP2515 CAN 1 bus.
+#
+# Expected to be called by hil-build-only.yml after a successful build,
+# but can also be triggered manually from the GitHub Actions UI.
+
+on:
+  workflow_call:
+    inputs:
+      ecu_target:
+        type: string
+        required: true        # vcu | ams | microdv
+      artifact_name:
+        type: string
+        required: true        # artifact name from the build job (e.g. VCU)
+      firmware_ref:
+        type: string
+        required: false
+        default: ""
+      pr_repo:
+        type: string
+        required: false
+        default: ""           # repo to post the result back to (e.g. isc-fs/IFS08-CE)
+      pr_number:
+        type: string
+        required: false
+        default: ""           # PR number to comment the result on
+    secrets:
+      HIL_CROSS_REPO_PAT:
+        required: false
+
+  workflow_dispatch:
+    inputs:
+      ecu_target:
+        description: "Target ECU (vcu | ams | microdv)"
+        required: true
+        type: string
+      artifact_name:
+        description: "Artifact name from the build job (e.g. VCU)"
+        required: true
+        type: string
+      firmware_ref:
+        description: "Firmware ref for display purposes (branch, tag, or SHA)"
+        required: false
+        type: string
+        default: ""
+      pr_repo:
+        description: "repo to post the result back to (e.g. isc-fs/IFS08-CE)"
+        required: false
+        type: string
+        default: ""
+      pr_number:
+        description: "PR number to comment the result on"
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  flash:
+    runs-on: [self-hosted, hil-rpi]
+    timeout-minutes: 10
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout HIL repo
+        uses: actions/checkout@v4
+
+      - name: Install HIL tools
+        run: pip install --quiet -e ".[dev]" 2>/dev/null || pip install --quiet -e .
+
+      - name: Download firmware artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: artifacts
+
+      - name: Locate .bin file
+        id: fw
+        run: |
+          BIN=$(find artifacts -maxdepth 1 -name "*.bin" | head -1)
+          if [ -z "$BIN" ]; then
+            echo "ERROR: No .bin file found in artifact '${{ inputs.artifact_name }}'"
+            exit 1
+          fi
+          echo "path=$BIN" >> $GITHUB_OUTPUT
+          echo "Found firmware binary: $BIN ($(wc -c < "$BIN") bytes)"
+
+      - name: Validate ECU target
+        run: |
+          ECU="${{ inputs.ecu_target }}"
+          CONFIG="configs/ecu_${ECU}.yaml"
+          if [ ! -f "$CONFIG" ]; then
+            echo "ERROR: No config found for ECU '${ECU}' (looked for ${CONFIG})"
+            echo "Valid targets: vcu, ams, microdv"
+            exit 1
+          fi
+          echo "ECU config: $CONFIG"
+
+      - name: Flash firmware → ${{ inputs.ecu_target }}
+        id: flash
+        run: |
+          ECU="${{ inputs.ecu_target }}"
+          FW="${{ steps.fw.outputs.path }}"
+
+          echo "Target ECU : $ECU"
+          echo "Firmware   : $FW"
+          echo "CAN channel: can0"
+
+          python -m tools.flash "$FW" \
+            --channel can0 \
+            --verbose
+
+      - name: Post flash result to PR
+        if: always() && inputs.pr_number != ''
+        uses: actions/github-script@v7
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+        with:
+          github-token: ${{ secrets.HIL_CROSS_REPO_PAT }}
+          script: |
+            const success = '${{ job.status }}' === 'success';
+            const emoji   = success ? '🟢' : '🔴';
+            const status  = success ? 'succeeded' : 'failed';
+            const ecu     = '${{ inputs.ecu_target }}'.toUpperCase();
+            const ref     = '${{ inputs.firmware_ref }}';
+            const runUrl  = `${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`;
+
+            const [owner, repo] = '${{ inputs.pr_repo }}'.split('/');
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: parseInt('${{ inputs.pr_number }}'),
+              body: [
+                `${emoji} HIL flash **${status}** for \`${ecu}\` at \`${ref}\``,
+                ``,
+                `[View run →](${runUrl})`,
+              ].join('\n'),
+            });

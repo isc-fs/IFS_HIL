@@ -2,9 +2,16 @@ agent:
   poll_interval_seconds: 30
   workspace: /srv/hil
   scripts_dir: /srv/hil/scripts
-  firmware_build_dir: /srv/hil/build/firmware
+  firmware_build_dir: /srv/hil/build
   logs_dir: /srv/hil/logs
-  can_channel: can0
+  can_channel: can0          # default flash channel (CAN 1)
   targets:
-    - name: stm32f103
-      config: configs/ecu_stm32f103.yaml
+    - name: vcu
+      config: configs/ecu_vcu.yaml
+    - name: ams
+      config: configs/ecu_ams.yaml
+    - name: microdv
+      config: configs/ecu_microdv.yaml
+    - name: inverter
+      config: configs/ecu_inverter.yaml
+      enabled: false         # placeholder — not yet active

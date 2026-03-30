@@ -1,0 +1,14 @@
+ecu:
+  name: inverter
+  board: stm32h733zg
+  slot: MLC4
+  transport: can
+  can_channel: can0
+  enabled: false                # placeholder — not yet active
+  firmware:
+    binary: /srv/hil/build/inverter/firmware.bin
+    cmake_target: inverter_firmware
+  flash_tool: tools.flash:flash
+  reset_sequence:
+    - off
+    - on

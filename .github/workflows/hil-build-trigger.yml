@@ -2,7 +2,10 @@ name: HIL Build Trigger
 
 # This workflow lives in IFS08-CE (or any firmware repo).
 # A collaborator comments "/hil-build <subdir>" on a PR to kick off
-# a build in IFS08_HIL and get the artifacts posted back here.
+# a build + flash sequence in IFS08_HIL:
+#   1. Firmware is compiled in Docker (ubuntu runner)
+#   2. Artifact is flashed to the target ECU via CAN bootloader (hil-rpi runner)
+# Results are posted back to this PR.
 
 on:
   issue_comment:
@@ -107,8 +110,10 @@ jobs:
               repo: context.repo.repo,
               issue_number: context.issue.number,
               body: [
-                `🔨 HIL build triggered for \`${{ steps.parse.outputs.subdir }}\` at \`${{ steps.pr.outputs.sha }}\``,
+                `🔨 HIL build + flash triggered for \`${{ steps.parse.outputs.subdir }}\` at \`${{ steps.pr.outputs.sha }}\``,
                 ``,
-                `[View build →](https://github.com/isc-fs/IFS08_HIL/actions/workflows/hil-build-only.yml)`,
+                `**Sequence:** compile → upload artifact → flash via CAN bootloader`,
+                ``,
+                `[View run →](https://github.com/isc-fs/IFS08_HIL/actions/workflows/hil-build-only.yml)`,
               ].join('\n'),
             });

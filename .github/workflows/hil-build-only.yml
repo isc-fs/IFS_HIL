@@ -66,6 +66,9 @@ jobs:
       contents: read
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    outputs:
+      ecu_target:    ${{ steps.meta.outputs.ecu_target }}
+      artifact_name: ${{ steps.meta.outputs.artifact_name }}
 
     steps:
       - name: Checkout HIL repo
@@ -109,11 +112,15 @@ jobs:
           find build -maxdepth 1 \( -name "*.bin" -o -name "*.hex" \) -exec cp -v {} artifacts/ \;
           (cd artifacts && sha256sum * > SHA256SUMS.txt)
 
-      - name: Set artifact name
+      - name: Set artifact name and ECU target
+        id: meta
         run: |
           SUBDIR="${{ inputs.firmware_subdir }}"
           SAFE_NAME="${SUBDIR:-firmware-$(echo '${{ inputs.firmware_repo }}-${{ inputs.firmware_ref }}' | tr '/' '-')}"
+          ECU_TARGET=$(echo "$SUBDIR" | tr '[:upper:]' '[:lower:]')
           echo "ARTIFACT_NAME=$SAFE_NAME" >> $GITHUB_ENV
+          echo "artifact_name=$SAFE_NAME"  >> $GITHUB_OUTPUT
+          echo "ecu_target=$ECU_TARGET"    >> $GITHUB_OUTPUT
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -175,3 +182,16 @@ jobs:
               issue_number: parseInt('${{ inputs.pr_number }}'),
               body: lines.join('\n'),
             });
+
+  # ── Flash job — runs on the RPi self-hosted runner after a successful build ──
+  flash:
+    needs: build
+    if: needs.build.result == 'success' && needs.build.outputs.ecu_target != ''
+    uses: ./.github/workflows/hil-flash.yml
+    with:
+      ecu_target:    ${{ needs.build.outputs.ecu_target }}
+      artifact_name: ${{ needs.build.outputs.artifact_name }}
+      firmware_ref:  ${{ inputs.firmware_ref }}
+      pr_repo:       ${{ inputs.pr_repo }}
+      pr_number:     ${{ inputs.pr_number }}
+    secrets: inherit

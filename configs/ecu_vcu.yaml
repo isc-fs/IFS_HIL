@@ -1,0 +1,13 @@
+ecu:
+  name: vcu
+  board: stm32h733zg
+  slot: MLC1
+  transport: can
+  can_channel: can0
+  firmware:
+    binary: /srv/hil/build/vcu/firmware.bin
+    cmake_target: vcu_firmware
+  flash_tool: tools.flash:flash
+  reset_sequence:
+    - off
+    - on
