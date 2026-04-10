@@ -2,11 +2,14 @@
 I2C BUS TESTS
 =============
 Covers all I2C devices on the board:
-  - 3× INA226 power monitors (U1, U2, U4)
+  - 4× INA226 power monitors (U1, U2, U4, standby)
   - 3× TCA9555 I/O expanders (U3, U6, U8)
 
 Includes an auto-scan to detect which addresses actually respond,
 which helps verify the A0/A1/A2 strapping against hw_config.py.
+
+NOTE: probe uses write_byte (not read_byte) — TCA9555 NAKs read_byte
+on some kernels; write_byte reliably ACKs all 7 devices.
 """
 
 import pytest
@@ -21,12 +24,12 @@ from tools import hw_config as CFG
 class TestI2CScan:
     """Scan the I2C bus and report all responding addresses."""
 
-    def test_scan_finds_6_devices(self, i2c_bus, capsys):
-        """Expect exactly 6 devices: 3 INA226 + 3 TCA9555."""
+    def test_scan_finds_7_devices(self, i2c_bus, capsys):
+        """Expect exactly 7 devices: 4 INA226 + 3 TCA9555."""
         found = []
         for addr in range(0x08, 0x78):
             try:
-                i2c_bus.read_byte(addr)
+                i2c_bus.write_byte(addr, 0x00)
                 found.append(addr)
             except OSError:
                 pass
@@ -37,6 +40,7 @@ class TestI2CScan:
 
         expected = {
             CFG.INA226_ADDR_12V, CFG.INA226_ADDR_5V, CFG.INA226_ADDR_3V3,
+            CFG.INA226_ADDR_SBY,
             CFG.TCA9555_ADDR_0,  CFG.TCA9555_ADDR_1, CFG.TCA9555_ADDR_2,
         }
         missing = expected - set(found)
@@ -57,15 +61,15 @@ class TestI2CScan:
 # INA226 tests
 # ---------------------------------------------------------------------------
 
-_INA226_ADDRS = [CFG.INA226_ADDR_12V, CFG.INA226_ADDR_5V, CFG.INA226_ADDR_3V3]
-_INA226_NAMES = ["12V (U4)", "5V (U2)", "3V3 (U1)"]
+_INA226_ADDRS = [CFG.INA226_ADDR_12V, CFG.INA226_ADDR_5V, CFG.INA226_ADDR_3V3, CFG.INA226_ADDR_SBY]
+_INA226_NAMES = ["12V (U4)", "5V (U2)", "3V3 (U1)", "SBY"]
 
 _MFR_ID_EXPECTED  = 0x5449
 _DIE_ID_EXPECTED  = 0x2260
 
 
 class TestINA226:
-    @pytest.mark.parametrize("idx", range(3), ids=_INA226_NAMES)
+    @pytest.mark.parametrize("idx", range(4), ids=_INA226_NAMES)
     def test_manufacturer_id(self, power_monitors, idx):
         mon = power_monitors[idx]
         if not mon.is_present():
@@ -76,7 +80,7 @@ class TestINA226:
             f"expected 0x{_MFR_ID_EXPECTED:04X} ('TI')"
         )
 
-    @pytest.mark.parametrize("idx", range(3), ids=_INA226_NAMES)
+    @pytest.mark.parametrize("idx", range(4), ids=_INA226_NAMES)
     def test_die_id(self, power_monitors, idx):
         mon = power_monitors[idx]
         if not mon.is_present():
@@ -87,7 +91,7 @@ class TestINA226:
             f"expected 0x{_DIE_ID_EXPECTED:04X}"
         )
 
-    @pytest.mark.parametrize("idx", range(3), ids=_INA226_NAMES)
+    @pytest.mark.parametrize("idx", range(4), ids=_INA226_NAMES)
     def test_bus_voltage_positive(self, power_monitors, idx):
         mon = power_monitors[idx]
         if not mon.is_present():

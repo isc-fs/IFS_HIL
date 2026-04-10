@@ -52,13 +52,15 @@ class DAC80504:
         GPIO.output(self._cs, GPIO.HIGH)
 
     def _read_reg(self, addr: int) -> int:
+        # DAC80504 SPI read: data is returned in the SAME 24-bit frame as the
+        # read command (MISO valid during the read request transaction).
+        # NOTE: The datasheet describes a pipelined two-frame protocol, but
+        # hardware testing showed the pipelined approach (sending a NOOP after
+        # the read command) returns 0x0000. Single-frame reads return correct
+        # data. If readback still fails, check DAC MISO routing on the PCB.
         header = 0x80 | (addr & 0x0F)  # RW=1 (read)
         GPIO.output(self._cs, GPIO.LOW)
-        self._spi.xfer2([header, 0x00, 0x00])   # send read request
-        GPIO.output(self._cs, GPIO.HIGH)
-        # Clock out the result on the next transaction (NOOP)
-        GPIO.output(self._cs, GPIO.LOW)
-        resp = self._spi.xfer2([0x00, 0x00, 0x00])  # NOOP shifts out result
+        resp = self._spi.xfer2([header, 0x00, 0x00])
         GPIO.output(self._cs, GPIO.HIGH)
         return (resp[1] << 8) | resp[2]
 

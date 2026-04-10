@@ -43,7 +43,10 @@ class INA226:
         self._addr = addr
         self._shunt_ohm = shunt_ohm
         self._current_lsb = max_current_A / 32768.0
-        self._configure()
+        try:
+            self._configure()
+        except OSError:
+            pass  # device absent or +3V3_SBY not up — is_present() returns False
 
     # ------------------------------------------------------------------
     # Register I/O

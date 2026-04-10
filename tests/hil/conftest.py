@@ -6,7 +6,12 @@ Run with: pytest tests/hil/ -v --tb=short
 
 Pre-requisites on the RPi:
   sudo raspi-config  →  Interface Options → SPI (enable) → I2C (enable)
+  sudo modprobe i2c-dev  (add 'i2c-dev' to /etc/modules for persistence)
   pip install spidev smbus2 RPi.GPIO pytest
+
+NOTE: The SPI MISO buffer (IC1 SN74LVC125A) is hardware-controlled.
+  Buffer ~OE is driven LOW by Q5 NMOS when ATX PWR_OK is HIGH.
+  No GPIO management is required — just ensure PSU is on before SPI tests.
 """
 
 import time
@@ -35,26 +40,26 @@ ALL_CS_PINS = [
     CFG.NRF24_CS,
 ]
 
-OUTPUT_PINS = ALL_CS_PINS + [CFG.SPI_GATE_OE, CFG.NRF24_CE]
+OUTPUT_PINS = ALL_CS_PINS + [CFG.NRF24_CE]
 
 
 @pytest.fixture(scope="session", autouse=True)
 def gpio_setup():
-    """Initialise BCM GPIO numbering and set all CS/OE pins to safe states."""
+    """Initialise BCM GPIO numbering and set all CS/CE pins to safe states."""
     GPIO.setmode(GPIO.BCM)
     GPIO.setwarnings(False)
 
     for pin in OUTPUT_PINS:
         GPIO.setup(pin, GPIO.OUT)
-        GPIO.output(pin, GPIO.HIGH)   # CS deselected (active-low), OE inactive
+        GPIO.output(pin, GPIO.HIGH)   # CS deselected (active-low)
 
-    # Input pins (CAN interrupts, power-good)
-    for pin in [CFG.INT_CAN1, CFG.INT_CAN2, CFG.INT_CAN3]:
+    # Input pins (CAN interrupts, nRF24 IRQ, power-good)
+    for pin in [CFG.INT_CAN1, CFG.INT_CAN2, CFG.INT_CAN3, CFG.NRF24_IRQ]:
         GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
     GPIO.setup(CFG.PWR_OK, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
 
-    # Enable the SPI MISO buffer gate
-    GPIO.output(CFG.SPI_GATE_OE, GPIO.HIGH)
+    # SPI_GATE_OE is hardware-controlled (PWR_OK → Q5 NMOS → IC1 ~OE).
+    # No GPIO action needed — buffer is enabled automatically when PSU is on.
 
     yield
 
@@ -65,7 +70,32 @@ def gpio_setup():
 
 
 @pytest.fixture(scope="session")
-def spi_bus(gpio_setup):
+def psu_on(gpio_setup):
+    """Power on the ATX PSU and wait for PWR_OK, then yield; power off on teardown."""
+    GPIO.setup(CFG.PSU_ON, GPIO.OUT)
+    GPIO.output(CFG.PSU_ON, GPIO.LOW)   # assert PS_ON# → PSU on
+
+    import time
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        if GPIO.input(CFG.PWR_OK):
+            break
+        time.sleep(0.05)
+
+    if not GPIO.input(CFG.PWR_OK):
+        pytest.fail(
+            f"ATX PSU did not assert PWR_OK (GPIO{CFG.PWR_OK}) within 5 s. "
+            "Check PSU cable and PS_ON# wiring."
+        )
+
+    time.sleep(0.3)   # let rails settle and MISO buffer enable
+    yield
+
+    GPIO.output(CFG.PSU_ON, GPIO.HIGH)  # deassert → PSU off
+
+
+@pytest.fixture(scope="session")
+def spi_bus(gpio_setup, psu_on):
     """Open SPI0.0 at 1 MHz mode 0; yields the open SpiDev instance."""
     bus = spidev.SpiDev()
     bus.open(CFG.SPI_BUS, CFG.SPI_DEVICE)
@@ -78,7 +108,7 @@ def spi_bus(gpio_setup):
 
 
 @pytest.fixture(scope="session")
-def i2c_bus(gpio_setup):
+def i2c_bus(gpio_setup, psu_on):
     """Open I2C bus 1 (/dev/i2c-1, GPIO2/GPIO3); yields the SMBus instance."""
     bus = smbus2.SMBus(CFG.I2C_BUS)
     time.sleep(0.05)
@@ -121,9 +151,10 @@ def can_controllers(spi_bus):
 @pytest.fixture(scope="session")
 def power_monitors(i2c_bus):
     return [
-        INA226(i2c_bus, CFG.INA226_ADDR_12V, CFG.INA226_SHUNT_OHM),
-        INA226(i2c_bus, CFG.INA226_ADDR_5V,  CFG.INA226_SHUNT_OHM),
-        INA226(i2c_bus, CFG.INA226_ADDR_3V3, CFG.INA226_SHUNT_OHM),
+        INA226(i2c_bus, CFG.INA226_ADDR_12V,  CFG.INA226_SHUNT_OHM),
+        INA226(i2c_bus, CFG.INA226_ADDR_5V,   CFG.INA226_SHUNT_OHM),
+        INA226(i2c_bus, CFG.INA226_ADDR_3V3,  CFG.INA226_SHUNT_OHM),
+        INA226(i2c_bus, CFG.INA226_ADDR_SBY,  CFG.INA226_SHUNT_OHM),
     ]
 
 
