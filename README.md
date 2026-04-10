@@ -4,7 +4,7 @@ This project implements a **Hardware-in-the-Loop (HIL)** testing framework for a
 
 It allows continuous integration of embedded firmware by automatically:
 1. Building new firmware revisions inside a reproducible Docker container.
-2. Flashing the ECU through OpenOCD or DFU.
+2. Flashing the ECU through custom CAN bootloader or USB DFU.
 3. Simulating its environment (sensors, faults, CAN messages).
 4. Running automated functional tests.
 5. Producing structured reports for validation and regression tracking.
