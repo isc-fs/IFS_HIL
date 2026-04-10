@@ -11,6 +11,10 @@ requires-python = ">=3.10"
 dependencies = [
     "typer>=0.9",
     "pytest>=7.4",
+    "pytest-html>=4.0",
+    "spidev>=3.5",
+    "smbus2>=0.4",
+    "RPi.GPIO>=0.7",
 ]
 
 [project.scripts]
