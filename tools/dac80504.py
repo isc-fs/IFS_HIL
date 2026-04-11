@@ -17,8 +17,9 @@ _REG_DAC_B    = 0x09
 _REG_DAC_C    = 0x0A
 _REG_DAC_D    = 0x0B
 
-# Expected Device ID value (lower 14 bits of DEVID register)
-_DEVID_EXPECTED = 0x0295   # DAC80504 product ID
+# Expected Device ID value (lower 14 bits of DEVID register).
+# Confirmed by direct read in SPI mode 1: bits [13:2] = 0x105, version = 3.
+_DEVID_EXPECTED = 0x0417   # DAC80504 product ID (rev 3)
 
 _DAC_REGS = [_REG_DAC_A, _REG_DAC_B, _REG_DAC_C, _REG_DAC_D]
 
@@ -44,24 +45,36 @@ class DAC80504:
     # Low-level register access
     # ------------------------------------------------------------------
 
+    def _xfer(self, pkt: list) -> list:
+        """
+        Execute a 24-bit SPI transaction in mode 1 (CPOL=0, CPHA=1).
+
+        The DAC80504 drives SDO on the rising edge of SCLK; the master must
+        therefore sample on the falling edge — that is SPI mode 1.  The shared
+        spi_bus is opened in mode 0 for the CAN and ADC devices; we switch
+        mode around each DAC transaction and restore it afterwards.
+        """
+        old_mode = self._spi.mode
+        self._spi.mode = 0b01          # mode 1: CPOL=0, CPHA=1
+        GPIO.output(self._cs, GPIO.LOW)
+        resp = self._spi.xfer2(pkt)
+        GPIO.output(self._cs, GPIO.HIGH)
+        self._spi.mode = old_mode
+        return resp
+
     def _write_reg(self, addr: int, data: int) -> None:
         header = addr & 0x0F          # RW=0 (write), RESERVED=0, ADDR
-        pkt = [header, (data >> 8) & 0xFF, data & 0xFF]
-        GPIO.output(self._cs, GPIO.LOW)
-        self._spi.xfer2(pkt)
-        GPIO.output(self._cs, GPIO.HIGH)
+        self._xfer([header, (data >> 8) & 0xFF, data & 0xFF])
 
     def _read_reg(self, addr: int) -> int:
-        # DAC80504 SPI read: data is returned in the SAME 24-bit frame as the
-        # read command (MISO valid during the read request transaction).
-        # NOTE: The datasheet describes a pipelined two-frame protocol, but
-        # hardware testing showed the pipelined approach (sending a NOOP after
-        # the read command) returns 0x0000. Single-frame reads return correct
-        # data. If readback still fails, check DAC MISO routing on the PCB.
+        # DAC80504 uses a pipelined SPI read: send a READ command in frame N,
+        # then send a NOP in frame N+1; MISO during frame N+1 carries the data.
+        # CS is deasserted between frames (each frame is a separate transaction).
+        # This requires mode 1 so MISO is sampled on the falling edge of SCLK,
+        # one full half-period after the DAC drives SDO on the rising edge.
         header = 0x80 | (addr & 0x0F)  # RW=1 (read)
-        GPIO.output(self._cs, GPIO.LOW)
-        resp = self._spi.xfer2([header, 0x00, 0x00])
-        GPIO.output(self._cs, GPIO.HIGH)
+        self._xfer([header, 0x00, 0x00])          # frame N: issue read command
+        resp = self._xfer([_REG_NOOP, 0x00, 0x00])  # frame N+1: NOP, capture data
         return (resp[1] << 8) | resp[2]
 
     # ------------------------------------------------------------------
@@ -69,7 +82,7 @@ class DAC80504:
     # ------------------------------------------------------------------
 
     def read_device_id(self) -> int:
-        """Read the DEVID register; expected lower 14 bits = 0x0295."""
+        """Read the DEVID register; expected lower 14 bits = 0x0417."""
         return self._read_reg(_REG_DEVID) & 0x3FFF
 
     def reset(self) -> None:
