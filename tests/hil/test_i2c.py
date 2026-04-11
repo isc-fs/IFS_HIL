@@ -39,9 +39,9 @@ class TestI2CScan:
                   + ", ".join(f"0x{a:02X}" for a in found))
 
         expected = {
-            CFG.INA226_ADDR_12V, CFG.INA226_ADDR_5V, CFG.INA226_ADDR_3V3,
-            CFG.INA226_ADDR_SBY,
-            CFG.TCA9555_ADDR_0,  CFG.TCA9555_ADDR_1, CFG.TCA9555_ADDR_2,
+            CFG.INA226_ADDR_MLC1, CFG.INA226_ADDR_MLC2,
+            CFG.INA226_ADDR_MLC3, CFG.INA226_ADDR_MLC4,
+            CFG.TCA9555_ADDR_0,   CFG.TCA9555_ADDR_1, CFG.TCA9555_ADDR_2,
         }
         missing = expected - set(found)
         unexpected = set(found) - expected
@@ -61,8 +61,9 @@ class TestI2CScan:
 # INA226 tests
 # ---------------------------------------------------------------------------
 
-_INA226_ADDRS = [CFG.INA226_ADDR_12V, CFG.INA226_ADDR_5V, CFG.INA226_ADDR_3V3, CFG.INA226_ADDR_SBY]
-_INA226_NAMES = ["12V (U4)", "5V (U2)", "3V3 (U1)", "SBY"]
+_INA226_ADDRS = [CFG.INA226_ADDR_MLC1, CFG.INA226_ADDR_MLC2,
+                 CFG.INA226_ADDR_MLC3, CFG.INA226_ADDR_MLC4]
+_INA226_NAMES = ["MLC1", "MLC2", "MLC3", "MLC4"]
 
 _MFR_ID_EXPECTED  = 0x5449
 _DIE_ID_EXPECTED  = 0x2260
