@@ -90,8 +90,8 @@ def psu_on(gpio_setup):
 
     time.sleep(0.3)   # let rails settle and MISO buffer enable
     yield
-
-    GPIO.output(CFG.PSU_ON, GPIO.HIGH)  # deassert → PSU off
+    # PSU is intentionally left ON after the test session ends.
+    # De-assert manually (GPIO7 HIGH) only when the bench is being powered down.
 
 
 @pytest.fixture(scope="session")

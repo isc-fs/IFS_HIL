@@ -17,6 +17,17 @@ import pytest
 from tools import hw_config as CFG
 
 
+@pytest.fixture(autouse=True)
+def skip_if_no_nrf24(nrf24):
+    """Skip every test in this module when the nRF24L01 module is not seated."""
+    if not nrf24.is_present():
+        pytest.skip(
+            f"nRF24L01 module not connected — "
+            f"CS=GPIO{CFG.NRF24_CS}, CE=GPIO{CFG.NRF24_CE}. "
+            "Seat the module and re-run to enable nRF24 tests."
+        )
+
+
 class TestNRF24Presence:
     """Verify the nRF24L01 responds on SPI."""
 
