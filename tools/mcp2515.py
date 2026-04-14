@@ -110,7 +110,15 @@ class MCP2515:
         return self._read_reg(_CANSTAT) & _MODE_MASK
 
     def set_mode(self, mode: int, timeout: float = 0.1) -> bool:
-        """Request a mode change and wait until confirmed. Returns True on success."""
+        """Request a mode change and wait until confirmed. Returns True on success.
+
+        If the chip is currently in sleep mode, a hardware reset is issued first
+        to restart the oscillator before applying the requested mode.
+        """
+        if self.get_mode() == _MODE_SLEEP:
+            self.reset()          # brings chip to CONFIG reliably (~10 ms)
+            if mode == _MODE_CONFIG:
+                return True
         self._bit_modify(_CANCTRL, _MODE_MASK, mode)
         deadline = time.time() + timeout
         while time.time() < deadline:
