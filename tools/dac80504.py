@@ -40,6 +40,24 @@ class DAC80504:
         self._spi = spi
         self._cs = cs_pin
         self._vref = vref
+        # Power down the internal 2.5 V reference.  The board supplies an
+        # external 3.3 V reference on VREF.  With REF-PWR-DOWN = 0 (reset
+        # default) the internal reference is active and contests the external
+        # source on the same pin, setting STATUS.REF_ALM and making outputs
+        # unpredictable.  CONFIG bit 8 = 1 disconnects the internal reference.
+        self._write_reg(_REG_CONFIG, 0x0100)
+        # Enable asynchronous updates for all channels so that writes to DAC
+        # registers take effect immediately.  The reset default is 0x000F
+        # (synchronous), which requires an LDAC edge to latch the output —
+        # LDAC is tied LOW on this board so the edge never occurs.
+        self._write_reg(_REG_SYNC, 0x0000)
+        # Configure GAIN register for 0–VREF output range.
+        # REF-DIV (bit 8) = 1: the internal reference divider is active, so the
+        # reference reaching the output stage is VREF/2.  Setting BUFF-GAIN = 1
+        # (×2) for all four channels restores full-scale: 2×(VREF/2)×D/65536 =
+        # VREF×D/65536.  Reset default 0x0000 leaves BUFF-GAIN=0 (×1) which
+        # caps the output at VREF/2 ≈ 1.65 V.
+        self._write_reg(_REG_GAIN, 0x010F)
 
     # ------------------------------------------------------------------
     # Low-level register access

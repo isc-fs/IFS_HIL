@@ -151,10 +151,10 @@ def can_controllers(spi_bus):
 @pytest.fixture(scope="session")
 def power_monitors(i2c_bus):
     return [
-        INA226(i2c_bus, CFG.INA226_ADDR_12V,  CFG.INA226_SHUNT_OHM),
-        INA226(i2c_bus, CFG.INA226_ADDR_5V,   CFG.INA226_SHUNT_OHM),
-        INA226(i2c_bus, CFG.INA226_ADDR_3V3,  CFG.INA226_SHUNT_OHM),
-        INA226(i2c_bus, CFG.INA226_ADDR_SBY,  CFG.INA226_SHUNT_OHM),
+        INA226(i2c_bus, CFG.INA226_ADDR_MLC1, CFG.INA226_SHUNT_OHM),
+        INA226(i2c_bus, CFG.INA226_ADDR_MLC2, CFG.INA226_SHUNT_OHM),
+        INA226(i2c_bus, CFG.INA226_ADDR_MLC3, CFG.INA226_SHUNT_OHM),
+        INA226(i2c_bus, CFG.INA226_ADDR_MLC4, CFG.INA226_SHUNT_OHM),
     ]
 
 
