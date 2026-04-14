@@ -81,6 +81,11 @@
   .card-body { padding: 12px 14px; }
 
   /* ---- PSU card ---- */
+  .psu-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
   #psu-status { font-size: 22px; font-weight: bold; }
   #psu-status.ok  { color: var(--green); }
   #psu-status.err { color: var(--red); }
@@ -99,6 +104,10 @@
   .ok-val  { color: var(--green); }
   .muted   { color: var(--muted); }
 
+  /* ---- Overcurrent row highlight ---- */
+  tr.overcurrent td { background: rgba(239,68,68,0.12); color: var(--red); }
+  tr.overcurrent .toggle-label { color: var(--red); }
+
   /* ---- Channel grid (ADC/DAC) ---- */
   .ch-grid {
     display: grid;
@@ -114,6 +123,53 @@
   .ch-label { color: var(--muted); font-size: 10px; }
   .ch-val   { font-size: 13px; }
 
+  /* ---- DAC setpoint input ---- */
+  .dac-input-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 4px;
+  }
+  .dac-input-row input[type=number] {
+    width: 68px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 11px;
+    padding: 2px 4px;
+    outline: none;
+  }
+  .dac-input-row input[type=number]:focus { border-color: var(--blue); }
+  .btn-set {
+    background: #1e3a5f;
+    border: 1px solid var(--blue);
+    border-radius: 3px;
+    color: var(--blue);
+    font-family: var(--font);
+    font-size: 10px;
+    padding: 2px 6px;
+    cursor: pointer;
+  }
+  .btn-set:hover { background: #2a4f80; }
+  .btn-set:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* ---- CAN mode selector ---- */
+  .can-select {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 11px;
+    padding: 2px 4px;
+    outline: none;
+    cursor: pointer;
+  }
+  .can-select:focus { border-color: var(--blue); }
+  .can-select:disabled { opacity: 0.4; cursor: not-allowed; }
+
   /* ---- Port bits (TCA9555) ---- */
   .bits {
     display: flex; gap: 3px; flex-wrap: wrap; margin-top: 4px;
@@ -126,6 +182,26 @@
   .bit.hi { background: var(--green); color: #000; }
   .bit.lo { background: var(--bg);    color: var(--muted); }
   .port-label { color: var(--muted); font-size: 10px; margin-top: 8px; margin-bottom: 2px; }
+
+  /* ---- Carrier power toggle ---- */
+  .toggle-wrap { display: flex; align-items: center; gap: 8px; }
+  .toggle { position: relative; display: inline-block; width: 36px; height: 20px; flex-shrink: 0; }
+  .toggle input { opacity: 0; width: 0; height: 0; }
+  .slider {
+    position: absolute; inset: 0; cursor: pointer;
+    background: var(--border); border-radius: 20px;
+    transition: background 0.2s;
+  }
+  .slider::before {
+    content: ''; position: absolute;
+    width: 14px; height: 14px; left: 3px; top: 3px;
+    background: var(--muted); border-radius: 50%;
+    transition: transform 0.2s, background 0.2s;
+  }
+  .toggle input:checked + .slider { background: #16532d; }
+  .toggle input:checked + .slider::before { transform: translateX(16px); background: var(--green); }
+  .toggle input:disabled + .slider { opacity: 0.4; cursor: not-allowed; }
+  .toggle-label { font-size: 11px; color: var(--muted); min-width: 22px; }
 
   /* ---- Placeholder ---- */
   .placeholder { color: var(--muted); font-style: italic; padding: 8px 0; }
@@ -147,38 +223,51 @@
 
 <script>
 const POLL_MS = 2000;
+const CAN_MODES = ['normal','sleep','loopback','listenonly','config'];
 
-function dot(ok) {
-  return `<span class="dot ${ok ? 'ok' : 'err'}"></span>`;
+function dot(ok, warn) {
+  const cls = warn ? 'warn' : (ok ? 'ok' : 'err');
+  return `<span class="dot ${cls}"></span>`;
 }
 
 function fmtErr(name) {
-  return `<tr><td colspan="5" class="err-val">&#9888; ${name}: not responding</td></tr>`;
+  return `<tr><td colspan="6" class="err-val">&#9888; ${name}: not responding</td></tr>`;
 }
 
 // ---- Renderers ----
 
 function renderPSU(psu) {
   const ok = psu && psu.ok;
+  const on = psu && psu.on;
   return `
     <div class="card">
       <div class="card-header">${dot(ok)} ATX PSU</div>
       <div class="card-body">
-        <div id="psu-status" class="${ok ? 'ok' : 'err'}">${ok ? 'PWR_OK' : 'NO POWER'}</div>
+        <div class="psu-row">
+          <div id="psu-status" class="${ok ? 'ok' : 'err'}">${ok ? 'PWR_OK' : 'NO POWER'}</div>
+          <label class="toggle" title="PSU power">
+            <input type="checkbox" id="psu-toggle" ${on ? 'checked' : ''} onchange="togglePSU(this)">
+            <span class="slider"></span>
+          </label>
+        </div>
       </div>
     </div>`;
 }
 
-function renderCAN(cans) {
-  const rows = cans.map(c => {
+function renderCAN(cans, psuOn) {
+  const rows = cans.map((c, i) => {
     if (!c.ok) return fmtErr(c.name);
     const tecClass = c.tec > 0 ? 'err-val' : 'ok-val';
     const recClass = c.rec > 0 ? 'err-val' : 'ok-val';
+    const options = CAN_MODES.map(m =>
+      `<option value="${m}" ${m === c.mode ? 'selected' : ''}>${m}</option>`
+    ).join('');
     return `<tr>
       <td class="val">${c.name}</td>
-      <td class="muted">${c.mode}</td>
       <td class="${tecClass}">TEC&nbsp;${c.tec}</td>
       <td class="${recClass}">REC&nbsp;${c.rec}</td>
+      <td><select class="can-select" ${psuOn ? '' : 'disabled'}
+            onchange="setCANMode(${i}, this)">${options}</select></td>
     </tr>`;
   }).join('');
   const allOk = cans.every(c => c.ok);
@@ -186,7 +275,10 @@ function renderCAN(cans) {
     <div class="card">
       <div class="card-header">${dot(allOk)} CAN Controllers</div>
       <div class="card-body">
-        <table><tbody>${rows}</tbody></table>
+        <table>
+          <thead><tr><th>Controller</th><th>TEC</th><th>REC</th><th>Mode</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
       </div>
     </div>`;
 }
@@ -208,12 +300,20 @@ function renderADC(adcs) {
     </div>`;
 }
 
-function renderDAC(dacs) {
-  const sections = dacs.map(d => {
+function renderDAC(dacs, psuOn) {
+  const sections = dacs.map((d, di) => {
     const header = `<div class="card-header" style="border-top:1px solid var(--border)">${dot(d.ok)} ${d.name}</div>`;
     if (!d.ok) return header + `<div class="card-body"><span class="err-val">&#9888; not responding</span></div>`;
-    const cells = d.channels.map((v, i) =>
-      `<div class="ch-cell"><div class="ch-label">ch${i}</div><div class="ch-val">${v.toFixed(3)}&nbsp;V</div></div>`
+    const cells = d.channels.map((v, ch) =>
+      `<div class="ch-cell">
+        <div class="ch-label">ch${ch}</div>
+        <div class="ch-val">${v.toFixed(3)}&nbsp;V</div>
+        <div class="dac-input-row">
+          <input type="number" min="0" max="3.3" step="0.001" value="${v.toFixed(3)}"
+                 id="dac-${di}-${ch}" ${psuOn ? '' : 'disabled'}>
+          <button class="btn-set" onclick="setDAC(${di},${ch},this)" ${psuOn ? '' : 'disabled'}>Set</button>
+        </div>
+      </div>`
     ).join('');
     return header + `<div class="card-body"><div class="ch-grid">${cells}</div></div>`;
   }).join('');
@@ -225,28 +325,127 @@ function renderDAC(dacs) {
     </div>`;
 }
 
-function renderPower(power) {
-  const rows = power.map(p => {
-    if (!p.present) return `<tr><td class="val">${p.name}</td><td colspan="3" class="muted">not present</td></tr>`;
-    const iClass = Math.abs(p.current_mA) > 1000 ? 'err-val' : 'val';
-    return `<tr>
+function renderPower(power, psuOn) {
+  const hasOC = power.some(p => p.overcurrent);
+  const rows = power.map((p, i) => {
+    const slot = i + 1;
+    const checked = p.relay_on ? 'checked' : '';
+    const disabled = psuOn ? '' : 'disabled';
+    const toggle = `
+      <label class="toggle">
+        <input type="checkbox" ${checked} ${disabled} onchange="toggleCarrier(${slot}, this)">
+        <span class="slider"></span>
+      </label>
+      <span class="toggle-label">${p.relay_on ? 'ON' : 'OFF'}</span>`;
+    const ocClass = p.overcurrent ? ' class="overcurrent"' : '';
+    if (!p.present)
+      return `<tr${ocClass}>
+        <td class="val">${p.name}</td>
+        <td colspan="3" class="muted">not present</td>
+        <td><div class="toggle-wrap">${toggle}</div></td>
+      </tr>`;
+    const iClass = p.overcurrent ? 'err-val' : (Math.abs(p.current_mA) > 500 ? 'err-val' : 'val');
+    return `<tr${ocClass}>
       <td class="val">${p.name}</td>
-      <td class="${iClass}">${p.current_mA.toFixed(1)}&nbsp;mA</td>
+      <td class="${iClass}">${p.current_mA.toFixed(1)}&nbsp;mA${p.overcurrent ? ' &#9888;' : ''}</td>
       <td class="val">${p.power_mW.toFixed(1)}&nbsp;mW</td>
       <td class="muted">${p.shunt_mV.toFixed(2)}&nbsp;mV</td>
+      <td><div class="toggle-wrap">${toggle}</div></td>
     </tr>`;
   }).join('');
   const allOk = power.every(p => p.ok);
   return `
     <div class="card">
-      <div class="card-header">${dot(allOk)} MLC Carrier Power &mdash; INA226</div>
+      <div class="card-header">${dot(allOk && !hasOC, hasOC)} MLC Carrier Power &mdash; INA226</div>
       <div class="card-body">
         <table>
-          <thead><tr><th>Carrier</th><th>Current</th><th>Power</th><th>Shunt</th></tr></thead>
+          <thead><tr><th>Carrier</th><th>Current</th><th>Power</th><th>Shunt</th><th>Power&nbsp;on</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>
     </div>`;
+}
+
+function toggleCarrier(slot, checkbox) {
+  checkbox.disabled = true;
+  fetch(`/api/carrier/${slot}/power`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({on: checkbox.checked}),
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.error) { checkbox.checked = !checkbox.checked; }
+    checkbox.disabled = false;
+    const label = checkbox.closest('tr').querySelector('.toggle-label');
+    if (label) label.textContent = checkbox.checked ? 'ON' : 'OFF';
+  })
+  .catch(() => {
+    checkbox.checked = !checkbox.checked;
+    checkbox.disabled = false;
+  });
+}
+
+function togglePSU(checkbox) {
+  checkbox.disabled = true;
+  fetch('/api/psu/power', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({on: checkbox.checked}),
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.error) {
+      checkbox.checked = !checkbox.checked;
+      alert('PSU error: ' + data.error);
+    }
+    checkbox.disabled = false;
+  })
+  .catch(() => {
+    checkbox.checked = !checkbox.checked;
+    checkbox.disabled = false;
+  });
+}
+
+function setDAC(dacIdx, ch, btn) {
+  const input = document.getElementById(`dac-${dacIdx}-${ch}`);
+  const voltage = parseFloat(input.value);
+  if (isNaN(voltage) || voltage < 0 || voltage > 3.3) {
+    input.style.borderColor = 'var(--red)';
+    return;
+  }
+  input.style.borderColor = '';
+  btn.disabled = true;
+  fetch(`/api/dac/${dacIdx}/channel/${ch}`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({voltage}),
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.error) {
+      input.style.borderColor = 'var(--red)';
+    }
+    btn.disabled = false;
+  })
+  .catch(() => { btn.disabled = false; });
+}
+
+function setCANMode(canIdx, sel) {
+  sel.disabled = true;
+  fetch(`/api/can/${canIdx}/mode`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({mode: sel.value}),
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.error) {
+      alert('CAN mode error: ' + data.error);
+    }
+    sel.disabled = false;
+  })
+  .catch(() => { sel.disabled = false; });
 }
 
 function renderIO(io) {
@@ -285,14 +484,31 @@ function renderNRF(nrf) {
 // ---- Poll ----
 
 function render(data) {
+  // Save DAC input values and active element before wiping the DOM
+  const savedInputs = {};
+  document.querySelectorAll('[id^="dac-"]').forEach(el => {
+    savedInputs[el.id] = el.value;
+  });
+  const activeId = document.activeElement ? document.activeElement.id : null;
+
+  const psuOn = !!(data.psu && data.psu.on);
   document.getElementById('main').innerHTML =
     renderPSU(data.psu) +
-    renderCAN(data.can) +
-    renderPower(data.power) +
+    renderCAN(data.can, psuOn) +
+    renderPower(data.power, psuOn) +
     renderIO(data.io) +
     renderNRF(data.nrf24) +
     renderADC(data.adc) +
-    renderDAC(data.dac);
+    renderDAC(data.dac, psuOn);
+
+  // Restore whatever the user had typed into DAC inputs
+  Object.entries(savedInputs).forEach(([id, val]) => {
+    const el = document.getElementById(id);
+    if (el) {
+      el.value = val;
+      if (id === activeId) el.focus();
+    }
+  });
 
   const dot = document.getElementById('conn-dot');
   dot.className = 'ok';

@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 import RPi.GPIO as GPIO
 import smbus2
 import spidev
-from flask import Flask, jsonify, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory
 
 # Make tools/ importable from repo root
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -121,6 +121,36 @@ _TCA_NAMES = ["U3 (0x20)", "U6 (0x21)", "U8 (0x22)"]
 
 _nrf = NRF24L01(_spi, CFG.NRF24_CS, CFG.NRF24_CE)
 
+# TCA9555 lookup by I2C address (for relay control)
+_TCA_BY_ADDR = {
+    CFG.TCA9555_ADDR_0: _tcas[0],
+    CFG.TCA9555_ADDR_1: _tcas[1],
+    CFG.TCA9555_ADDR_2: _tcas[2],
+}
+
+# Carrier relay mapping: slot (1-4) → (tca_addr, port, bit)
+_CARRIER_RELAYS = {
+    1: CFG.RELAY_PINS["K1"],
+    2: CFG.RELAY_PINS["K2"],
+    3: CFG.RELAY_PINS["K3"],
+    4: CFG.RELAY_PINS["K4"],
+}
+
+# Software-side relay state (source of truth for the UI)
+_relay_state: dict = {slot: False for slot in _CARRIER_RELAYS}
+
+# Software-side PSU state
+_psu_on: bool = True
+
+
+def _init_relays():
+    """Configure relay output pins and ensure all carriers start powered off."""
+    with _hw_lock:
+        tca = _TCA_BY_ADDR[CFG.TCA9555_ADDR_0]
+        tca.set_direction(0, 0x00)   # port 0 all outputs
+        tca.write_port(0, 0x00)      # all relay coils de-energised
+
+
 # ---------------------------------------------------------------------------
 # Hardware poll — runs in background thread, result cached in _state
 # ---------------------------------------------------------------------------
@@ -174,20 +204,26 @@ def _poll():
                 dac_data.append({"name": name, "ok": False, "channels": []})
 
         power_data = []
-        for name, dev in zip(_INA_NAMES, _inas):
+        for i, (name, dev) in enumerate(zip(_INA_NAMES, _inas)):
+            slot = i + 1
             try:
                 present = dev.is_present()
                 if present:
+                    current_mA = round(dev.current() * 1000, 2)
                     power_data.append({
                         "name": name, "ok": True, "present": True,
-                        "current_mA": round(dev.current() * 1000, 2),
+                        "current_mA": current_mA,
                         "power_mW":   round(dev.power()   * 1000, 2),
                         "shunt_mV":   round(dev.shunt_voltage() * 1000, 3),
+                        "relay_on":   _relay_state[slot],
+                        "overcurrent": abs(current_mA) / 1000 > CFG.MLC_CURRENT_MAX_A,
                     })
                 else:
-                    power_data.append({"name": name, "ok": False, "present": False})
+                    power_data.append({"name": name, "ok": False, "present": False,
+                                       "relay_on": _relay_state[slot], "overcurrent": False})
             except Exception:
-                power_data.append({"name": name, "ok": False, "present": False})
+                power_data.append({"name": name, "ok": False, "present": False,
+                                   "relay_on": _relay_state[slot], "overcurrent": False})
 
         io_data = []
         for name, dev in zip(_TCA_NAMES, _tcas):
@@ -207,7 +243,7 @@ def _poll():
 
     result = {
         "timestamp": now,
-        "psu": {"ok": psu_ok},
+        "psu": {"ok": psu_ok, "on": _psu_on},
         "can": can_data,
         "adc": adc_data,
         "dac": dac_data,
@@ -249,6 +285,122 @@ def status():
         return jsonify(dict(_state))
 
 
+@app.route("/api/carrier/<int:slot>/power", methods=["POST"])
+def carrier_power(slot):
+    if slot not in _CARRIER_RELAYS:
+        return jsonify({"error": "invalid slot, use 1–4"}), 400
+    data = request.get_json(force=True, silent=True) or {}
+    on = bool(data.get("on", False))
+    addr, port, pin = _CARRIER_RELAYS[slot]
+    try:
+        with _hw_lock:
+            tca = _TCA_BY_ADDR[addr]
+            tca.set_direction(port, 0x00)
+            tca.write_pin(port, pin, on)
+        _relay_state[slot] = on
+        log.info("Carrier MLC%d power %s", slot, "ON" if on else "OFF")
+        return jsonify({"slot": slot, "on": on})
+    except Exception as exc:
+        log.error("relay error: %s", exc)
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/psu/power", methods=["POST"])
+def psu_power():
+    global _psu_on
+    data = request.get_json(force=True, silent=True) or {}
+    on = bool(data.get("on", False))
+    try:
+        with _hw_lock:
+            if on:
+                GPIO.output(CFG.PSU_ON, GPIO.LOW)   # assert PS_ON# (active-low)
+                deadline = time.time() + 5.0
+                while time.time() < deadline:
+                    if GPIO.input(CFG.PWR_OK):
+                        break
+                    time.sleep(0.05)
+                if not GPIO.input(CFG.PWR_OK):
+                    GPIO.output(CFG.PSU_ON, GPIO.HIGH)
+                    return jsonify({"error": "PWR_OK not asserted after 5 s"}), 500
+            else:
+                GPIO.output(CFG.PSU_ON, GPIO.HIGH)  # deassert PS_ON#
+                for slot in _relay_state:
+                    _relay_state[slot] = False
+        _psu_on = on
+        log.info("PSU power %s", "ON" if on else "OFF")
+        return jsonify({"on": on})
+    except Exception as exc:
+        log.error("PSU power error: %s", exc)
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/dac/<int:idx>/channel/<int:ch>", methods=["POST"])
+def dac_set(idx, ch):
+    if not (0 <= idx < len(_dacs)):
+        return jsonify({"error": f"invalid DAC index, use 0–{len(_dacs) - 1}"}), 400
+    if not (0 <= ch <= 3):
+        return jsonify({"error": "invalid channel, use 0–3"}), 400
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        voltage = float(data["voltage"])
+    except (KeyError, ValueError, TypeError):
+        return jsonify({"error": "missing or invalid 'voltage' field"}), 400
+    try:
+        with _hw_lock:
+            _dacs[idx].set_voltage(ch, voltage)
+        log.info("DAC%d ch%d → %.4f V", idx, ch, voltage)
+        return jsonify({"idx": idx, "channel": ch, "voltage": voltage})
+    except Exception as exc:
+        log.error("DAC set error: %s", exc)
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/tca/<int:addr>/port/<int:port>/pin/<int:pin>", methods=["POST"])
+def tca_write_pin(addr, port, pin):
+    if addr not in _TCA_BY_ADDR:
+        return jsonify({"error": f"unknown TCA address 0x{addr:02x}"}), 400
+    if port not in (0, 1) or not (0 <= pin <= 7):
+        return jsonify({"error": "port must be 0 or 1, pin must be 0–7"}), 400
+    data = request.get_json(force=True, silent=True) or {}
+    value = bool(data.get("value", False))
+    try:
+        with _hw_lock:
+            tca = _TCA_BY_ADDR[addr]
+            tca.set_direction(port, 0x00)
+            tca.write_pin(port, pin, value)
+        log.info("TCA 0x%02x port%d pin%d → %d", addr, port, pin, value)
+        return jsonify({"addr": addr, "port": port, "pin": pin, "value": value})
+    except Exception as exc:
+        log.error("TCA write error: %s", exc)
+        return jsonify({"error": str(exc)}), 500
+
+
+_MODE_NAME_TO_BYTE = {
+    "normal": 0x00, "sleep": 0x20, "loopback": 0x40,
+    "listenonly": 0x60, "config": 0x80,
+}
+
+
+@app.route("/api/can/<int:idx>/mode", methods=["POST"])
+def can_set_mode(idx):
+    if not (0 <= idx < len(_cans)):
+        return jsonify({"error": f"invalid CAN index, use 0–{len(_cans) - 1}"}), 400
+    data = request.get_json(force=True, silent=True) or {}
+    mode_str = data.get("mode", "")
+    if mode_str not in _MODE_NAME_TO_BYTE:
+        return jsonify({"error": f"invalid mode, use: {list(_MODE_NAME_TO_BYTE)}"}), 400
+    try:
+        with _hw_lock:
+            ok = _cans[idx].set_mode(_MODE_NAME_TO_BYTE[mode_str])
+        if not ok:
+            return jsonify({"error": "mode change timed out"}), 500
+        log.info("CAN%d mode → %s", idx, mode_str)
+        return jsonify({"idx": idx, "mode": mode_str})
+    except Exception as exc:
+        log.error("CAN mode error: %s", exc)
+        return jsonify({"error": str(exc)}), 500
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -259,6 +411,9 @@ if __name__ == "__main__":
     parser.add_argument("--poll-interval", type=float, default=2.0,
                         help="Hardware poll interval in seconds")
     args = parser.parse_args()
+
+    # Initialise relay outputs (all off)
+    _init_relays()
 
     # Prime the cache before accepting requests
     log.info("Running initial hardware poll...")
