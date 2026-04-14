@@ -69,10 +69,9 @@ class TestDAC80504WriteReadback:
     @pytest.mark.parametrize("idx", range(4), ids=DAC_NAMES)
     def test_channel_sweep(self, dacs, idx):
         dac = dacs[idx]
-        vref = CFG.RAIL_LIMITS["3V3"][1]   # use upper limit as Vref guard
         try:
             for target_v in self.TEST_VOLTAGES:
-                v = min(target_v, vref)
+                v = min(target_v, 3.3)
                 for ch in range(4):
                     dac.set_voltage(ch, v)
                     readback = dac.get_voltage(ch)

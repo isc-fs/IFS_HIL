@@ -11,6 +11,12 @@ It allows continuous integration of embedded firmware by automatically:
 
 ---
 
+## Getting Started
+
+Setting up the bench on a new Raspberry Pi? See **[docs/getting_started.md](docs/getting_started.md)** for a step-by-step guide covering OS configuration, dependency installation, the observability dashboard, and running the hardware test suite.
+
+---
+
 ## ⚙️ Overview
 
 **HIL Concept:**  

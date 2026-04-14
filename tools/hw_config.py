@@ -85,14 +85,16 @@ PWR_OK = 8      # GPIO8  — ATX PWRGOOD signal read back (HIGH = PSU rails stab
 # ---------------------------------------------------------------------------
 I2C_BUS = 1
 
-# INA226 power monitors — address = 0x40 | (A1<<1) | A0
-# 4 devices found on I2C bus scan.
-INA226_ADDR_12V  = 0x40   # U4: A1=GND, A0=GND — VERIFY
-INA226_ADDR_5V   = 0x41   # U2: A1=GND, A0=VS  — VERIFY
-INA226_ADDR_3V3  = 0x44   # U1: A1=VS,  A0=GND — VERIFY
-INA226_ADDR_SBY  = 0x45   # 4th INA226 (standby rail monitor) — VERIFY address
+# INA226 power monitors — one per MLC carrier slot (STM32 boards).
+# Each INA226 measures current/power consumed by the carrier, not the PSU rail.
+# Wired for low-side current sensing; bus_voltage() reads ~0 V by design.
+# Address = 0x40 | (A1<<1) | A0, confirmed by I2C scan.
+INA226_ADDR_MLC1 = 0x40   # MLC1 carrier — A1=GND, A0=GND
+INA226_ADDR_MLC2 = 0x41   # MLC2 carrier — A1=GND, A0=VS
+INA226_ADDR_MLC3 = 0x44   # MLC3 carrier — A1=VS,  A0=GND
+INA226_ADDR_MLC4 = 0x45   # MLC4 carrier — A1=VS,  A0=VS
 
-# INA226 shunt resistor values (Ohms) — VERIFY against BOM
+# INA226 shunt resistor value (Ohms) — VERIFY against BOM
 INA226_SHUNT_OHM = 0.01   # 10 mΩ  (adjust per actual fitted value)
 
 # TCA9555 I/O expanders (U3, U6, U8) — address = 0x20 | (A2<<2) | (A1<<1) | A0
@@ -123,10 +125,7 @@ MCP2515_OSC_HZ = 16_000_000
 CAN_BITRATE = 500_000
 
 # ---------------------------------------------------------------------------
-# Power rail expected voltages (V) — used for PASS/FAIL in rail tests
+# MLC carrier current limits (A) — flag unexpected consumption
 # ---------------------------------------------------------------------------
-RAIL_LIMITS = {
-    "12V":  (11.4, 12.6),
-    "5V":   (4.75, 5.25),
-    "3V3":  (3.135, 3.465),
-}
+# Adjust per-carrier once nominal draw is characterised.
+MLC_CURRENT_MAX_A = 3.0   # trip threshold for overcurrent warning
