@@ -1,0 +1,24 @@
+[Unit]
+Description=HIL hardware broker — single owner of SPI/I2C/GPIO
+After=network.target
+# Dashboard and pytest should only talk to hardware through this broker
+# once they are migrated (see docs/broker_migration_plan.md).
+
+[Service]
+Type=simple
+User=isc
+Group=isc
+WorkingDirectory=/home/isc/IFS08_HIL
+ExecStart=/usr/bin/python3 -m broker.server --socket /run/hil-broker/broker.sock
+Restart=on-failure
+RestartSec=2
+# RuntimeDirectory gives us /run/hil-broker/, owned by the service user
+# and auto-cleaned on stop. The socket path is under that directory.
+RuntimeDirectory=hil-broker
+RuntimeDirectoryMode=0755
+# Access to SPI / I2C / GPIO is granted via the 'spi', 'i2c', 'gpio'
+# groups (udev rules in infra/udev/99-hil.rules). The 'isc' user must
+# be in those groups — verify with `groups isc` on the bench.
+
+[Install]
+WantedBy=multi-user.target
