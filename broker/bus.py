@@ -24,17 +24,45 @@ class HardwareBackend(Protocol):
     """Minimum surface the RPC dispatcher relies on. Both the real
     HardwareManager and FakeHardwareManager satisfy this."""
 
+    # ADC
     def adc_read(self, idx: int, channel: int) -> int: ...
     def adc_read_all(self, idx: int) -> list[int]: ...
+    def adc_read_voltage(self, idx: int, channel: int) -> float: ...
+
+    # DAC
     def dac_set_voltage(self, idx: int, channel: int, volts: float) -> None: ...
     def dac_get_voltage(self, idx: int, channel: int) -> float: ...
+
+    # CAN
     def can_set_mode(self, idx: int, mode: int) -> bool: ...
+    def can_get_mode(self, idx: int) -> int: ...
+    def can_read_error_counters(self, idx: int) -> list[int]: ...
     def can_status(self, idx: int) -> dict: ...
+
+    # INA226
     def ina_read(self, addr: int) -> dict: ...
+    def ina_is_present(self, addr: int) -> bool: ...
+    def ina_bus_voltage(self, addr: int) -> float: ...
+    def ina_shunt_voltage(self, addr: int) -> float: ...
+    def ina_current(self, addr: int) -> float: ...
+    def ina_power(self, addr: int) -> float: ...
+
+    # TCA9555
     def tca_read(self, addr: int) -> dict: ...
+    def tca_is_present(self, addr: int) -> bool: ...
+    def tca_read_port(self, addr: int, port: int) -> int: ...
+    def tca_set_direction(self, addr: int, port: int, mask: int) -> None: ...
+    def tca_write_port(self, addr: int, port: int, value: int) -> None: ...
     def tca_write_pin(self, addr: int, port: int, pin: int, value: bool) -> None: ...
+
+    # nRF24L01+
+    def nrf_is_present(self) -> bool: ...
+
+    # PSU
     def psu_power(self, on: bool) -> dict: ...
     def psu_status(self) -> dict: ...
+
+    # Meta
     def health(self) -> dict: ...
 
 
@@ -51,6 +79,7 @@ class HardwareManager:
         from tools.ina226 import INA226
         from tools.mcp2515 import MCP2515
         from tools.mcp3208 import MCP3208
+        from tools.nrf24l01 import NRF24L01
         from tools.tca9555 import TCA9555
 
         self._GPIO = GPIO
@@ -117,6 +146,8 @@ class HardwareManager:
             CFG.TCA9555_ADDR_2: TCA9555(self._i2c, CFG.TCA9555_ADDR_2),
         }
 
+        self._nrf = NRF24L01(spi, CFG.NRF24_CS, CFG.NRF24_CE)
+
     # ------------------------------------------------------------------
     # Lazy DAC initialisation (requires PSU on)
     # ------------------------------------------------------------------
@@ -147,6 +178,11 @@ class HardwareManager:
             self._op_count += 1
             return self._adcs[idx].read_all()
 
+    def adc_read_voltage(self, idx: int, channel: int) -> float:
+        with self._spi_lock:
+            self._op_count += 1
+            return self._adcs[idx].read_voltage(channel)
+
     # ------------------------------------------------------------------
     # DAC
     # ------------------------------------------------------------------
@@ -172,6 +208,17 @@ class HardwareManager:
             self._op_count += 1
             return self._cans[idx].set_mode(mode)
 
+    def can_get_mode(self, idx: int) -> int:
+        with self._spi_lock:
+            self._op_count += 1
+            return self._cans[idx].get_mode()
+
+    def can_read_error_counters(self, idx: int) -> list[int]:
+        with self._spi_lock:
+            self._op_count += 1
+            tec, rec = self._cans[idx].read_error_counters()
+            return [tec, rec]
+
     def can_status(self, idx: int) -> dict:
         with self._spi_lock:
             self._op_count += 1
@@ -187,6 +234,31 @@ class HardwareManager:
             self._op_count += 1
             return self._inas[addr].snapshot()
 
+    def ina_is_present(self, addr: int) -> bool:
+        with self._i2c_lock:
+            self._op_count += 1
+            return self._inas[addr].is_present()
+
+    def ina_bus_voltage(self, addr: int) -> float:
+        with self._i2c_lock:
+            self._op_count += 1
+            return self._inas[addr].bus_voltage()
+
+    def ina_shunt_voltage(self, addr: int) -> float:
+        with self._i2c_lock:
+            self._op_count += 1
+            return self._inas[addr].shunt_voltage()
+
+    def ina_current(self, addr: int) -> float:
+        with self._i2c_lock:
+            self._op_count += 1
+            return self._inas[addr].current()
+
+    def ina_power(self, addr: int) -> float:
+        with self._i2c_lock:
+            self._op_count += 1
+            return self._inas[addr].power()
+
     # ------------------------------------------------------------------
     # TCA9555
     # ------------------------------------------------------------------
@@ -196,10 +268,39 @@ class HardwareManager:
             self._op_count += 1
             return self._tcas[addr].read_all()
 
+    def tca_is_present(self, addr: int) -> bool:
+        with self._i2c_lock:
+            self._op_count += 1
+            return self._tcas[addr].is_present()
+
+    def tca_read_port(self, addr: int, port: int) -> int:
+        with self._i2c_lock:
+            self._op_count += 1
+            return self._tcas[addr].read_port(port)
+
+    def tca_set_direction(self, addr: int, port: int, mask: int) -> None:
+        with self._i2c_lock:
+            self._op_count += 1
+            self._tcas[addr].set_direction(port, mask)
+
+    def tca_write_port(self, addr: int, port: int, value: int) -> None:
+        with self._i2c_lock:
+            self._op_count += 1
+            self._tcas[addr].write_port(port, value)
+
     def tca_write_pin(self, addr: int, port: int, pin: int, value: bool) -> None:
         with self._i2c_lock:
             self._op_count += 1
             self._tcas[addr].write_pin(port, pin, value)
+
+    # ------------------------------------------------------------------
+    # nRF24L01+
+    # ------------------------------------------------------------------
+
+    def nrf_is_present(self) -> bool:
+        with self._spi_lock:
+            self._op_count += 1
+            return self._nrf.is_present()
 
     # ------------------------------------------------------------------
     # PSU
