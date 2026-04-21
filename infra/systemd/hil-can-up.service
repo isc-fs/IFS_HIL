@@ -1,0 +1,34 @@
+[Unit]
+Description=Bring up the three SocketCAN interfaces on the BACKPLANE_HIL bench
+# Requires the ATX rails (-> mcp251x probe) and the PSU_ON assertion that
+# hil-psu-on.service guarantees. Runs before hil-broker so the broker
+# always sees canN already UP at the expected bitrate.
+After=hil-psu-on.service
+Requires=hil-psu-on.service
+Before=hil-broker.service
+# Ensure the mcp251x kernel driver has had a chance to bind the
+# interfaces before we ip-link them up.
+After=sys-subsystem-net-devices-can0.device sys-subsystem-net-devices-can1.device sys-subsystem-net-devices-can2.device
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# txqueuelen=1000 is required for `can-flasher flash` — the default 10
+# overflows the TX queue during sustained flash writes and returns
+# ENOBUFS mid-sector. restart-ms=200 enables the kernel's automatic
+# bus-off recovery (CAN chip auto-restarts after 200 ms so a transient
+# bus problem doesn't require a manual `ip link` cycle).
+ExecStart=/bin/sh -c '\
+  set -e; \
+  for i in 0 1 2; do \
+    /usr/sbin/ip link set "can$i" down 2>/dev/null || true; \
+    /usr/sbin/ip link set "can$i" txqueuelen 1000; \
+    /usr/sbin/ip link set "can$i" up type can bitrate 500000 restart-ms 200; \
+  done'
+ExecStop=/bin/sh -c '\
+  for i in 0 1 2; do \
+    /usr/sbin/ip link set "can$i" down 2>/dev/null || true; \
+  done'
+
+[Install]
+WantedBy=multi-user.target
