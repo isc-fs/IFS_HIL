@@ -20,11 +20,17 @@
  *                    # SN74LVC125A ~OE is gated by PWR_OK).
  *   gpio=8=ip,pd     # PWR_OK as pulled-down input, not leftover SPI0_CE0.
  *
- * Build:
- *   dtc -@ -I dts -O dtb -o mcp2515-triple.dtbo mcp2515-triple.dts
- * Install (on the Pi):
- *   sudo cp mcp2515-triple.dtbo /boot/firmware/overlays/
- *   # then add `dtoverlay=mcp2515-triple` to /boot/firmware/config.txt
+ * This overlay mirrors the structure of the stock `mcp2515-can0.dtbo`
+ * (decompiled from /boot/firmware/overlays/mcp2515-can0.dtbo) and
+ * extends it to three chips on custom CS GPIOs:
+ *   - Per-device pinctrl state that configures the INT GPIO as input,
+ *     applied at the right point in the device lifecycle.
+ *   - IRQ_TYPE_LEVEL_LOW (= 8) on the interrupt, which is what the
+ *     mcp251x driver expects with IRQF_ONESHOT.
+ *   - cs-gpios = <27,17,18> to route the three kernel CS lines to our
+ *     PCB CS pins.
+ *   - pinctrl-0 on spi0 restricted to MISO/MOSI/SCLK only, so GPIO7/8
+ *     stay reserved for PSU_ON/PWR_OK.
  */
 
 /dts-v1/;
@@ -33,15 +39,10 @@
 / {
     compatible = "brcm,bcm2835";
 
-    /* Fixed-clock node that the mcp251x driver reads via clk_get_rate().
-     * Without this the modern driver rejects probe with -ERANGE because
-     * `oscillator-frequency` alone is not enough for the clock subsystem. */
+    /* Fixed-clock node that the mcp251x driver reads via clk_get_rate(). */
     fragment@0 {
-        target-path = "/clocks";
+        target-path = "/";
         __overlay__ {
-            #address-cells = <1>;
-            #size-cells = <0>;
-
             mcp2515_osc: mcp2515_osc {
                 compatible = "fixed-clock";
                 #clock-cells = <0>;
@@ -50,51 +51,34 @@
         };
     };
 
-    /* Configure SPI0 with three GPIO chip-selects and attach the MCP2515s. */
+    /* Pinctrl states: SPI0 data pins, and one input state per INT pin. */
     fragment@1 {
-        target = <&spi0>;
+        target = <&gpio>;
         __overlay__ {
-            #address-cells = <1>;
-            #size-cells = <0>;
-            status = "okay";
-
-            /* Software CS pins, active-low */
-            cs-gpios = <&gpio 27 1>, <&gpio 17 1>, <&gpio 18 1>;
-
-            can0: mcp2515@0 {
-                compatible = "microchip,mcp2515";
-                reg = <0>;
-                spi-max-frequency = <1000000>;
-                clocks = <&mcp2515_osc>;
-                interrupt-parent = <&gpio>;
-                interrupts = <4 2>;              /* GPIO4, falling edge */
-                status = "okay";
+            spi0_data_only_pins: spi0_data_only_pins {
+                brcm,pins = <9 10 11>;
+                brcm,function = <4>;             /* alt0 = SPI */
+                brcm,pull = <0 0 0>;
             };
 
-            can1: mcp2515@1 {
-                compatible = "microchip,mcp2515";
-                reg = <1>;
-                spi-max-frequency = <1000000>;
-                clocks = <&mcp2515_osc>;
-                interrupt-parent = <&gpio>;
-                interrupts = <5 2>;              /* GPIO5, falling edge */
-                status = "okay";
+            can0_int_pin: can0_int_pin {
+                brcm,pins = <4>;
+                brcm,function = <0>;             /* input */
             };
 
-            can2: mcp2515@2 {
-                compatible = "microchip,mcp2515";
-                reg = <2>;
-                spi-max-frequency = <1000000>;
-                clocks = <&mcp2515_osc>;
-                interrupt-parent = <&gpio>;
-                interrupts = <6 2>;              /* GPIO6, falling edge */
-                status = "okay";
+            can1_int_pin: can1_int_pin {
+                brcm,pins = <5>;
+                brcm,function = <0>;
+            };
+
+            can2_int_pin: can2_int_pin {
+                brcm,pins = <6>;
+                brcm,function = <0>;
             };
         };
     };
 
-    /* Disable the default spidev children — they try to claim CE0/CE1 and
-     * collide with our mcp2515 children. */
+    /* Disable default spidev children. */
     fragment@2 {
         target = <&spidev0>;
         __overlay__ {
@@ -109,14 +93,68 @@
         };
     };
 
-    /* Configure the INT GPIOs as pulled-up inputs. */
+    /* Configure SPI0: restrict pinctrl to data pins only, declare three
+     * GPIO chip-selects, enable the master. */
     fragment@4 {
-        target = <&gpio>;
+        target = <&spi0>;
         __overlay__ {
-            mcp2515_int_pins: mcp2515_int_pins {
-                brcm,pins = <4 5 6>;
-                brcm,function = <0>;             /* input */
-                brcm,pull = <2>;                 /* pull-up */
+            #address-cells = <1>;
+            #size-cells = <0>;
+            status = "okay";
+            pinctrl-names = "default";
+            pinctrl-0 = <&spi0_data_only_pins>;
+            /* CS pins, active-low. The kernel SPI core may set
+             * SPI_CS_HIGH and rely on the gpiolib "enforce active-low
+             * on GPIO handle" behaviour for the MCP2515 binding; either
+             * polarity flag on cs-gpios works, we leave it ACTIVE_LOW
+             * as the conventional choice. */
+            cs-gpios = <&gpio 27 1>, <&gpio 17 1>, <&gpio 18 1>;
+
+            can0: mcp2515@0 {
+                reg = <0>;
+                compatible = "microchip,mcp2515";
+                pinctrl-names = "default";
+                pinctrl-0 = <&can0_int_pin>;
+                spi-max-frequency = <10000000>;
+                /* SPI mode 3 (CPOL=1, CPHA=1). MCP2515 supports mode 0
+                 * and mode 3; on this PCB with the SN74LVC125A MISO
+                 * buffer, mode 0 drops the MSB on reads (confirmed via
+                 * write-known / read-back test on spi0 at 1 MHz).
+                 * Mode 3 round-trips cleanly. */
+                spi-cpol;
+                spi-cpha;
+                interrupt-parent = <&gpio>;
+                interrupts = <4 8>;              /* GPIO4, IRQ_TYPE_LEVEL_LOW */
+                clocks = <&mcp2515_osc>;
+                status = "okay";
+            };
+
+            can1: mcp2515@1 {
+                reg = <1>;
+                compatible = "microchip,mcp2515";
+                pinctrl-names = "default";
+                pinctrl-0 = <&can1_int_pin>;
+                spi-max-frequency = <10000000>;
+                spi-cpol;
+                spi-cpha;
+                interrupt-parent = <&gpio>;
+                interrupts = <5 8>;              /* GPIO5, IRQ_TYPE_LEVEL_LOW */
+                clocks = <&mcp2515_osc>;
+                status = "okay";
+            };
+
+            can2: mcp2515@2 {
+                reg = <2>;
+                compatible = "microchip,mcp2515";
+                pinctrl-names = "default";
+                pinctrl-0 = <&can2_int_pin>;
+                spi-max-frequency = <10000000>;
+                spi-cpol;
+                spi-cpha;
+                interrupt-parent = <&gpio>;
+                interrupts = <6 8>;              /* GPIO6, IRQ_TYPE_LEVEL_LOW */
+                clocks = <&mcp2515_osc>;
+                status = "okay";
             };
         };
     };
