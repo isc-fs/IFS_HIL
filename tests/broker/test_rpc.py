@@ -50,8 +50,8 @@ def test_ina_bad_address(methods):
 def test_tca_pin_set_and_read_back(methods):
     addr = CFG.TCA9555_ADDR_0
     _call(methods, "tca.write_pin", {"addr": addr, "port": 0, "pin": 3, "value": True})
-    r = _call(methods, "tca.read", {"addr": addr})
-    assert r["result"]["port0"] & (1 << 3)
+    r = _call(methods, "tca.read_port", {"addr": addr, "port": 0})
+    assert r["result"] & (1 << 3)
 
 
 def test_psu_power_cycle(methods):
@@ -87,3 +87,29 @@ def test_op_counter_advances(methods):
     _call(methods, "adc.read", {"idx": 0, "channel": 1})
     r = _call(methods, "broker.health")
     assert r["result"]["op_count"] == 2
+
+
+def test_new_v1_methods_cover_dashboard_surface(methods):
+    """Phase 2 adds a batch of RPC methods so the dashboard proxy can be
+    a thin passthrough. Exercise each one once."""
+    addr = CFG.INA226_ADDR_MLC1
+    assert _call(methods, "ina.is_present", {"addr": addr})["result"] is True
+    assert _call(methods, "ina.current", {"addr": addr})["result"] == pytest.approx(0.5)
+    assert _call(methods, "ina.power", {"addr": addr})["result"] == pytest.approx(0.0)
+    assert _call(methods, "ina.shunt_voltage", {"addr": addr})["result"] == pytest.approx(0.005)
+    assert _call(methods, "ina.bus_voltage", {"addr": addr})["result"] == pytest.approx(0.0)
+
+    tca_addr = CFG.TCA9555_ADDR_0
+    assert _call(methods, "tca.is_present", {"addr": tca_addr})["result"] is True
+    _call(methods, "tca.set_direction", {"addr": tca_addr, "port": 0, "mask": 0x00})
+    _call(methods, "tca.write_port", {"addr": tca_addr, "port": 0, "value": 0xA5})
+    assert _call(methods, "tca.read_port", {"addr": tca_addr, "port": 0})["result"] == 0xA5
+
+    _call(methods, "can.set_mode", {"idx": 0, "mode": 0x40})
+    assert _call(methods, "can.get_mode", {"idx": 0})["result"] == 0x40
+    assert _call(methods, "can.read_error_counters", {"idx": 0})["result"] == [0, 0]
+
+    v = _call(methods, "adc.read_voltage", {"idx": 0, "channel": 0})["result"]
+    assert 0.0 <= v <= 3.3
+
+    assert _call(methods, "nrf.is_present")["result"] is False

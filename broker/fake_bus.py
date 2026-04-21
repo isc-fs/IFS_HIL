@@ -57,6 +57,10 @@ class FakeHardwareManager:
         self._tick()
         return list(self._adc[idx])
 
+    def adc_read_voltage(self, idx: int, channel: int) -> float:
+        self._tick()
+        return self._adc[idx][channel] * 3.3 / 4095
+
     # DAC
     def dac_set_voltage(self, idx: int, channel: int, volts: float) -> None:
         self._tick()
@@ -72,6 +76,14 @@ class FakeHardwareManager:
         self._can_mode[idx] = mode
         return True
 
+    def can_get_mode(self, idx: int) -> int:
+        self._tick()
+        return self._can_mode[idx]
+
+    def can_read_error_counters(self, idx: int) -> list[int]:
+        self._tick()
+        return [self._can_tec[idx], self._can_rec[idx]]
+
     def can_status(self, idx: int) -> dict:
         self._tick()
         return {"mode": self._can_mode[idx],
@@ -79,26 +91,73 @@ class FakeHardwareManager:
                 "rec": self._can_rec[idx]}
 
     # INA226
-    def ina_read(self, addr: int) -> dict:
-        self._tick()
+    def _check_ina(self, addr: int) -> None:
         if addr not in _VALID_INA_ADDRS:
             raise KeyError(f"no INA226 at 0x{addr:02X}")
-        return {"bus_v": 0.0, "current": 0.5, "power": 0.0}
+
+    def ina_read(self, addr: int) -> dict:
+        self._tick(); self._check_ina(addr)
+        return {"bus_voltage_V": 0.0, "shunt_voltage_V": 0.005,
+                "current_A": 0.5, "power_W": 0.0}
+
+    def ina_is_present(self, addr: int) -> bool:
+        self._tick(); self._check_ina(addr)
+        return True
+
+    def ina_bus_voltage(self, addr: int) -> float:
+        self._tick(); self._check_ina(addr)
+        return 0.0
+
+    def ina_shunt_voltage(self, addr: int) -> float:
+        self._tick(); self._check_ina(addr)
+        return 0.005
+
+    def ina_current(self, addr: int) -> float:
+        self._tick(); self._check_ina(addr)
+        return 0.5
+
+    def ina_power(self, addr: int) -> float:
+        self._tick(); self._check_ina(addr)
+        return 0.0
 
     # TCA9555
-    def tca_read(self, addr: int) -> dict:
-        self._tick()
+    def _check_tca(self, addr: int) -> None:
         if addr not in _VALID_TCA_ADDRS:
             raise KeyError(f"no TCA9555 at 0x{addr:02X}")
-        return {"port0": self._tca_ports[addr][0], "port1": self._tca_ports[addr][1]}
+
+    def tca_read(self, addr: int) -> dict:
+        self._tick(); self._check_tca(addr)
+        return {"input_port0":  self._tca_ports[addr][0],
+                "input_port1":  self._tca_ports[addr][1],
+                "output_port0": self._tca_ports[addr][0],
+                "output_port1": self._tca_ports[addr][1],
+                "config_port0": 0, "config_port1": 0}
+
+    def tca_is_present(self, addr: int) -> bool:
+        self._tick(); self._check_tca(addr)
+        return True
+
+    def tca_read_port(self, addr: int, port: int) -> int:
+        self._tick(); self._check_tca(addr)
+        return self._tca_ports[addr][port]
+
+    def tca_set_direction(self, addr: int, port: int, mask: int) -> None:
+        self._tick(); self._check_tca(addr)
+
+    def tca_write_port(self, addr: int, port: int, value: int) -> None:
+        self._tick(); self._check_tca(addr)
+        self._tca_ports[addr][port] = value & 0xFF
 
     def tca_write_pin(self, addr: int, port: int, pin: int, value: bool) -> None:
-        self._tick()
-        if addr not in _VALID_TCA_ADDRS:
-            raise KeyError(f"no TCA9555 at 0x{addr:02X}")
+        self._tick(); self._check_tca(addr)
         mask = 1 << pin
         cur = self._tca_ports[addr][port]
         self._tca_ports[addr][port] = (cur | mask) if value else (cur & ~mask)
+
+    # nRF24L01+
+    def nrf_is_present(self) -> bool:
+        self._tick()
+        return False  # matches bench reality: not populated
 
     # PSU
     def psu_power(self, on: bool) -> dict:

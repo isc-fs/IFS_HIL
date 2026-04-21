@@ -40,17 +40,38 @@ class RpcError(Exception):
 def build_method_table(backend: HardwareBackend) -> dict[str, Callable[..., Any]]:
     """Return the name→callable map that handle_request looks up."""
     return {
+        # ADC
         "adc.read": backend.adc_read,
         "adc.read_all": backend.adc_read_all,
+        "adc.read_voltage": backend.adc_read_voltage,
+        # DAC
         "dac.set_voltage": backend.dac_set_voltage,
         "dac.get_voltage": backend.dac_get_voltage,
+        # CAN
         "can.set_mode": backend.can_set_mode,
+        "can.get_mode": backend.can_get_mode,
+        "can.read_error_counters": backend.can_read_error_counters,
         "can.status": backend.can_status,
+        # INA226
         "ina.read": backend.ina_read,
+        "ina.is_present": backend.ina_is_present,
+        "ina.bus_voltage": backend.ina_bus_voltage,
+        "ina.shunt_voltage": backend.ina_shunt_voltage,
+        "ina.current": backend.ina_current,
+        "ina.power": backend.ina_power,
+        # TCA9555
         "tca.read": backend.tca_read,
+        "tca.is_present": backend.tca_is_present,
+        "tca.read_port": backend.tca_read_port,
+        "tca.set_direction": backend.tca_set_direction,
+        "tca.write_port": backend.tca_write_port,
         "tca.write_pin": backend.tca_write_pin,
+        # nRF24L01+
+        "nrf.is_present": backend.nrf_is_present,
+        # PSU
         "psu.power": backend.psu_power,
         "psu.status": backend.psu_status,
+        # Meta
         "broker.health": backend.health,
     }
 
