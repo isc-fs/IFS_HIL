@@ -16,9 +16,8 @@ see test_can_bus.py (not included — requires loopback plug or second node).
 
 import time
 import pytest
-import RPi.GPIO as GPIO
 from tools import hw_config as CFG
-from tools.mcp2515 import MCP2515
+from tools.hil_client import MCP2515
 
 CAN_NAMES = ["CAN1 (U17)", "CAN2 (U19)", "CAN3 (U21)"]
 INT_PINS   = [CFG.INT_CAN1, CFG.INT_CAN2, CFG.INT_CAN3]
@@ -112,8 +111,8 @@ class TestMCP2515IntPins:
         ctrl.init(bitrate=CFG.CAN_BITRATE)
         # Small delay for any residual interrupt to clear
         time.sleep(0.01)
-        level = GPIO.input(int_pin)
-        assert level == GPIO.HIGH, (
+        level = ctrl.int_level()
+        assert level == 1, (
             f"{CAN_NAMES[idx]}: INT pin (GPIO{int_pin}) is LOW with no pending "
             "interrupt. Check INT pin assignment in hw_config.py."
         )
