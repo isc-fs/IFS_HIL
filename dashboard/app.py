@@ -6,9 +6,13 @@ Lightweight Flask web server — runs directly on the RPi.
 Usage:
     python3 dashboard/app.py [--port 8080]
 
+As of Phase 2 of the broker migration, the dashboard does NOT open any
+/dev/spidev*, /dev/i2c-1, or /dev/gpiochip0 itself. Every hardware
+access goes through hil-broker over its Unix socket. Start the broker
+(systemctl start hil-broker) before launching the dashboard.
+
 The server polls all hardware every 2 s in a background thread and
-caches the result. The HTTP API just reads from that cache, so page
-loads are always fast regardless of I2C/SPI latency.
+caches the result. The HTTP API just reads from that cache.
 """
 
 import argparse
@@ -19,21 +23,16 @@ import threading
 import time
 from datetime import datetime, timezone
 
-import RPi.GPIO as GPIO
-import smbus2
-import spidev
 from flask import Flask, jsonify, request, send_from_directory
 
-# Make tools/ importable from repo root
+# Make tools/ and broker/ importable from repo root
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tools import hw_config as CFG
-from tools.dac80504 import DAC80504
-from tools.ina226 import INA226
-from tools.mcp2515 import MCP2515
-from tools.mcp3208 import MCP3208
-from tools.nrf24l01 import NRF24L01
-from tools.tca9555 import TCA9555
+from tools.hil_client import (
+    DAC80504, INA226, MCP2515, MCP3208, NRF24L01, TCA9555,
+    psu_power, psu_status,
+)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -42,93 +41,39 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Hardware initialisation
+# Driver proxies (no hardware opened — broker owns the buses)
 # ---------------------------------------------------------------------------
 
-def _init_hardware():
-    GPIO.setmode(GPIO.BCM)
-    GPIO.setwarnings(False)
-
-    cs_pins = [
-        CFG.CS_CAN1, CFG.CS_CAN2, CFG.CS_CAN3,
-        CFG.CS_ADC1, CFG.CS_ADC2, CFG.CS_ADC3,
-        CFG.CS_DAC1, CFG.CS_DAC2, CFG.CS_DAC3, CFG.CS_DAC4,
-        CFG.NRF24_CS,
-    ]
-    for pin in cs_pins + [CFG.NRF24_CE]:
-        GPIO.setup(pin, GPIO.OUT)
-        GPIO.output(pin, GPIO.HIGH)
-
-    for pin in [CFG.INT_CAN1, CFG.INT_CAN2, CFG.INT_CAN3, CFG.NRF24_IRQ]:
-        GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-    GPIO.setup(CFG.PWR_OK, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
-
-    # Assert PSU_ON and wait for PWR_OK
-    GPIO.setup(CFG.PSU_ON, GPIO.OUT)
-    GPIO.output(CFG.PSU_ON, GPIO.LOW)
-    deadline = time.time() + 5.0
-    while time.time() < deadline:
-        if GPIO.input(CFG.PWR_OK):
-            break
-        time.sleep(0.05)
-    if not GPIO.input(CFG.PWR_OK):
-        log.warning("PWR_OK not asserted — PSU may be off")
-    time.sleep(0.3)
-
-    spi = spidev.SpiDev()
-    spi.open(CFG.SPI_BUS, CFG.SPI_DEVICE)
-    spi.max_speed_hz = CFG.SPI_MAX_HZ
-    spi.mode = 0b00
-    spi.no_cs = True
-    spi.lsbfirst = False
-
-    i2c = smbus2.SMBus(CFG.I2C_BUS)
-    time.sleep(0.05)
-
-    return spi, i2c
-
-
-_spi, _i2c = _init_hardware()
-
-_adcs = [MCP3208(_spi, CFG.CS_ADC1),
-         MCP3208(_spi, CFG.CS_ADC2),
-         MCP3208(_spi, CFG.CS_ADC3)]
+_adcs = [MCP3208(idx=0), MCP3208(idx=1), MCP3208(idx=2)]
 _ADC_NAMES = ["ADC1 (U9)", "ADC2 (U10)", "ADC3 (U11)"]
 
-_dacs = [DAC80504(_spi, CFG.CS_DAC1),
-         DAC80504(_spi, CFG.CS_DAC2),
-         DAC80504(_spi, CFG.CS_DAC3),
-         DAC80504(_spi, CFG.CS_DAC4)]
+_dacs = [DAC80504(idx=0), DAC80504(idx=1), DAC80504(idx=2), DAC80504(idx=3)]
 _DAC_NAMES = ["DAC1 (U12)", "DAC2 (U13)", "DAC3 (U14)", "DAC4 (U15)"]
 
-_cans = [MCP2515(_spi, CFG.CS_CAN1, CFG.MCP2515_OSC_HZ),
-         MCP2515(_spi, CFG.CS_CAN2, CFG.MCP2515_OSC_HZ),
-         MCP2515(_spi, CFG.CS_CAN3, CFG.MCP2515_OSC_HZ)]
+_cans = [MCP2515(idx=0), MCP2515(idx=1), MCP2515(idx=2)]
 _CAN_NAMES = ["CAN1 (U17)", "CAN2 (U19)", "CAN3 (U21)"]
 _CAN_MODES = {0x00: "normal", 0x20: "sleep", 0x40: "loopback",
               0x60: "listenonly", 0x80: "config"}
 
-_inas = [INA226(_i2c, CFG.INA226_ADDR_MLC1, CFG.INA226_SHUNT_OHM),
-         INA226(_i2c, CFG.INA226_ADDR_MLC2, CFG.INA226_SHUNT_OHM),
-         INA226(_i2c, CFG.INA226_ADDR_MLC3, CFG.INA226_SHUNT_OHM),
-         INA226(_i2c, CFG.INA226_ADDR_MLC4, CFG.INA226_SHUNT_OHM)]
+_inas = [INA226(addr=CFG.INA226_ADDR_MLC1),
+         INA226(addr=CFG.INA226_ADDR_MLC2),
+         INA226(addr=CFG.INA226_ADDR_MLC3),
+         INA226(addr=CFG.INA226_ADDR_MLC4)]
 _INA_NAMES = ["MLC1", "MLC2", "MLC3", "MLC4"]
 
-_tcas = [TCA9555(_i2c, CFG.TCA9555_ADDR_0),
-         TCA9555(_i2c, CFG.TCA9555_ADDR_1),
-         TCA9555(_i2c, CFG.TCA9555_ADDR_2)]
+_tcas = [TCA9555(addr=CFG.TCA9555_ADDR_0),
+         TCA9555(addr=CFG.TCA9555_ADDR_1),
+         TCA9555(addr=CFG.TCA9555_ADDR_2)]
 _TCA_NAMES = ["U3 (0x20)", "U6 (0x21)", "U8 (0x22)"]
 
-_nrf = NRF24L01(_spi, CFG.NRF24_CS, CFG.NRF24_CE)
+_nrf = NRF24L01()
 
-# TCA9555 lookup by I2C address (for relay control)
 _TCA_BY_ADDR = {
     CFG.TCA9555_ADDR_0: _tcas[0],
     CFG.TCA9555_ADDR_1: _tcas[1],
     CFG.TCA9555_ADDR_2: _tcas[2],
 }
 
-# Carrier relay mapping: slot (1-4) → (tca_addr, port, bit)
 _CARRIER_RELAYS = {
     1: CFG.RELAY_PINS["K1"],
     2: CFG.RELAY_PINS["K2"],
@@ -136,19 +81,15 @@ _CARRIER_RELAYS = {
     4: CFG.RELAY_PINS["K4"],
 }
 
-# Software-side relay state (source of truth for the UI)
 _relay_state: dict = {slot: False for slot in _CARRIER_RELAYS}
-
-# Software-side PSU state
-_psu_on: bool = True
+_psu_on: bool = False
 
 
 def _init_relays():
     """Configure relay output pins and ensure all carriers start powered off."""
-    with _hw_lock:
-        tca = _TCA_BY_ADDR[CFG.TCA9555_ADDR_0]
-        tca.set_direction(0, 0x00)   # port 0 all outputs
-        tca.write_port(0, 0x00)      # all relay coils de-energised
+    tca = _TCA_BY_ADDR[CFG.TCA9555_ADDR_0]
+    tca.set_direction(0, 0x00)   # port 0 all outputs
+    tca.write_port(0, 0x00)      # all relay coils de-energised
 
 
 # ---------------------------------------------------------------------------
@@ -157,11 +98,9 @@ def _init_relays():
 
 _state: dict = {}
 _state_lock = threading.Lock()
-_hw_lock = threading.Lock()   # serialises all SPI/I2C access
 
 
 def _safe(fn, fallback=None):
-    """Call fn(); return fallback on any exception."""
     try:
         return fn()
     except Exception as exc:
@@ -172,74 +111,73 @@ def _safe(fn, fallback=None):
 def _poll():
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-    with _hw_lock:
-        psu_ok = bool(GPIO.input(CFG.PWR_OK))
+    psu_ok = _safe(lambda: psu_status()["pwr_ok"], False)
 
-        can_data = []
-        for name, dev in zip(_CAN_NAMES, _cans):
-            try:
-                mode_byte = dev.get_mode()
-                mode_str = _CAN_MODES.get(mode_byte & 0xE0, f"0x{mode_byte:02X}")
-                tec, rec = dev.read_error_counters()
-                can_data.append({"name": name, "ok": True,
-                                  "mode": mode_str, "tec": tec, "rec": rec})
-            except Exception:
-                can_data.append({"name": name, "ok": False,
-                                  "mode": "error", "tec": None, "rec": None})
+    can_data = []
+    for name, dev in zip(_CAN_NAMES, _cans):
+        try:
+            mode_byte = dev.get_mode()
+            mode_str = _CAN_MODES.get(mode_byte & 0xE0, f"0x{mode_byte:02X}")
+            tec, rec = dev.read_error_counters()
+            can_data.append({"name": name, "ok": True,
+                              "mode": mode_str, "tec": tec, "rec": rec})
+        except Exception:
+            can_data.append({"name": name, "ok": False,
+                              "mode": "error", "tec": None, "rec": None})
 
-        adc_data = []
-        for name, dev in zip(_ADC_NAMES, _adcs):
-            try:
-                volts = [round(dev.read_voltage(ch), 4) for ch in range(8)]
-                adc_data.append({"name": name, "ok": True, "channels": volts})
-            except Exception:
-                adc_data.append({"name": name, "ok": False, "channels": []})
+    adc_data = []
+    for name, dev in zip(_ADC_NAMES, _adcs):
+        try:
+            volts = [round(dev.read_voltage(ch), 4) for ch in range(8)]
+            adc_data.append({"name": name, "ok": True, "channels": volts})
+        except Exception:
+            adc_data.append({"name": name, "ok": False, "channels": []})
 
-        dac_data = []
-        for name, dev in zip(_DAC_NAMES, _dacs):
-            try:
-                volts = [round(dev.get_voltage(ch), 4) for ch in range(4)]
-                dac_data.append({"name": name, "ok": True, "channels": volts})
-            except Exception:
-                dac_data.append({"name": name, "ok": False, "channels": []})
+    dac_data = []
+    for name, dev in zip(_DAC_NAMES, _dacs):
+        try:
+            volts = [round(dev.get_voltage(ch), 4) for ch in range(4)]
+            dac_data.append({"name": name, "ok": True, "channels": volts})
+        except Exception:
+            dac_data.append({"name": name, "ok": False, "channels": []})
 
-        power_data = []
-        for i, (name, dev) in enumerate(zip(_INA_NAMES, _inas)):
-            slot = i + 1
-            try:
-                present = dev.is_present()
-                if present:
-                    current_mA = round(dev.current() * 1000, 2)
-                    power_data.append({
-                        "name": name, "ok": True, "present": True,
-                        "current_mA": current_mA,
-                        "power_mW":   round(dev.power()   * 1000, 2),
-                        "shunt_mV":   round(dev.shunt_voltage() * 1000, 3),
-                        "relay_on":   _relay_state[slot],
-                        "overcurrent": abs(current_mA) / 1000 > CFG.MLC_CURRENT_MAX_A,
-                    })
-                else:
-                    power_data.append({"name": name, "ok": False, "present": False,
-                                       "relay_on": _relay_state[slot], "overcurrent": False})
-            except Exception:
+    power_data = []
+    for i, (name, dev) in enumerate(zip(_INA_NAMES, _inas)):
+        slot = i + 1
+        try:
+            present = dev.is_present()
+            if present:
+                current_mA = round(dev.current() * 1000, 2)
+                power_data.append({
+                    "name": name, "ok": True, "present": True,
+                    "current_mA": current_mA,
+                    "power_mW":   round(dev.power()   * 1000, 2),
+                    "shunt_mV":   round(dev.shunt_voltage() * 1000, 3),
+                    "relay_on":   _relay_state[slot],
+                    "overcurrent": abs(current_mA) / 1000 > CFG.MLC_CURRENT_MAX_A,
+                })
+            else:
                 power_data.append({"name": name, "ok": False, "present": False,
                                    "relay_on": _relay_state[slot], "overcurrent": False})
+        except Exception:
+            power_data.append({"name": name, "ok": False, "present": False,
+                               "relay_on": _relay_state[slot], "overcurrent": False})
 
-        io_data = []
-        for name, dev in zip(_TCA_NAMES, _tcas):
-            try:
-                present = dev.is_present()
-                if present:
-                    p0 = dev.read_port(0)
-                    p1 = dev.read_port(1)
-                    io_data.append({"name": name, "ok": True, "present": True,
-                                    "port0": p0, "port1": p1})
-                else:
-                    io_data.append({"name": name, "ok": False, "present": False})
-            except Exception:
+    io_data = []
+    for name, dev in zip(_TCA_NAMES, _tcas):
+        try:
+            present = dev.is_present()
+            if present:
+                p0 = dev.read_port(0)
+                p1 = dev.read_port(1)
+                io_data.append({"name": name, "ok": True, "present": True,
+                                "port0": p0, "port1": p1})
+            else:
                 io_data.append({"name": name, "ok": False, "present": False})
+        except Exception:
+            io_data.append({"name": name, "ok": False, "present": False})
 
-        nrf_present = _safe(_nrf.is_present, False)
+    nrf_present = _safe(_nrf.is_present, False)
 
     result = {
         "timestamp": now,
@@ -293,10 +231,9 @@ def carrier_power(slot):
     on = bool(data.get("on", False))
     addr, port, pin = _CARRIER_RELAYS[slot]
     try:
-        with _hw_lock:
-            tca = _TCA_BY_ADDR[addr]
-            tca.set_direction(port, 0x00)
-            tca.write_pin(port, pin, on)
+        tca = _TCA_BY_ADDR[addr]
+        tca.set_direction(port, 0x00)
+        tca.write_pin(port, pin, on)
         _relay_state[slot] = on
         log.info("Carrier MLC%d power %s", slot, "ON" if on else "OFF")
         return jsonify({"slot": slot, "on": on})
@@ -306,26 +243,17 @@ def carrier_power(slot):
 
 
 @app.route("/api/psu/power", methods=["POST"])
-def psu_power():
+def psu_power_endpoint():
     global _psu_on
     data = request.get_json(force=True, silent=True) or {}
     on = bool(data.get("on", False))
     try:
-        with _hw_lock:
-            if on:
-                GPIO.output(CFG.PSU_ON, GPIO.LOW)   # assert PS_ON# (active-low)
-                deadline = time.time() + 5.0
-                while time.time() < deadline:
-                    if GPIO.input(CFG.PWR_OK):
-                        break
-                    time.sleep(0.05)
-                if not GPIO.input(CFG.PWR_OK):
-                    GPIO.output(CFG.PSU_ON, GPIO.HIGH)
-                    return jsonify({"error": "PWR_OK not asserted after 5 s"}), 500
-            else:
-                GPIO.output(CFG.PSU_ON, GPIO.HIGH)  # deassert PS_ON#
-                for slot in _relay_state:
-                    _relay_state[slot] = False
+        result = psu_power(on)
+        if on and not result.get("pwr_ok"):
+            return jsonify({"error": "PWR_OK not asserted after 5 s"}), 500
+        if not on:
+            for slot in _relay_state:
+                _relay_state[slot] = False
         _psu_on = on
         log.info("PSU power %s", "ON" if on else "OFF")
         return jsonify({"on": on})
@@ -346,8 +274,7 @@ def dac_set(idx, ch):
     except (KeyError, ValueError, TypeError):
         return jsonify({"error": "missing or invalid 'voltage' field"}), 400
     try:
-        with _hw_lock:
-            _dacs[idx].set_voltage(ch, voltage)
+        _dacs[idx].set_voltage(ch, voltage)
         log.info("DAC%d ch%d → %.4f V", idx, ch, voltage)
         return jsonify({"idx": idx, "channel": ch, "voltage": voltage})
     except Exception as exc:
@@ -364,10 +291,9 @@ def tca_write_pin(addr, port, pin):
     data = request.get_json(force=True, silent=True) or {}
     value = bool(data.get("value", False))
     try:
-        with _hw_lock:
-            tca = _TCA_BY_ADDR[addr]
-            tca.set_direction(port, 0x00)
-            tca.write_pin(port, pin, value)
+        tca = _TCA_BY_ADDR[addr]
+        tca.set_direction(port, 0x00)
+        tca.write_pin(port, pin, value)
         log.info("TCA 0x%02x port%d pin%d → %d", addr, port, pin, value)
         return jsonify({"addr": addr, "port": port, "pin": pin, "value": value})
     except Exception as exc:
@@ -390,8 +316,7 @@ def can_set_mode(idx):
     if mode_str not in _MODE_NAME_TO_BYTE:
         return jsonify({"error": f"invalid mode, use: {list(_MODE_NAME_TO_BYTE)}"}), 400
     try:
-        with _hw_lock:
-            ok = _cans[idx].set_mode(_MODE_NAME_TO_BYTE[mode_str])
+        ok = _cans[idx].set_mode(_MODE_NAME_TO_BYTE[mode_str])
         if not ok:
             return jsonify({"error": "mode change timed out"}), 500
         log.info("CAN%d mode → %s", idx, mode_str)
@@ -412,10 +337,14 @@ if __name__ == "__main__":
                         help="Hardware poll interval in seconds")
     args = parser.parse_args()
 
-    # Initialise relay outputs (all off)
+    # Reflect broker's current PSU state
+    try:
+        _psu_on = psu_status()["ps_on"]
+    except Exception as exc:
+        log.warning("could not read initial PSU state from broker: %s", exc)
+
     _init_relays()
 
-    # Prime the cache before accepting requests
     log.info("Running initial hardware poll...")
     _poll()
 
