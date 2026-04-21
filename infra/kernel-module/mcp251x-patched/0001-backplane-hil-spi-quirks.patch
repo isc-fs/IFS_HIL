@@ -39,21 +39,61 @@
  	}
  }
  
-@@ -903,6 +895,13 @@
+@@ -744,29 +736,25 @@
+ {
+ 	mcp251x_write_reg(spi, CANCTRL, CANCTRL_REQOP_SLEEP);
+ }
++
++static int mcp251x_hw_reset(struct spi_device *spi);
  
+ /* May only be called when device is sleeping! */
+ static int mcp251x_hw_wake(struct spi_device *spi)
+ {
+-	u8 value;
+ 	int ret;
+ 
+-	/* Force wakeup interrupt to wake device, but don't execute IST */
++	/* Patched: on BACKPLANE_HIL the WAKIE/WAKIF wake trick + CANCTRL
++	 * write to CONFIG does not reliably bring the chip out of sleep —
++	 * writing CANCTRL from sleep times out because the oscillator is
++	 * stopped. The only reliable wake path here is a full hardware
++	 * reset (the 0xC0 RESET SPI instruction restarts the oscillator
++	 * and the patched hw_reset forces CONFIG via CANCTRL afterwards). */
+ 	disable_irq_nosync(spi->irq);
+-	mcp251x_write_2regs(spi, CANINTE, CANINTE_WAKIE, CANINTF_WAKIF);
+ 
+-	/* Wait for oscillator startup timer after wake up */
+-	mdelay(MCP251X_OST_DELAY_MS);
+-
+-	/* Put device into config mode */
+-	mcp251x_write_reg(spi, CANCTRL, CANCTRL_REQOP_CONF);
+-
+-	/* Wait for the device to enter config mode */
+-	ret = mcp251x_read_stat_poll_timeout(spi, value, value == CANCTRL_REQOP_CONF,
+-					     MCP251X_OST_DELAY_MS * 1000,
+-					     USEC_PER_SEC);
++	ret = mcp251x_hw_reset(spi);
+ 	if (ret) {
+-		dev_err(&spi->dev, "MCP251x didn't enter in config mode\n");
++		dev_err(&spi->dev, "MCP251x didn't wake from sleep\n");
+ 		return ret;
+ 	}
+ 
+@@ -904,6 +892,13 @@
  	/* Wait for oscillator startup timer after reset */
  	mdelay(MCP251X_OST_DELAY_MS);
-+
+ 
 +	/* Patched: RESET instruction is unreliable on BACKPLANE_HIL, and
 +	 * the chip's CLKEN/CLKPRE bits must match the power-on default
 +	 * (0x07 in the low bits) to satisfy mcp251x_hw_probe's sanity
 +	 * check. Write CANCTRL = 0x87 (REQOP_CONF | CLKEN | CLKPRE_8). */
 +	mcp251x_write_reg(spi, CANCTRL, CANCTRL_REQOP_CONF | 0x07);
 +	mdelay(1);
- 
++
  	/* Wait for reset to finish */
  	ret = mcp251x_read_stat_poll_timeout(spi, value, value == CANCTRL_REQOP_CONF,
-@@ -926,9 +925,10 @@
+ 					     MCP251X_OST_DELAY_MS * 1000,
+@@ -926,9 +921,10 @@
  
  	dev_dbg(&spi->dev, "CANCTRL 0x%02x\n", ctrl);
  
