@@ -32,12 +32,19 @@ class HardwareBackend(Protocol):
     # DAC
     def dac_set_voltage(self, idx: int, channel: int, volts: float) -> None: ...
     def dac_get_voltage(self, idx: int, channel: int) -> float: ...
+    def dac_read_device_id(self, idx: int) -> int: ...
+    def dac_reset(self, idx: int) -> None: ...
+    def dac_zero_all(self, idx: int) -> None: ...
 
     # CAN
     def can_set_mode(self, idx: int, mode: int) -> bool: ...
     def can_get_mode(self, idx: int) -> int: ...
     def can_read_error_counters(self, idx: int) -> list[int]: ...
     def can_status(self, idx: int) -> dict: ...
+    def can_reset(self, idx: int) -> None: ...
+    def can_init(self, idx: int, bitrate: int) -> bool: ...
+    def can_loopback_test(self, idx: int, can_id: int, data_b64: str) -> bool: ...
+    def can_int_level(self, idx: int) -> int: ...
 
     # INA226
     def ina_read(self, addr: int) -> dict: ...
@@ -46,14 +53,23 @@ class HardwareBackend(Protocol):
     def ina_shunt_voltage(self, addr: int) -> float: ...
     def ina_current(self, addr: int) -> float: ...
     def ina_power(self, addr: int) -> float: ...
+    def ina_read_manufacturer_id(self, addr: int) -> int: ...
+    def ina_read_die_id(self, addr: int) -> int: ...
 
     # TCA9555
     def tca_read(self, addr: int) -> dict: ...
     def tca_is_present(self, addr: int) -> bool: ...
     def tca_read_port(self, addr: int, port: int) -> int: ...
     def tca_set_direction(self, addr: int, port: int, mask: int) -> None: ...
+    def tca_get_direction(self, addr: int, port: int) -> int: ...
+    def tca_set_all_inputs(self, addr: int) -> None: ...
+    def tca_set_all_outputs(self, addr: int) -> None: ...
     def tca_write_port(self, addr: int, port: int, value: int) -> None: ...
+    def tca_write_all(self, addr: int, p0: int, p1: int) -> None: ...
     def tca_write_pin(self, addr: int, port: int, pin: int, value: bool) -> None: ...
+
+    # I2C bus scan
+    def i2c_scan(self, start: int, end: int) -> list[int]: ...
 
     # nRF24L01+
     def nrf_is_present(self) -> bool: ...
@@ -199,6 +215,24 @@ class HardwareManager:
             self._op_count += 1
             return dacs[idx].get_voltage(channel)
 
+    def dac_read_device_id(self, idx: int) -> int:
+        dacs = self._ensure_dacs()
+        with self._spi_lock:
+            self._op_count += 1
+            return dacs[idx].read_device_id()
+
+    def dac_reset(self, idx: int) -> None:
+        dacs = self._ensure_dacs()
+        with self._spi_lock:
+            self._op_count += 1
+            dacs[idx].reset()
+
+    def dac_zero_all(self, idx: int) -> None:
+        dacs = self._ensure_dacs()
+        with self._spi_lock:
+            self._op_count += 1
+            dacs[idx].zero_all()
+
     # ------------------------------------------------------------------
     # CAN
     # ------------------------------------------------------------------
@@ -224,6 +258,27 @@ class HardwareManager:
             self._op_count += 1
             tec, rec = self._cans[idx].read_error_counters()
             return {"mode": self._cans[idx].get_mode(), "tec": tec, "rec": rec}
+
+    def can_reset(self, idx: int) -> None:
+        with self._spi_lock:
+            self._op_count += 1
+            self._cans[idx].reset()
+
+    def can_init(self, idx: int, bitrate: int) -> bool:
+        with self._spi_lock:
+            self._op_count += 1
+            return self._cans[idx].init(bitrate)
+
+    def can_loopback_test(self, idx: int, can_id: int, data_b64: str) -> bool:
+        import base64
+        data = base64.b64decode(data_b64)
+        with self._spi_lock:
+            self._op_count += 1
+            return self._cans[idx].loopback_test(can_id=can_id, data=data)
+
+    def can_int_level(self, idx: int) -> int:
+        int_pins = [CFG.INT_CAN1, CFG.INT_CAN2, CFG.INT_CAN3]
+        return int(self._GPIO.input(int_pins[idx]))
 
     # ------------------------------------------------------------------
     # INA226
@@ -259,6 +314,16 @@ class HardwareManager:
             self._op_count += 1
             return self._inas[addr].power()
 
+    def ina_read_manufacturer_id(self, addr: int) -> int:
+        with self._i2c_lock:
+            self._op_count += 1
+            return self._inas[addr].read_manufacturer_id()
+
+    def ina_read_die_id(self, addr: int) -> int:
+        with self._i2c_lock:
+            self._op_count += 1
+            return self._inas[addr].read_die_id()
+
     # ------------------------------------------------------------------
     # TCA9555
     # ------------------------------------------------------------------
@@ -283,15 +348,51 @@ class HardwareManager:
             self._op_count += 1
             self._tcas[addr].set_direction(port, mask)
 
+    def tca_get_direction(self, addr: int, port: int) -> int:
+        with self._i2c_lock:
+            self._op_count += 1
+            return self._tcas[addr].get_direction(port)
+
+    def tca_set_all_inputs(self, addr: int) -> None:
+        with self._i2c_lock:
+            self._op_count += 1
+            self._tcas[addr].set_all_inputs()
+
+    def tca_set_all_outputs(self, addr: int) -> None:
+        with self._i2c_lock:
+            self._op_count += 1
+            self._tcas[addr].set_all_outputs()
+
     def tca_write_port(self, addr: int, port: int, value: int) -> None:
         with self._i2c_lock:
             self._op_count += 1
             self._tcas[addr].write_port(port, value)
 
+    def tca_write_all(self, addr: int, p0: int, p1: int) -> None:
+        with self._i2c_lock:
+            self._op_count += 1
+            self._tcas[addr].write_all(p0, p1)
+
     def tca_write_pin(self, addr: int, port: int, pin: int, value: bool) -> None:
         with self._i2c_lock:
             self._op_count += 1
             self._tcas[addr].write_pin(port, pin, value)
+
+    # ------------------------------------------------------------------
+    # I2C bus scan
+    # ------------------------------------------------------------------
+
+    def i2c_scan(self, start: int = 0x08, end: int = 0x78) -> list[int]:
+        found: list[int] = []
+        with self._i2c_lock:
+            self._op_count += 1
+            for addr in range(start, end):
+                try:
+                    self._i2c.write_byte(addr, 0x00)
+                    found.append(addr)
+                except OSError:
+                    pass
+        return found
 
     # ------------------------------------------------------------------
     # nRF24L01+

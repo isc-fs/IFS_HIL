@@ -47,11 +47,18 @@ def build_method_table(backend: HardwareBackend) -> dict[str, Callable[..., Any]
         # DAC
         "dac.set_voltage": backend.dac_set_voltage,
         "dac.get_voltage": backend.dac_get_voltage,
+        "dac.read_device_id": backend.dac_read_device_id,
+        "dac.reset": backend.dac_reset,
+        "dac.zero_all": backend.dac_zero_all,
         # CAN
         "can.set_mode": backend.can_set_mode,
         "can.get_mode": backend.can_get_mode,
         "can.read_error_counters": backend.can_read_error_counters,
         "can.status": backend.can_status,
+        "can.reset": backend.can_reset,
+        "can.init": backend.can_init,
+        "can.loopback_test": backend.can_loopback_test,
+        "can.int_level": backend.can_int_level,
         # INA226
         "ina.read": backend.ina_read,
         "ina.is_present": backend.ina_is_present,
@@ -59,13 +66,21 @@ def build_method_table(backend: HardwareBackend) -> dict[str, Callable[..., Any]
         "ina.shunt_voltage": backend.ina_shunt_voltage,
         "ina.current": backend.ina_current,
         "ina.power": backend.ina_power,
+        "ina.read_manufacturer_id": backend.ina_read_manufacturer_id,
+        "ina.read_die_id": backend.ina_read_die_id,
         # TCA9555
         "tca.read": backend.tca_read,
         "tca.is_present": backend.tca_is_present,
         "tca.read_port": backend.tca_read_port,
         "tca.set_direction": backend.tca_set_direction,
+        "tca.get_direction": backend.tca_get_direction,
+        "tca.set_all_inputs": backend.tca_set_all_inputs,
+        "tca.set_all_outputs": backend.tca_set_all_outputs,
         "tca.write_port": backend.tca_write_port,
+        "tca.write_all": backend.tca_write_all,
         "tca.write_pin": backend.tca_write_pin,
+        # I2C bus scan
+        "i2c.scan": backend.i2c_scan,
         # nRF24L01+
         "nrf.is_present": backend.nrf_is_present,
         # PSU
