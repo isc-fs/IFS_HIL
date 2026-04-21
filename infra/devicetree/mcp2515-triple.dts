@@ -103,12 +103,13 @@
             status = "okay";
             pinctrl-names = "default";
             pinctrl-0 = <&spi0_data_only_pins>;
-            /* CS pins, active-low. The kernel SPI core may set
-             * SPI_CS_HIGH and rely on the gpiolib "enforce active-low
-             * on GPIO handle" behaviour for the MCP2515 binding; either
-             * polarity flag on cs-gpios works, we leave it ACTIVE_LOW
-             * as the conventional choice. */
-            cs-gpios = <&gpio 27 1>, <&gpio 17 1>, <&gpio 18 1>;
+            /* CS pins, active-low. Four entries:
+             *   0..2: MCP2515 chips on GPIO27/17/18 (PCB)
+             *   3:    GPIO16, unused on the PCB — attached to a spidev
+             *         child below so /dev/spidev0.3 exists for the
+             *         register-level Python driver to reach the DACs,
+             *         ADCs, and nRF24 via no_cs=True + manual GPIO CS. */
+            cs-gpios = <&gpio 27 1>, <&gpio 17 1>, <&gpio 18 1>, <&gpio 16 1>;
 
             can0: mcp2515@0 {
                 reg = <0>;
@@ -154,6 +155,18 @@
                 interrupt-parent = <&gpio>;
                 interrupts = <6 8>;              /* GPIO6, IRQ_TYPE_LEVEL_LOW */
                 clocks = <&mcp2515_osc>;
+                status = "okay";
+            };
+
+            /* /dev/spidev0.3 lives here so the register-level Python
+             * driver keeps reaching the DACs, ADCs, and nRF24 via
+             * no_cs=True + manual GPIO CS. GPIO16 is the nominal CS but
+             * it is ignored in practice (no_cs=True) and is not wired
+             * anywhere on the PCB. */
+            spidev@3 {
+                reg = <3>;
+                compatible = "spidev";
+                spi-max-frequency = <1000000>;
                 status = "okay";
             };
         };
