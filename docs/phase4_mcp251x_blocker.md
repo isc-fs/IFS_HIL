@@ -1,109 +1,141 @@
-# Phase 4 — mcp251x kernel-driver blocker
+# Phase 4 — mcp251x kernel-driver adoption on BACKPLANE_HIL
 
 ## Status
 
-**Parked pending hardware debug.** Phase 4 of the broker migration (see
-[docs/broker_migration_plan.md](broker_migration_plan.md)) requires at
-least one MCP2515 on the BACKPLANE_HIL PCB to be bound to the Linux
-`mcp251x` kernel driver so the Rust
-[can-flasher](https://github.com/isc-fs/can-flasher) can talk to the
-ECUs over SocketCAN. Three device-tree overlay iterations on the bench
-all hit the same symptom and we do not yet know the root cause.
+**Resolved.** All three MCP2515s on the PCB are bound to the kernel
+`mcp251x` driver and appear as `can0`, `can1`, `can2` kernel netdevs
+at boot. Loopback transmit/receive works on `can0` at 500 kbit/s.
+The Rust `isc-fs/can-flasher` can attach via `-i socketcan -c canN`.
 
-## What works
+The path to the resolution is captured here because the diagnosis
+took a significant detour and the fixes are non-obvious.
 
-- The register-level Python driver in [tools/mcp2515.py](../tools/mcp2515.py)
-  reads CANSTAT and runs loopback tests cleanly on all three MCP2515s
-  through the existing `dtoverlay=spi0-0cs` + `no_cs=True` + manual GPIO
-  chip-select path.
-- Both dtoverlays in [infra/devicetree/](../infra/devicetree/) compile
-  with `dtc -@` without errors and load correctly at boot (kernel sees
-  them, mcp251x driver binds to the declared SPI children, interrupts
-  register on GPIO4/5/6 without conflict).
-- `gpio=7=op,dl` at the firmware stage successfully asserts PS_ON# and
-  the ATX 3V3 rail is up by the time the kernel probes — confirmed by a
-  successful I2C scan finding all 7 expected devices.
+## Symptom
 
-## The blocker
+Stock `mcp251x` on Raspberry Pi OS kernel 6.12.47+rpt-rpi-v8, with a
+custom dtoverlay mapping our three MCP2515s to `cs-gpios`
+(GPIO27/17/18) and IRQs (GPIO4/5/6), failed probe with one of:
 
-Every probe attempt, on every MCP2515, ends with:
+- `mcp251x spiN: MCP251x didn't enter in conf mode after reset` → `-110 ETIMEDOUT`
+- `mcp251x spiN: Cannot initialize MCP2515. Wrong wiring?` → `-19 ENODEV`
+
+Meanwhile, the existing register-level Python driver in
+`tools/mcp2515.py` — via `/dev/spidev0.0` with `no_cs=True` and
+manual GPIO CS — reads and writes the same chips cleanly and passes
+the HIL test suite.
+
+## What didn't cause it (ruled out)
+
+Every time we iterated on one of these, the -110 timeout (and later
+the -19 ENODEV) persisted identically:
+
+- dtoverlay syntax (`-34 ERANGE` went away once `clocks = <&fixed-clock>;`
+  was added; moot for later failures)
+- `spidev0/1` collision (fixed via `status = "disabled"` fragments)
+- `cs-gpios` polarity flag (ACTIVE_LOW vs ACTIVE_HIGH — kernel
+  forcibly "enforces active low on GPIO handle" for the
+  `microchip,mcp2515` binding; the DT flag is overridden)
+- Pi 5VSBY under-dimensioned supply — swapped for a 3 A supply,
+  `vcgencmd get_throttled = 0x0`, probe still failed identically
+- PSU timing / crystal startup — delayed `modprobe` 76 s after boot,
+  still failed
+- Number of chips (single-chip vs three-chip overlay — same)
+- SPI clock frequency (500 kHz through 10 MHz — same)
+- SPI master (`spi-bcm2835` vs bitbanged `spi-gpio` — same `-110`
+  on both; ruled out controller-specific quirks)
+- IRQ type (`IRQ_TYPE_EDGE_FALLING` vs `IRQ_TYPE_LEVEL_LOW` — same)
+
+## What caused it (three hardware-level quirks stacked)
+
+Diagnosed from `ftrace` on `spi/*` tracepoints plus a Python
+write-known-value / read-back experiment on `/dev/spidev0.0`:
+
+### 1. Single multi-byte SPI reads corrupt the last byte
+
+Through the PCB's SN74LVC125A MISO buffer, the BCM2835 SPI
+controller's single `[cmd, addr, dummy]` 3-byte transfer loses or
+corrupts the data byte. Writes of any length round-trip correctly —
+only the last byte of a multi-byte transfer where the master samples
+MISO is affected.
+
+Splitting into `[cmd, addr]` + `[dummy]` with CS held low across
+both (what our Python driver already does via two `xfer2` calls)
+gives clean reads.
+
+### 2. `RESET` instruction does not reliably enter CONFIG mode
+
+The MCP2515 datasheet specifies that issuing the `0xC0` RESET SPI
+instruction puts the chip in Configuration mode. On this board,
+after RESET the chip stays in whatever prior mode it was in.
+Explicitly writing `CANCTRL = 0x80` reliably transitions it to
+CONFIG (CANSTAT reflects the mode change).
+
+### 3. `CANCTRL` reads always return `0x00`
+
+After any value is written to CANCTRL, reads of the register return
+`0x00` instead of the written value. Writes still take effect — the
+chip's operational mode matches what was written — but the stock
+driver's power-up sanity check `(CANCTRL & 0x17) != 0x07` always
+fails, producing `-ENODEV`. CANSTAT reads work correctly.
+
+## The fix
+
+Two artefacts on this branch:
+
+- `infra/devicetree/mcp2515-triple.dts` — custom dtoverlay that
+  declares all three MCP2515s on `cs-gpios = <27, 17, 18>` with
+  level-low IRQs on GPIO4/5/6, `spi-cpol/spi-cpha` (mode 3), a
+  shared 16 MHz `fixed-clock` node, and `pinctrl-0` on SPI0 that
+  claims only MOSI/MISO/SCK so GPIO7/8 stay free for PSU_ON / PWR_OK.
+- `infra/kernel-module/mcp251x-patched/` — out-of-tree module with
+  four patches to `drivers/net/can/spi/mcp251x.c` (see that
+  directory's README). The patch forces split reads, bootstraps
+  CONFIG mode via explicit CANCTRL write, and skips the CANCTRL
+  read-back sanity check.
+
+### Required `/boot/firmware/config.txt` entries
 
 ```
-mcp251x spi0.N: MCP251x didn't enter in conf mode after reset
-mcp251x spi0.N: Probe failed, err=110
-mcp251x spi0.N: probe with driver mcp251x failed with error -110
+dtoverlay=mcp2515-triple
+gpio=7=op,dl        # PSU_ON# asserted at firmware stage
+gpio=8=ip,pd        # PWR_OK as pulled-down input (not leftover SPI0_CE0)
 ```
 
-`-110` is `-ETIMEDOUT`. The driver sequence is: send a SPI `RESET`
-command (`0xC0`), then poll `CANSTAT` for the `CONFIG` bit to appear,
-with a 1-second timeout. The chips never respond as expected.
+### Install flow (on the Pi)
 
-We ruled out:
+```
+sudo cp infra/devicetree/mcp2515-triple.dtbo /boot/firmware/overlays/
+# add the dtoverlay / gpio lines to /boot/firmware/config.txt
+cd infra/kernel-module/mcp251x-patched && ./build.sh
+sudo reboot
+```
 
-- **Overlay syntax**: initial `-34 -ERANGE` went away once
-  `clocks = <&mcp2515_osc>;` was added (modern driver needs a clock
-  node, not just `oscillator-frequency`).
-- **Spidev collision**: earlier "chipselect 0/1 already in use" resolved
-  by disabling `&spidev0` / `&spidev1` fragments.
-- **PSU not yet up when probe runs**: we tested a delayed probe after
-  ~76 s of PSU-on, `modprobe`-ing `mcp251x` explicitly. Same `-110`.
-- **Crystal startup**: 76 s is >>> any crystal OST time.
-- **SPI clock too fast**: tried `spi-max-frequency = <500000>`. Same.
-- **Too many chips in contention**: tried both 3-chip
-  ([`mcp2515-triple.dts`](../infra/devicetree/mcp2515-triple.dts)) and
-  1-chip
-  ([`mcp2515-can0-only.dts`](../infra/devicetree/mcp2515-can0-only.dts))
-  overlays. Same on both.
+## Verification
 
-## Most likely root cause
+After a clean boot:
 
-Something about how `spi-bcm2835` on the Pi 5 drives the SPI transfer
-through the `cs-gpios` pins differs from what our Python driver does
-with `no_cs=True` + manual GPIO writes, in a way that the MCP2515
-doesn't accept. Candidates (need oscilloscope evidence):
+```
+$ sudo dmesg | grep mcp251x
+mcp251x: loading out-of-tree module taints kernel.
+mcp251x spi0.2 can0: MCP2515 successfully initialized.
+mcp251x spi0.1 can1: MCP2515 successfully initialized.
+mcp251x spi0.0 can2: MCP2515 successfully initialized.
 
-1. **CS-to-SCLK setup time**: kernel may not hold CS low long enough
-   before the first SCLK edge.
-2. **SCLK idle polarity mismatch**: we set mode 0 in both paths; worth
-   confirming on the wire.
-3. **MISO buffer gating**: SN74LVC125A's `~OE` is driven by
-   `PWR_OK → Q5 NMOS`. If the buffer's enable lags the kernel's first
-   read of CANSTAT by even a few microseconds after reset, the poll
-   reads floating/undefined MISO and never matches `CONFIG`.
-4. **Undervoltage on the Pi itself**: dmesg reports
-   `hwmon hwmon1: Undervoltage detected!` during the probe window. A
-   sagging Pi 3V3 corrupts SPI signalling.
+$ sudo ip link set can0 up type can bitrate 500000 loopback on
+$ cansend can0 123#DEADBEEFCAFEBABE ; candump -n 1 can0
+ (0.000013)  can0  123   [8]  DE AD BE EF CA FE BA BE
+```
 
-## Suggested next steps
+## Follow-ups
 
-1. **Scope SPI during probe.** Trigger on CS low on GPIO27, capture
-   MOSI/MISO/SCLK. Compare two traces:
-   - Broker's Python driver reading CANSTAT (known-working)
-   - Kernel mcp251x's reset-then-poll sequence (failing)
-2. **Fix the Pi undervoltage.** Whether or not it's the root cause, it
-   shouldn't be there. Check the Pi's own 5 V supply adequacy.
-3. **Also try SPI0 CE0 as the kernel's CS** (i.e. hardware CS, not
-   `cs-gpios`). That would require rewiring one chip's CS from GPIO27 to
-   GPIO8 for a bench test, but it isolates whether the issue is specific
-   to soft CS on this combo of kernel + Pi 5.
-
-Once probe works on at least one chip, Phase 4 proper unblocks:
-
-- Install can-flasher via `cargo install --git
-  https://github.com/isc-fs/can-flasher --tag v1.1.1` (needs
-  `libudev-dev`, `pkg-config`).
-- Bring up the bound interface at 500 kbit/s via `systemd-networkd`.
-- Either keep the other two MCP2515s on the register-level broker
-  driver (Option A) or extend the overlay back to all three (Option B).
-- Adapt broker's CAN RPC methods for the kernel-bound chip (socketcan
-  send/recv via `python-can`, state+counters via `pyroute2`).
-
-## Files preserved
-
-- [infra/devicetree/mcp2515-triple.dts](../infra/devicetree/mcp2515-triple.dts)
-  — three-chip overlay (Option B).
-- [infra/devicetree/mcp2515-can0-only.dts](../infra/devicetree/mcp2515-can0-only.dts)
-  — single-chip overlay (Option A).
-
-Neither is installed on the bench. The bench is running
-`dtoverlay=spi0-0cs` as before.
+- `can1` / `can2` intermittently show `NO-CARRIER` when all three are
+  brought up simultaneously. `can0` is unaffected. Likely an
+  IRQ-sharing or SPI bus arbitration quirk. Not a blocker for
+  sequential flashing.
+- Broker/dashboard/tests need their CAN backend migrated from
+  register-level SPI to `python-can`-over-socketcan for the portion
+  that touches the CAN chips. The other devices (DAC, ADC, INA226,
+  TCA9555, nRF24) stay on register-level SPI.
+- `systemd-networkd` units to bring `canN` up at 500 kbit/s on boot.
+- `cargo install` `isc-fs/can-flasher` on the Pi, end-to-end flash
+  test against an ECU.
