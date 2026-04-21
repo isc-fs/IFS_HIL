@@ -22,7 +22,10 @@ MISO BUFFER (IC1, SN74LVC125A):
 # SPI bus
 # ---------------------------------------------------------------------------
 SPI_BUS = 0          # /dev/spidev0.x
-SPI_DEVICE = 0       # opened as spidev0.0; CS managed manually
+SPI_DEVICE = 3       # opened as spidev0.3; CS managed manually (no_cs=True)
+                     # spi0.0/1/2 are claimed by the kernel mcp251x driver
+                     # for the three MCP2515s via the mcp2515-triple overlay
+                     # — see infra/devicetree/mcp2515-triple.dts.
 SPI_MAX_HZ = 1_000_000  # conservative 1 MHz for all peripherals
 
 # ---------------------------------------------------------------------------
