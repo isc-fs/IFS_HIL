@@ -96,23 +96,27 @@ class TestMCP2515Loopback:
         assert rec == 0, f"{CAN_NAMES[idx]}: REC = {rec} (expected 0)"
 
 
-class TestMCP2515IntPins:
-    """Verify INT GPIO pins are readable and are HIGH (no pending interrupts)."""
+class TestMCP2515LinkHealth:
+    """Verify each CAN interface can be brought up and stays healthy.
+
+    Under the kernel mcp251x driver the physical INT pins are owned by the
+    driver and not readable from userspace. `int_level()` on the broker
+    proxy is repurposed as a link-health indicator: 1 when the netdev is
+    UP, 0 when DOWN. Bringing a chip up in LOOPBACK mode (no peer needed)
+    is the cheapest way to exercise the wake path and confirm it's alive.
+    """
 
     @pytest.mark.parametrize("idx", range(3), ids=CAN_NAMES)
-    def test_int_pin_idle_high(self, can_controllers, idx):
-        """
-        After init with no pending frames, INT# should be HIGH.
-        The MCP2515 INT pin is active-low; it de-asserts (high) when no
-        interrupt is pending.
-        """
-        int_pin = INT_PINS[idx]
+    def test_link_up_in_loopback(self, can_controllers, idx):
         ctrl = can_controllers[idx]
         ctrl.init(bitrate=CFG.CAN_BITRATE)
-        # Small delay for any residual interrupt to clear
+        ctrl.set_mode(_MODE_LOOPBACK)
         time.sleep(0.01)
         level = ctrl.int_level()
         assert level == 1, (
-            f"{CAN_NAMES[idx]}: INT pin (GPIO{int_pin}) is LOW with no pending "
-            "interrupt. Check INT pin assignment in hw_config.py."
+            f"{CAN_NAMES[idx]}: link is DOWN after init + set_mode(LOOPBACK). "
+            "Check kernel mcp251x driver (sudo dmesg | grep mcp251x) and "
+            "the PSU_ON signal (pinctrl get 7 should show 'lo')."
         )
+        # Return to CONFIG so later tests start clean
+        ctrl.set_mode(_MODE_CONFIG)
