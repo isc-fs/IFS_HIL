@@ -126,12 +126,24 @@ $ cansend can0 123#DEADBEEFCAFEBABE ; candump -n 1 can0
  (0.000013)  can0  123   [8]  DE AD BE EF CA FE BA BE
 ```
 
+## can1/can2 `NO-CARRIER` — resolved
+
+The intermittent `NO-CARRIER` reported on `can1`/`can2` after rapid
+`ip link set up` was a second hardware quirk in the same family as the
+probe failure: `mcp251x_hw_wake`'s WAKIE/WAKIF-based wake-from-SLEEP
+sequence does not reliably wake the chip on this board. The
+subsequent `CANCTRL = 0x80` write into a still-sleeping chip times out
+(the oscillator is stopped).
+
+Fixed by patch 5: `mcp251x_hw_wake` now delegates to `mcp251x_hw_reset`,
+which uses the RESET SPI instruction to restart the oscillator, and
+then the patched path drives CANCTRL explicitly. After this, all three
+`canN` stay `UP` in `ERROR-ACTIVE` state under any bring-up ordering,
+loopback TX/RX round-trips on every chip (verified with distinct IDs
+`0x707`/`0x717`/`0x727`).
+
 ## Follow-ups
 
-- `can1` / `can2` intermittently show `NO-CARRIER` when all three are
-  brought up simultaneously. `can0` is unaffected. Likely an
-  IRQ-sharing or SPI bus arbitration quirk. Not a blocker for
-  sequential flashing.
 - Broker/dashboard/tests need their CAN backend migrated from
   register-level SPI to `python-can`-over-socketcan for the portion
   that touches the CAN chips. The other devices (DAC, ADC, INA226,

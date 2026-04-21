@@ -1,6 +1,6 @@
 # `mcp251x-patched` — kernel module for BACKPLANE_HIL
 
-Out-of-tree build of the Linux `mcp251x` driver with four surgical
+Out-of-tree build of the Linux `mcp251x` driver with five surgical
 patches required to make the three MCP2515 CAN controllers on the
 BACKPLANE_HIL PCB probe and operate under `SocketCAN`.
 
@@ -26,6 +26,13 @@ ftrace and Python SPI experiments:
    write — `CANSTAT` reflects the requested mode — but read-back of
    `CANCTRL` is stuck). The stock driver uses `CANCTRL` read as a
    power-up sanity check, which always fails here.
+4. `ip link set canN up` after a previous `down` calls `mcp251x_hw_wake`,
+   which tries to wake the chip from SLEEP via a `CANINTE`/`CANINTF`
+   WAKIE-trigger write followed by `CANCTRL = 0x80`. On this hardware
+   the chip does not reliably wake via that mechanism — the oscillator
+   stays stopped and the subsequent CANCTRL write times out. The same
+   symptom was already known for the register-level Python driver,
+   where `reset()` is issued on any SLEEP → target-mode transition.
 
 ## What the patch does
 
@@ -42,6 +49,12 @@ See `0001-backplane-hil-spi-quirks.patch`:
 4. `mcp251x_hw_probe` — skip the `(CANCTRL & 0x17) != 0x07` sanity
    check. The CANSTAT-based CONFIG-mode verification already proves
    the chip is alive.
+5. `mcp251x_hw_wake` — replace the WAKIE/WAKIF + `CANCTRL` write with
+   a full `mcp251x_hw_reset()` call. The hardware reset restarts the
+   oscillator cleanly (unlike the WAKIE trick on this board) and the
+   patched reset path already handles the CONFIG-mode transition.
+   A forward declaration of `mcp251x_hw_reset` is added above
+   `mcp251x_hw_wake` to satisfy C ordering.
 
 Every change is annotated with a `/* Patched: … */` comment in the
 source that references this README.
