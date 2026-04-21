@@ -1,0 +1,98 @@
+/*
+ * Single-chip mcp2515 overlay for the BACKPLANE_HIL PCB.
+ *
+ *   can0  CS=GPIO27  INT=GPIO4   (U17, labelled CAN1 in hw_config.py)
+ *
+ * Used for Option A of the broker-migration Phase 4: only the CAN bus
+ * wired to the ECUs is moved to the kernel mcp251x driver (for the Rust
+ * can-flasher). The other two MCP2515s (CS=GPIO17, CS=GPIO18) stay on
+ * the register-level Python driver owned by hil-broker.
+ *
+ * Slower SPI (500 kHz) than the 3-chip variant to give the kernel
+ * driver more timing margin during reset.
+ *
+ * Supporting firmware-stage config.txt entries required alongside:
+ *   gpio=7=op,dl   # assert PS_ON# so PWR_OK is HIGH before probe
+ *                  # (SN74LVC125A MISO buffer ~OE is gated by PWR_OK).
+ *   gpio=8=ip,pd   # PWR_OK as pulled-down input, not SPI0_CE0 output.
+ *
+ * Build + install:
+ *   dtc -@ -I dts -O dtb -o mcp2515-can0-only.dtbo mcp2515-can0-only.dts
+ *   sudo cp mcp2515-can0-only.dtbo /boot/firmware/overlays/
+ *   # replace `dtoverlay=spi0-0cs` with `dtoverlay=mcp2515-can0-only`
+ *
+ * A second spidev node at reg=1 (CS=GPIO16, unused on the PCB) keeps
+ * /dev/spidev0.1 available so the register-level Python driver can
+ * continue to use `no_cs=True` transfers for the remaining CS pins
+ * (DACs, ADCs, NRF, CAN2, CAN3).
+ */
+
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "brcm,bcm2835";
+
+    fragment@0 {
+        target-path = "/clocks";
+        __overlay__ {
+            #address-cells = <1>;
+            #size-cells = <0>;
+
+            mcp2515_osc: mcp2515_osc {
+                compatible = "fixed-clock";
+                #clock-cells = <0>;
+                clock-frequency = <16000000>;
+            };
+        };
+    };
+
+    fragment@1 {
+        target = <&spi0>;
+        __overlay__ {
+            #address-cells = <1>;
+            #size-cells = <0>;
+            status = "okay";
+
+            /* CS 0 = MCP2515 can0; CS 1 = dummy spidev on unused GPIO16 */
+            cs-gpios = <&gpio 27 1>, <&gpio 16 1>;
+
+            can0: mcp2515@0 {
+                compatible = "microchip,mcp2515";
+                reg = <0>;
+                spi-max-frequency = <500000>;
+                clocks = <&mcp2515_osc>;
+                interrupt-parent = <&gpio>;
+                interrupts = <4 2>;              /* GPIO4, falling edge */
+                status = "okay";
+            };
+
+            /* Kept alive so /dev/spidev0.1 exists for the register-level
+             * driver (no_cs=True, manual CS via GPIO). */
+            spidev@1 {
+                compatible = "spidev";
+                reg = <1>;
+                spi-max-frequency = <1000000>;
+                status = "okay";
+            };
+        };
+    };
+
+    fragment@2 {
+        target = <&spidev0>;
+        __overlay__ {
+            status = "disabled";
+        };
+    };
+
+    fragment@3 {
+        target = <&gpio>;
+        __overlay__ {
+            mcp2515_int_pin: mcp2515_int_pin {
+                brcm,pins = <4>;
+                brcm,function = <0>;             /* input */
+                brcm,pull = <2>;                 /* pull-up */
+            };
+        };
+    };
+};

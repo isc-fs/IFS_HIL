@@ -1,0 +1,123 @@
+/*
+ * Device-tree overlay for the BACKPLANE_HIL PCB.
+ *
+ * Declares three MCP2515 CAN controllers on SPI0, each with its own
+ * GPIO chip-select and interrupt line, matching the PCB wiring in
+ * tools/hw_config.py:
+ *
+ *   can0  CS=GPIO27  INT=GPIO4   (U17, labelled CAN1)
+ *   can1  CS=GPIO17  INT=GPIO5   (U19, labelled CAN2)
+ *   can2  CS=GPIO18  INT=GPIO6   (U21, labelled CAN3)
+ *
+ * Replaces `dtoverlay=spi0-0cs` in /boot/firmware/config.txt. Once
+ * loaded, the chips are owned by the kernel `mcp251x` driver — the
+ * register-level Python driver in tools/mcp2515.py must NOT be used
+ * against them concurrently.
+ *
+ * Supporting firmware-stage config.txt entries required alongside:
+ *   gpio=7=op,dl     # assert PS_ON# early so PWR_OK is HIGH before
+ *                    # the kernel probes mcp251x (the SPI MISO buffer
+ *                    # SN74LVC125A ~OE is gated by PWR_OK).
+ *   gpio=8=ip,pd     # PWR_OK as pulled-down input, not leftover SPI0_CE0.
+ *
+ * Build:
+ *   dtc -@ -I dts -O dtb -o mcp2515-triple.dtbo mcp2515-triple.dts
+ * Install (on the Pi):
+ *   sudo cp mcp2515-triple.dtbo /boot/firmware/overlays/
+ *   # then add `dtoverlay=mcp2515-triple` to /boot/firmware/config.txt
+ */
+
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "brcm,bcm2835";
+
+    /* Fixed-clock node that the mcp251x driver reads via clk_get_rate().
+     * Without this the modern driver rejects probe with -ERANGE because
+     * `oscillator-frequency` alone is not enough for the clock subsystem. */
+    fragment@0 {
+        target-path = "/clocks";
+        __overlay__ {
+            #address-cells = <1>;
+            #size-cells = <0>;
+
+            mcp2515_osc: mcp2515_osc {
+                compatible = "fixed-clock";
+                #clock-cells = <0>;
+                clock-frequency = <16000000>;
+            };
+        };
+    };
+
+    /* Configure SPI0 with three GPIO chip-selects and attach the MCP2515s. */
+    fragment@1 {
+        target = <&spi0>;
+        __overlay__ {
+            #address-cells = <1>;
+            #size-cells = <0>;
+            status = "okay";
+
+            /* Software CS pins, active-low */
+            cs-gpios = <&gpio 27 1>, <&gpio 17 1>, <&gpio 18 1>;
+
+            can0: mcp2515@0 {
+                compatible = "microchip,mcp2515";
+                reg = <0>;
+                spi-max-frequency = <1000000>;
+                clocks = <&mcp2515_osc>;
+                interrupt-parent = <&gpio>;
+                interrupts = <4 2>;              /* GPIO4, falling edge */
+                status = "okay";
+            };
+
+            can1: mcp2515@1 {
+                compatible = "microchip,mcp2515";
+                reg = <1>;
+                spi-max-frequency = <1000000>;
+                clocks = <&mcp2515_osc>;
+                interrupt-parent = <&gpio>;
+                interrupts = <5 2>;              /* GPIO5, falling edge */
+                status = "okay";
+            };
+
+            can2: mcp2515@2 {
+                compatible = "microchip,mcp2515";
+                reg = <2>;
+                spi-max-frequency = <1000000>;
+                clocks = <&mcp2515_osc>;
+                interrupt-parent = <&gpio>;
+                interrupts = <6 2>;              /* GPIO6, falling edge */
+                status = "okay";
+            };
+        };
+    };
+
+    /* Disable the default spidev children — they try to claim CE0/CE1 and
+     * collide with our mcp2515 children. */
+    fragment@2 {
+        target = <&spidev0>;
+        __overlay__ {
+            status = "disabled";
+        };
+    };
+
+    fragment@3 {
+        target = <&spidev1>;
+        __overlay__ {
+            status = "disabled";
+        };
+    };
+
+    /* Configure the INT GPIOs as pulled-up inputs. */
+    fragment@4 {
+        target = <&gpio>;
+        __overlay__ {
+            mcp2515_int_pins: mcp2515_int_pins {
+                brcm,pins = <4 5 6>;
+                brcm,function = <0>;             /* input */
+                brcm,pull = <2>;                 /* pull-up */
+            };
+        };
+    };
+};
