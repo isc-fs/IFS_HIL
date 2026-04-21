@@ -25,6 +25,9 @@ docker-compose.override.yml
 # Claude Code
 .claude/
 
+# PCB design files (kept locally for reference, not versioned in this repo)
+docs/BACKPLANE_HIL/
+
 # Prerequisites
 *.d
 
