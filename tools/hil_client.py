@@ -119,6 +119,19 @@ class DAC80504:
     def get_voltage(self, channel: int) -> float:
         return _call("dac.get_voltage", idx=self._idx, channel=channel)
 
+    def read_device_id(self) -> int:
+        return _call("dac.read_device_id", idx=self._idx)
+
+    def reset(self) -> None:
+        _call("dac.reset", idx=self._idx)
+
+    def zero_all(self) -> None:
+        _call("dac.zero_all", idx=self._idx)
+
+    def set_all(self, voltage: float) -> None:
+        for ch in range(4):
+            self.set_voltage(ch, voltage)
+
 
 # ---------------------------------------------------------------------------
 # MCP2515 — CAN
@@ -143,6 +156,22 @@ class MCP2515:
     def read_error_counters(self) -> tuple[int, int]:
         tec, rec = _call("can.read_error_counters", idx=self._idx)
         return tec, rec
+
+    def reset(self) -> None:
+        _call("can.reset", idx=self._idx)
+
+    def init(self, bitrate: int = 500_000) -> bool:
+        return _call("can.init", idx=self._idx, bitrate=bitrate)
+
+    def loopback_test(self, can_id: int = 0x123,
+                      data: bytes = b"\xDE\xAD\xBE\xEF") -> bool:
+        import base64
+        return _call("can.loopback_test", idx=self._idx, can_id=can_id,
+                     data_b64=base64.b64encode(data).decode("ascii"))
+
+    def int_level(self) -> int:
+        """Read the MCP2515 INT pin level through the broker (GPIO-owned)."""
+        return _call("can.int_level", idx=self._idx)
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +201,12 @@ class INA226:
     def snapshot(self) -> dict:
         return _call("ina.read", addr=self._addr)
 
+    def read_manufacturer_id(self) -> int:
+        return _call("ina.read_manufacturer_id", addr=self._addr)
+
+    def read_die_id(self) -> int:
+        return _call("ina.read_die_id", addr=self._addr)
+
 
 # ---------------------------------------------------------------------------
 # TCA9555
@@ -188,14 +223,29 @@ class TCA9555:
     def set_direction(self, port: int, mask: int) -> None:
         _call("tca.set_direction", addr=self._addr, port=port, mask=mask)
 
+    def get_direction(self, port: int) -> int:
+        return _call("tca.get_direction", addr=self._addr, port=port)
+
+    def set_all_inputs(self) -> None:
+        _call("tca.set_all_inputs", addr=self._addr)
+
+    def set_all_outputs(self) -> None:
+        _call("tca.set_all_outputs", addr=self._addr)
+
     def write_port(self, port: int, value: int) -> None:
         _call("tca.write_port", addr=self._addr, port=port, value=value)
+
+    def write_all(self, port0_val: int, port1_val: int) -> None:
+        _call("tca.write_all", addr=self._addr, p0=port0_val, p1=port1_val)
 
     def write_pin(self, port: int, pin: int, state: bool) -> None:
         _call("tca.write_pin", addr=self._addr, port=port, pin=pin, value=bool(state))
 
     def read_port(self, port: int) -> int:
         return _call("tca.read_port", addr=self._addr, port=port)
+
+    def read_pin(self, port: int, pin: int) -> bool:
+        return bool(self.read_port(port) & (1 << pin))
 
     def read_all(self) -> dict:
         return _call("tca.read", addr=self._addr)
@@ -229,6 +279,11 @@ def psu_status() -> dict:
     return _call("psu.status")
 
 
+def i2c_scan(start: int = 0x08, end: int = 0x78) -> list[int]:
+    """Return a sorted list of addresses that ACK on the I2C bus."""
+    return _call("i2c.scan", start=start, end=end)
+
+
 __all__ = [
     "CFG",
     "DAC80504",
@@ -239,6 +294,7 @@ __all__ = [
     "TCA9555",
     "psu_power",
     "psu_status",
+    "i2c_scan",
     "get_client",
     "close_client",
 ]
