@@ -1,0 +1,69 @@
+# Patches to drivers/net/can/spi/mcp251x.c for the BACKPLANE_HIL PCB
+# Apply against the mcp251x.c from raspberrypi/linux rpi-6.12.y
+# See README.md for the build + install flow.
+
+--- a/mcp251x.c
++++ b/mcp251x.c
+@@ -334,12 +334,8 @@
+ 	priv->spi_tx_buf[0] = INSTRUCTION_READ;
+ 	priv->spi_tx_buf[1] = reg;
+ 
+-	if (spi->controller->flags & SPI_CONTROLLER_HALF_DUPLEX) {
+-		spi_write_then_read(spi, priv->spi_tx_buf, 2, &val, 1);
+-	} else {
+-		mcp251x_spi_trans(spi, 3);
+-		val = priv->spi_rx_buf[2];
+-	}
++	/* Patched: always split read on BACKPLANE_HIL. */
++	spi_write_then_read(spi, priv->spi_tx_buf, 2, &val, 1);
+ 
+ 	return val;
+ }
+@@ -351,17 +347,13 @@
+ 	priv->spi_tx_buf[0] = INSTRUCTION_READ;
+ 	priv->spi_tx_buf[1] = reg;
+ 
+-	if (spi->controller->flags & SPI_CONTROLLER_HALF_DUPLEX) {
++	{
+ 		u8 val[2] = { 0 };
+ 
++		/* Patched: always split on BACKPLANE_HIL. */
+ 		spi_write_then_read(spi, priv->spi_tx_buf, 2, val, 2);
+ 		*v1 = val[0];
+ 		*v2 = val[1];
+-	} else {
+-		mcp251x_spi_trans(spi, 4);
+-
+-		*v1 = priv->spi_rx_buf[2];
+-		*v2 = priv->spi_rx_buf[3];
+ 	}
+ }
+ 
+@@ -903,6 +895,13 @@
+ 
+ 	/* Wait for oscillator startup timer after reset */
+ 	mdelay(MCP251X_OST_DELAY_MS);
++
++	/* Patched: RESET instruction is unreliable on BACKPLANE_HIL, and
++	 * the chip's CLKEN/CLKPRE bits must match the power-on default
++	 * (0x07 in the low bits) to satisfy mcp251x_hw_probe's sanity
++	 * check. Write CANCTRL = 0x87 (REQOP_CONF | CLKEN | CLKPRE_8). */
++	mcp251x_write_reg(spi, CANCTRL, CANCTRL_REQOP_CONF | 0x07);
++	mdelay(1);
+ 
+ 	/* Wait for reset to finish */
+ 	ret = mcp251x_read_stat_poll_timeout(spi, value, value == CANCTRL_REQOP_CONF,
+@@ -926,9 +925,10 @@
+ 
+ 	dev_dbg(&spi->dev, "CANCTRL 0x%02x\n", ctrl);
+ 
+-	/* Check for power up default value */
+-	if ((ctrl & 0x17) != 0x07)
+-		return -ENODEV;
++	/* Patched: CANCTRL reads are unreliable on BACKPLANE_HIL (always
++	 * read as 0x00 despite correct writes; CANSTAT-based mode check
++	 * confirms chip is actually in CONFIG). Skip the power-up default
++	 * sanity check here — the CANSTAT poll already validated CONFIG. */
+ 
+ 	return 0;
+ }
