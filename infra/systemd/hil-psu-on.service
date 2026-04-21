@@ -1,0 +1,25 @@
+[Unit]
+Description=Assert PS_ON# on the BACKPLANE_HIL bench (GPIO7 = low)
+# Must run before anything that talks to main-rail-powered chips (CAN,
+# ADC, DAC). Firmware `gpio=7=op,dl` in config.txt handles the probe
+# window for the kernel mcp251x driver; this service re-asserts it in
+# userspace because the Pi 4's GPIO output state can persist across
+# reboots and sometimes starts HIGH after a prior session that set it
+# HIGH via `pinctrl`. Idempotent — safe to run repeatedly.
+DefaultDependencies=no
+After=sysinit.target
+Before=basic.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# GPIO7 = PS_ON# (active-low to the ATX). Drive LOW to turn PSU on.
+ExecStart=/usr/bin/pinctrl set 7 op dl
+# GPIO8 = PWR_OK (input, pulled-down). Force to avoid leftover SPI0_CE0
+# output config.
+ExecStart=/usr/bin/pinctrl set 8 ip pd
+# On stop (shutdown), de-assert so the bench turns off cleanly.
+ExecStop=/usr/bin/pinctrl set 7 op dh
+
+[Install]
+WantedBy=sysinit.target
