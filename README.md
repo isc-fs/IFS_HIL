@@ -1,88 +1,165 @@
-# IFS08_HIL – Hardware-in-the-Loop Test Environment
+# IFS08_HIL — Hardware-in-the-Loop testbench
 
-This project implements a **Hardware-in-the-Loop (HIL)** testing framework for an **STM32-based ECU**, fully automated through a **Raspberry Pi** acting as the test orchestrator.
-
-It allows continuous integration of embedded firmware by automatically:
-1. Building new firmware revisions inside a reproducible Docker container.
-2. Flashing the ECU through custom CAN bootloader or USB DFU.
-3. Simulating its environment (sensors, faults, CAN messages).
-4. Running automated functional tests.
-5. Producing structured reports for validation and regression tracking.
+Automated STM32 ECU firmware validation on a Raspberry Pi. The bench
+orchestrates reproducible Docker firmware builds, CAN-based flashing,
+hardware simulation (DACs, ADCs, relays, power monitoring), and
+pytest-driven regression. Designed for the Formula Student ECU suite
+(VCU, AMS, MicroDV, Inverter) and wired through the BACKPLANE_HIL PCB.
 
 ---
 
-## Getting Started
+## What the bench does
 
-Setting up the bench on a new Raspberry Pi? See **[docs/getting_started.md](docs/getting_started.md)** for a step-by-step guide covering OS configuration, dependency installation, the observability dashboard, and running the hardware test suite.
+1. Receives a `/hil-build <subdir>` comment on an external firmware PR.
+2. Clones the firmware repo, builds it in a pinned Docker image, uploads
+   the `.bin` artifact.
+3. Flashes the target ECU over CAN via the
+   [`isc-fs/can-flasher`](https://github.com/isc-fs/can-flasher)
+   bootloader protocol.
+4. Runs the HIL pytest suite against the real hardware — injecting
+   stimulus with DAC outputs, reading responses with ADCs and INA226
+   power monitors, manipulating I/O via TCA9555 expanders and relays.
+5. Posts 🟢 / 🔴 back to the originating firmware PR.
 
----
-
-## ⚙️ Overview
-
-**HIL Concept:**  
-The ECU (real hardware) is connected to a simulated environment (virtual sensors, actuators, and power system). The Raspberry Pi manages both the build/test workflow and the simulation interface.
-
-This setup enables safe, repeatable testing of control logic and communication features before integration into the real system.
-
----
-
-## System Architecture
-
-| Component | Role |
-|------------|------|
-| **ECU (STM32)** | Device under test; executes the firmware being validated. |
-| **Raspberry Pi (host)** | Orchestrates build, flash, and test. Runs simulation loops and analysis. |
-| **Docker container** | Provides a reproducible build & test environment (GCC toolchain, OpenOCD, pytest). |
-| **Test bench hardware** | Includes CAN adapter, DAC/ADC boards, relays for fault injection, PSU control, etc. |
+The bench itself is managed through a single
+[`hil-broker`](broker/) process on the Pi — a mediator that owns SPI,
+I²C, and GPIO, and exposes an RPC surface consumed by the dashboard,
+the pytest fixtures, and (soon) the CI flash job. Clients do not
+touch `/dev/*` directly.
 
 ---
 
-## Repository Structure
+## Architecture at a glance
 
-Top-level repository layout and brief explanations:
-
-```text
-IF08_HIL/
-├── .github/                 # CI/CD workflows
-├── configs/                 # Hardware and test configuration YAMLs
-├── docker/                  # Toolchain and build environment
-│   ├── Dockerfile
-│   ├── passthrough.sh
-│   └── toolchain-arm-none-eabi.cmake
-├── docs/                    # Design documentation and diagrams
-├── firmware/                # STM32 firmware source code
-│   ├── src/
-│   ├── include/
-│   └── CMakeLists.txt
-├── infra/                   # Raspberry Pi system-level integration
-│   ├── systemd/
-│   └── udev/
-├── scripts/                 # High-level automation (build, flash, test)
-│   ├── build.sh
-│   ├── flash_openocd.sh
-│   ├── test.sh
-│   └── run_hil_job.sh
-├── tests/                   # Automated HIL tests (pytest)
-│   └── hil/
-│       ├── test_example.py
-│       ├── test_can_faults.py
-│       └── …
-├── tools/                   # Reusable Python utilities (CAN, flashing, PSU control)
-│   ├── can_probe.py
-│   ├── flash.py
-│   ├── power_ctl.py
-│   └── init.py
-├── pyproject.toml           # Python dependencies (optional)
-├── README.md                # You are here
-└── .gitignore
+```
+                           ┌──────────────────┐
+                           │   External CI    │
+                           │  (GitHub Runner) │
+                           │ builds firmware  │
+                           │     .bin         │
+                           └────────┬─────────┘
+                                    │
+                                    ▼ (artifact)
+┌──────────────────────────────────────────────────────────────────┐
+│                    Raspberry Pi (BACKPLANE_HIL)                   │
+│                                                                   │
+│  ┌────────────┐    ┌──────────────┐     ┌────────────────────┐   │
+│  │ Dashboard  │    │  pytest HIL  │     │     can-flasher    │   │
+│  │  (Flask)   │    │    suite     │     │   (Rust binary)    │   │
+│  └─────┬──────┘    └──────┬───────┘     └────────┬───────────┘   │
+│        │ Unix-socket RPC   │                      │               │
+│        └────────┬──────────┘                      │ AF_CAN        │
+│                 │                                 │               │
+│                 ▼                                 │               │
+│          ┌──────────────┐                         │               │
+│          │ hil-broker   │  serialises SPI / I²C   │               │
+│          │ (Python)     │  across every client    │               │
+│          └──────┬───────┘                         │               │
+│                 │                                 │               │
+│         ┌───────┴────────┬────────────┐           │               │
+│         ▼                ▼            ▼           ▼               │
+│    /dev/spidev0.3   /dev/i2c-1   /dev/gpio*   mcp251x (kernel)    │
+│    DAC×4, ADC×3,    INA226×4,    PSU_ON,      socketcan canN      │
+│    nRF24            TCA9555×3    PWR_OK        3× MCP2515 CAN     │
+└──────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+                          ┌──────────────────┐
+                          │ STM32 ECU under  │
+                          │ test (bootloader │
+                          │ or running app)  │
+                          └──────────────────┘
 ```
 
-Notable items:
-- docker/: reproducible build image and toolchain configuration.
-- firmware/: firmware sources and CMake build entrypoint.
-- scripts/: convenience wrappers for CI and on-device automation.
-- tests/: pytest-based HIL test cases and fixtures.
-- tools/: small Python utilities used by tests and scripts.
-- configs/: hardware mappings and test parameter YAMLs.
-- infra/: Raspberry Pi integration (systemd units, udev rules).
+---
 
+## Getting started
+
+- **Fresh bench setup** — follow
+  [`docs/getting-started.md`](docs/getting-started.md).
+  From blank Pi OS to flashing an ECU in roughly 45 minutes.
+- **Day-to-day operation** — see
+  [`docs/operator-guide.md`](docs/operator-guide.md)
+  for recipes: start/stop services, run the HIL suite, flash an ECU,
+  view CAN traffic, recover from bus-off.
+- **Hardware signal map** —
+  [`docs/hardware-reference.md`](docs/hardware-reference.md)
+  documents GPIO/I²C/SPI assignments, the CAN netdev ↔ PCB label
+  inversion, MLC carrier wiring, and the PSU gating path.
+
+---
+
+## Repository layout
+
+```
+.
+├── README.md                    you are here
+├── pyproject.toml               Python package metadata and deps
+├── broker/                      hil-broker: SPI/I²C/GPIO mediator
+│   ├── server.py                Unix-socket JSON-RPC listener
+│   ├── bus.py                   HardwareManager (real backend)
+│   ├── fake_bus.py              In-memory backend for off-bench tests
+│   └── rpc.py                   Method-table dispatcher
+├── dashboard/                   Flask web UI, polls broker every 2 s
+│   ├── app.py                   HTTP endpoints + poll loop
+│   └── index.html               Dark-themed web UI
+├── tools/                       Register-level chip drivers + helpers
+│   ├── hw_config.py             Pin/address single source of truth
+│   ├── hil_client.py            Client-side proxies (talk to broker)
+│   ├── mcp3208.py  dac80504.py  ina226.py  tca9555.py  nrf24l01.py
+│   ├── mcp2515.py               Legacy register-level CAN driver
+│   └── flash.py                 Legacy Python flasher (deprecated)
+├── tests/
+│   ├── broker/                  Unit tests (fake backend, off-bench)
+│   └── hil/                     HIL tests (broker proxies, on-bench)
+├── docs/                        This folder — you are reading it
+├── infra/
+│   ├── devicetree/              mcp2515-triple.dts overlay source
+│   ├── kernel-module/
+│   │   └── mcp251x-patched/     Out-of-tree mcp251x module + patches
+│   ├── systemd/                 hil-psu-on, hil-can-up, hil-broker units
+│   ├── sudoers.d/               ip-link privilege drop-in
+│   └── udev/                    USB device stable-naming rules
+├── docker/                      Firmware build toolchain image
+├── configs/                     Per-ECU YAML configs (VCU, AMS, ...)
+├── scripts/                     launch.sh, build_stm32_binaries.sh
+└── .github/workflows/           CI: hil-build-trigger, hil-flash, …
+```
+
+The `firmware/` directory is intentionally empty; firmware sources
+live in per-ECU repos and are pulled into the bench at CI time.
+
+---
+
+## Documentation index
+
+**Onboarding**
+- [`docs/getting-started.md`](docs/getting-started.md) — zero-to-flashing on a fresh Pi
+- [`docs/operator-guide.md`](docs/operator-guide.md) — day-to-day recipes
+- [`docs/troubleshooting.md`](docs/troubleshooting.md) — symptom → cause → fix
+
+**Reference**
+- [`docs/architecture.md`](docs/architecture.md) — component diagram and responsibilities
+- [`docs/hardware-reference.md`](docs/hardware-reference.md) — PCB signals, GPIO / I²C / CAN mapping
+- [`docs/broker-api.md`](docs/broker-api.md) — every broker RPC method
+- [`docs/dashboard.md`](docs/dashboard.md) — HTTP endpoints and web UI
+
+**Design history**
+- [`docs/design/broker-migration.md`](docs/design/broker-migration.md) — why the broker exists, phase plan
+- [`docs/design/mcp251x-driver-patches.md`](docs/design/mcp251x-driver-patches.md) — the five out-of-tree patches
+- [`docs/design/phase-history.md`](docs/design/phase-history.md) — timeline with PR links
+
+**Development**
+- [`docs/development/setup.md`](docs/development/setup.md) — dev environment, branch policy
+- [`docs/development/testing.md`](docs/development/testing.md) — broker tests, HIL tests, fake backend
+- [`docs/development/kernel-module.md`](docs/development/kernel-module.md) — iterating on mcp251x
+
+---
+
+## License and contribution
+
+Internal project for the ISC Racing Team Formula Student electronics
+sub-system. Not licensed for external reuse without the team's
+consent. Contributions from team members: see
+[`docs/development/setup.md`](docs/development/setup.md) for the branch
+and commit conventions.
