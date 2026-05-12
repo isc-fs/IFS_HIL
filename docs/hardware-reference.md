@@ -257,18 +257,51 @@ For clarity, all GPIOs this bench uses by BCM number, sorted:
 
 ## Power tree
 
-Abridged from the PCB design review:
+Abridged from the PCB design review. Colour-coded by rail.
 
-```
-ATX PSU (J1)
-├── +12V ──── Relay coils K1–K4 (via Q1–Q4 / F1–F4)
-├── +5V  ──── CAN transceiver, buffer, general 5 V rail
-├── +5V_SBY ─┬── U5 LDO ── +3V3_SBY ── INA226 ×4, TCA9555 ×3
-│            └── Pi J2 pin 2/4 ── RPi input power
-│                                 (⚠ must sustain 3 A peak)
-└── +3V3 (ATX) ─ MCP3208 ×3, DAC80504 ×4 (+VREF), MCP2515 ×3, SN65HVD230 ×3
+```mermaid
+flowchart LR
+    ATX["ATX PSU (J1)"]
 
-RPi 3V3_out (J2 pin 1) ── IC1 (SN74LVC125A) ── buffered SPI to peripherals
+    V12["+12V"]
+    V5["+5V"]
+    V5SBY["+5V_SBY"]
+    V3V3["+3V3 (ATX main)"]
+    V3V3SBY["+3V3_SBY<br/>(via U5 TLV75533 LDO)"]
+    V3V3PI["RPi 3V3_out<br/>(Pi internal LDO, J2 pin 1)"]
+
+    RPI["Raspberry Pi 4<br/>⚠ ≥ 3 A peak on 5V_SBY"]
+
+    RELAYS["Relay coils K1–K4<br/>via Q1–Q4 / F1–F4"]
+    CAN5V["CAN transceivers,<br/>buffer logic, general 5V"]
+    I2C_DEVS["INA226 ×4 · TCA9555 ×3<br/>(I²C, alive on standby)"]
+    SPI_DEVS["MCP3208 ×3 · DAC80504 ×4 (+VREF)<br/>MCP2515 ×3 · SN65HVD230 ×3"]
+    BUFFER["IC1 SN74LVC125A<br/>buffered SPI to peripherals<br/>(gated by PWR_OK via Q5)"]
+
+    ATX --> V12 --> RELAYS
+    ATX --> V5 --> CAN5V
+    ATX --> V5SBY
+    ATX --> V3V3 --> SPI_DEVS
+    V5SBY --> V3V3SBY --> I2C_DEVS
+    V5SBY --> RPI --> V3V3PI --> BUFFER
+
+    classDef source fill:#f5f5f5,stroke:#424242,color:#212121
+    classDef v12 fill:#ffebee,stroke:#c62828,color:#b71c1c
+    classDef v5 fill:#fff3e0,stroke:#ef6c00,color:#e65100
+    classDef v5sby fill:#fffde7,stroke:#f9a825,color:#6c4d00
+    classDef v3v3 fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20
+    classDef v3v3sby fill:#e0f7fa,stroke:#00838f,color:#004d40
+    classDef v3v3pi fill:#f3e5f5,stroke:#6a1b9a,color:#4a148c
+    classDef load fill:#fafafa,stroke:#9e9e9e,color:#424242
+
+    class ATX,RPI source
+    class V12 v12
+    class V5 v5
+    class V5SBY v5sby
+    class V3V3 v3v3
+    class V3V3SBY v3v3sby
+    class V3V3PI v3v3pi
+    class RELAYS,CAN5V,I2C_DEVS,SPI_DEVS,BUFFER load
 ```
 
 Important consequences:

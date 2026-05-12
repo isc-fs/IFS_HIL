@@ -31,40 +31,49 @@ brings the bench into a known state on every boot.
 
 ## Layered view
 
-```
-                        ┌─────────────────────────────────────┐
-Clients (user-space) →  │ dashboard │ pytest HIL │ can-flasher │
-                        └─────┬─────┴─────┬──────┴──────┬──────┘
-                              │ Unix-RPC  │ same        │ AF_CAN
-                              ▼           ▼             │
-                        ┌───────────────────────┐       │
-Broker                  │      hil-broker        │       │
-(thread-safe            │  (Python, systemd)     │       │
- mediator)              │  per-bus locks         │       │
-                        └─┬──────────┬──────────┘        │
-                          │          │                   │
-              /dev/spidev0.3   /dev/i2c-1      sockets    │
-                          │          │                   │
-                          ▼          ▼                   ▼
-                    ┌─────────────────────────────────────────┐
-Kernel              │  spi-bcm2835    i2c-bcm2835     mcp251x │
-                    │                                 (patched)│
-                    └─────┬───────────┬──────────────────┬─────┘
-                          │           │                  │
-                          ▼           ▼                  ▼
-                    ┌─────────────────────────────────────────┐
-Hardware            │                BACKPLANE_HIL PCB         │
-                    │ MCP3208 ×3   INA226 ×4    MCP2515 ×3     │
-                    │ DAC80504 ×4  TCA9555 ×3   + transceivers │
-                    │ nRF24 (np)   Q5 + SN74LVC125A MISO buffer│
-                    │                                          │
-                    │ ATX rails:  +12V → relay coils            │
-                    │             +5V SBY → LDO → +3V3 SBY →   │
-                    │                              I²C devices  │
-                    │             +3V3 (main) → SPI devices     │
-                    │                                          │
-                    │ MLC1–MLC4 carrier slots (STM32H733ZG)    │
-                    └─────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph Clients["Clients (user-space)"]
+        direction LR
+        DASH["dashboard"]
+        PYTEST["pytest HIL"]
+        FLASH["can-flasher"]
+    end
+
+    BROKER["hil-broker<br/>(Python, systemd)<br/>thread-safe mediator · per-bus locks"]
+
+    subgraph Kernel["Kernel"]
+        direction LR
+        SPI_BCM["spi-bcm2835"]
+        I2C_BCM["i2c-bcm2835"]
+        MCP["mcp251x<br/>(patched)"]
+    end
+
+    subgraph HW["BACKPLANE_HIL PCB"]
+        direction TB
+        ICs["MCP3208 ×3 · DAC80504 ×4 · INA226 ×4<br/>TCA9555 ×3 · MCP2515 ×3 + transceivers<br/>nRF24 (np) · Q5 + SN74LVC125A MISO buffer"]
+        RAILS["ATX rails: +12V → relay coils<br/>+5V_SBY → LDO → +3V3_SBY → I²C devices<br/>+3V3 (main) → SPI devices"]
+        SLOTS["MLC1–MLC4 carrier slots<br/>(STM32H733ZG)"]
+    end
+
+    DASH -- "Unix-RPC" --> BROKER
+    PYTEST -- "Unix-RPC" --> BROKER
+    FLASH -- "AF_CAN" --> MCP
+    BROKER -- "/dev/spidev0.3" --> SPI_BCM
+    BROKER -- "/dev/i2c-1" --> I2C_BCM
+    SPI_BCM --> ICs
+    I2C_BCM --> ICs
+    MCP --> SLOTS
+
+    classDef client fill:#e3f2fd,stroke:#1976d2,color:#0d47a1
+    classDef broker fill:#fff3e0,stroke:#f57c00,color:#e65100
+    classDef kernel fill:#f3e5f5,stroke:#7b1fa2,color:#4a148c
+    classDef hardware fill:#e8f5e9,stroke:#388e3c,color:#1b5e20
+
+    class DASH,PYTEST,FLASH client
+    class BROKER broker
+    class SPI_BCM,I2C_BCM,MCP kernel
+    class ICs,RAILS,SLOTS hardware
 ```
 
 ---
@@ -149,20 +158,22 @@ corrupt each other's transactions.
 
 Structure:
 
-```
-broker/
-├── server.py    — Unix-socket listener, per-connection handler,
-│                  also exposes BrokerClient (the Python client
-│                  class that clients import).
-├── rpc.py       — Transport-agnostic JSON-RPC dispatcher.
-│                  Method table maps "dac.set_voltage" → backend
-│                  method; handles request framing, errors, IDs.
-├── bus.py       — HardwareManager: holds the real SPI / I²C /
-│                  GPIO handles and driver instances. Per-bus
-│                  locks make concurrent RPC calls safe.
-└── fake_bus.py  — In-memory backend implementing the same
-                   Protocol. Used by off-bench unit tests and
-                   laptop development.
+```mermaid
+flowchart LR
+    SERVER["server.py<br/>Unix-socket listener<br/>per-connection handler<br/>BrokerClient class"]
+    RPC["rpc.py<br/>JSON-RPC dispatcher<br/>method table<br/>request framing & errors"]
+    BUS["bus.py<br/>HardwareManager (real)<br/>SPI / I²C / GPIO handles<br/>driver instances<br/>per-bus locks"]
+    FAKE["fake_bus.py<br/>FakeHardwareManager<br/>in-memory backend<br/>(same Protocol)"]
+
+    SERVER --> RPC
+    RPC -- "production" --> BUS
+    RPC -. "tests / off-bench" .-> FAKE
+
+    classDef real fill:#fff3e0,stroke:#f57c00,color:#e65100
+    classDef fake fill:#f5f5f5,stroke:#9e9e9e,color:#424242
+
+    class SERVER,RPC,BUS real
+    class FAKE fake
 ```
 
 Concurrency:
@@ -219,35 +230,35 @@ that's the whole point of the mediator.
 
 ### CI/CD loop
 
-```
-  ┌───────────────┐                    ┌──────────────────┐
-  │  External     │  /hil-build PR     │  GitHub Actions  │
-  │  firmware repo│ ───── comment ───▶ │  hil-build-      │
-  │               │                    │  trigger.yml     │
-  └───────────────┘                    └────────┬─────────┘
-                                                │
-                                                ▼
-                                       ┌──────────────────┐
-                                       │  hil-build-only  │
-                                       │  .yml (Docker +  │
-                                       │  arm-gcc)        │
-                                       └────────┬─────────┘
-                                                │ artifact (.bin)
-                                                ▼
-                                       ┌──────────────────┐
-                                       │  hil-flash.yml   │
-                                       │  (self-hosted    │
-                                       │  runner on Pi)   │
-                                       └────────┬─────────┘
-                                                │
-                                                ▼
-                                       ┌──────────────────┐
-                                       │  can-flasher     │
-                                       │  flash on canN   │
-                                       └────────┬─────────┘
-                                                │
-                                                ▼
-                                       🟢 / 🔴 comment on PR
+```mermaid
+flowchart TD
+    FW_REPO["External firmware repo<br/>(e.g. isc-fs/IFS08-CE)"]
+    COMMENT["PR comment:<br/>/hil-build &lt;subdir&gt;"]
+    TRIGGER["GitHub Actions<br/>hil-build-trigger.yml"]
+    BUILD["hil-build-only.yml<br/>(Ubuntu runner)<br/>Docker + arm-gcc"]
+    ARTIFACT["artifact<br/>.bin · .hex · SHA256"]
+    FLASH_JOB["hil-flash.yml<br/>(self-hosted Pi runner)"]
+    FLASHER["can-flasher<br/>flash on canN"]
+    RESULT["🟢 / 🔴 comment on PR"]
+
+    FW_REPO --> COMMENT
+    COMMENT --> TRIGGER
+    TRIGGER -- "workflow_dispatch" --> BUILD
+    BUILD --> ARTIFACT
+    ARTIFACT --> FLASH_JOB
+    FLASH_JOB --> FLASHER
+    FLASHER --> RESULT
+    RESULT -.-> FW_REPO
+
+    classDef external fill:#f5f5f5,stroke:#616161,color:#212121
+    classDef ci fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20
+    classDef bench fill:#e3f2fd,stroke:#1976d2,color:#0d47a1
+    classDef artifact fill:#fffde7,stroke:#f9a825,color:#6c4d00
+
+    class FW_REPO,COMMENT,RESULT external
+    class TRIGGER,BUILD ci
+    class FLASH_JOB,FLASHER bench
+    class ARTIFACT artifact
 ```
 
 The three workflows live under

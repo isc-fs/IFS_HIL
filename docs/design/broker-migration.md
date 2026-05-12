@@ -35,12 +35,28 @@ broker.
 
 Target layering:
 
-```
-              hil-broker (systemd, single owner)
-                  ↑  Unix-socket RPC
-  dashboard ──────┼──────── pytest HIL suite ──── CAN flasher
-                  ↓
-           tools.hil_client (proxy classes)
+```mermaid
+flowchart TD
+    DASH["dashboard"]
+    PYTEST["pytest HIL suite"]
+    FLASH["CAN flasher"]
+
+    PROXY["tools.hil_client<br/>(proxy classes)"]
+
+    BROKER["hil-broker<br/>(systemd, single owner)"]
+
+    DASH --> PROXY
+    PYTEST --> PROXY
+    FLASH --> PROXY
+    PROXY -- "Unix-socket RPC" --> BROKER
+
+    classDef client fill:#e3f2fd,stroke:#1976d2,color:#0d47a1
+    classDef proxy fill:#e1f5fe,stroke:#0288d1,color:#01579b
+    classDef broker fill:#fff3e0,stroke:#f57c00,color:#e65100
+
+    class DASH,PYTEST,FLASH client
+    class PROXY proxy
+    class BROKER broker
 ```
 
 Phases, as originally planned:
