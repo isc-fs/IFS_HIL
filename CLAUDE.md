@@ -130,27 +130,51 @@ If `tools/hw_config.py` and a doc disagree, **trust `hw_config.py`**.
 
 ## Layered picture
 
-```
-External CI (firmware PR) → builds .bin in Docker → uploads artifact
-                                                        │
-                                                        ▼
-┌────────────────── Raspberry Pi 4 ──────────────────────┐
-│  dashboard (Flask :8080)    pytest tests/hil/          │
-│       │                          │                     │
-│       └────── Unix-RPC ──────────┘   ┌── can-flasher ──┤
-│                  │                   │  (Rust, AF_CAN) │
-│                  ▼                   │                 │
-│           hil-broker (Python)        │                 │
-│            ├── SPI lock              │                 │
-│            ├── I²C lock              │                 │
-│            ├── GPIO lock             │                 │
-│            └── CAN lock              │                 │
-│                  │                   │                 │
-│   /dev/spidev0.3  /dev/i2c-1  /dev/gpio*   kernel canN │
-└───────────────────────┬────────────────────────────────┘
-                        ▼
-              BACKPLANE_HIL PCB
-   MLC1..MLC4 carriers · 3 CAN · 4 INA · 3 ADC · 4 DAC · 3 TCA
+```mermaid
+flowchart TD
+    CI["External CI (firmware PR)<br/>builds .bin in Docker<br/>uploads artifact"]
+
+    subgraph Pi["Raspberry Pi 4"]
+        direction TB
+
+        DASH["dashboard<br/>(Flask :8080)"]
+        PYTEST["pytest tests/hil/"]
+        FLASH["can-flasher<br/>(Rust, AF_CAN)"]
+
+        BROKER["hil-broker (Python)<br/>locks: SPI · I²C · GPIO · CAN"]
+
+        SPI["/dev/spidev0.3"]
+        I2C["/dev/i2c-1"]
+        GPIO["/dev/gpio*"]
+        CANK["kernel canN<br/>(mcp251x, patched)"]
+
+        DASH -- "Unix-RPC" --> BROKER
+        PYTEST -- "Unix-RPC" --> BROKER
+        FLASH -- "AF_CAN" --> CANK
+        BROKER --> SPI
+        BROKER --> I2C
+        BROKER --> GPIO
+    end
+
+    PCB["BACKPLANE_HIL PCB<br/>MLC1..MLC4 carriers · 3 CAN · 4 INA<br/>3 ADC · 4 DAC · 3 TCA"]
+
+    CI -- "artifact (.bin)" --> FLASH
+    SPI --> PCB
+    I2C --> PCB
+    GPIO --> PCB
+    CANK --> PCB
+
+    classDef external fill:#f5f5f5,stroke:#616161,color:#212121
+    classDef client fill:#e3f2fd,stroke:#1976d2,color:#0d47a1
+    classDef broker fill:#fff3e0,stroke:#f57c00,color:#e65100
+    classDef kernel fill:#f3e5f5,stroke:#7b1fa2,color:#4a148c
+    classDef hardware fill:#e8f5e9,stroke:#388e3c,color:#1b5e20
+
+    class CI external
+    class DASH,PYTEST,FLASH client
+    class BROKER broker
+    class SPI,I2C,GPIO,CANK kernel
+    class PCB hardware
 ```
 
 ---
