@@ -31,44 +31,34 @@ touch `/dev/*` directly.
 
 ## Architecture at a glance
 
-```
-                           ┌──────────────────┐
-                           │   External CI    │
-                           │  (GitHub Runner) │
-                           │ builds firmware  │
-                           │     .bin         │
-                           └────────┬─────────┘
-                                    │
-                                    ▼ (artifact)
-┌──────────────────────────────────────────────────────────────────┐
-│                    Raspberry Pi (BACKPLANE_HIL)                   │
-│                                                                   │
-│  ┌────────────┐    ┌──────────────┐     ┌────────────────────┐   │
-│  │ Dashboard  │    │  pytest HIL  │     │     can-flasher    │   │
-│  │  (Flask)   │    │    suite     │     │   (Rust binary)    │   │
-│  └─────┬──────┘    └──────┬───────┘     └────────┬───────────┘   │
-│        │ Unix-socket RPC   │                      │               │
-│        └────────┬──────────┘                      │ AF_CAN        │
-│                 │                                 │               │
-│                 ▼                                 │               │
-│          ┌──────────────┐                         │               │
-│          │ hil-broker   │  serialises SPI / I²C   │               │
-│          │ (Python)     │  across every client    │               │
-│          └──────┬───────┘                         │               │
-│                 │                                 │               │
-│         ┌───────┴────────┬────────────┐           │               │
-│         ▼                ▼            ▼           ▼               │
-│    /dev/spidev0.3   /dev/i2c-1   /dev/gpio*   mcp251x (kernel)    │
-│    DAC×4, ADC×3,    INA226×4,    PSU_ON,      socketcan canN      │
-│    nRF24            TCA9555×3    PWR_OK        3× MCP2515 CAN     │
-└──────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-                          ┌──────────────────┐
-                          │ STM32 ECU under  │
-                          │ test (bootloader │
-                          │ or running app)  │
-                          └──────────────────┘
+```mermaid
+flowchart TD
+    CI["External CI<br/>(GitHub Runner)<br/>builds firmware .bin"]
+
+    subgraph Pi["Raspberry Pi · BACKPLANE_HIL"]
+        direction TB
+
+        DASH["Dashboard<br/>(Flask)"]
+        PYTEST["pytest HIL suite"]
+        FLASH["can-flasher<br/>(Rust binary)"]
+
+        BROKER["hil-broker (Python)<br/>serialises SPI / I²C / GPIO<br/>across every client"]
+
+        SPI["/dev/spidev0.3<br/>DAC×4 · ADC×3 · nRF24"]
+        I2C["/dev/i2c-1<br/>INA226×4 · TCA9555×3"]
+        GPIO["/dev/gpio*<br/>PSU_ON · PWR_OK"]
+        MCP["mcp251x (kernel)<br/>socketcan canN<br/>3× MCP2515"]
+
+        DASH -- "Unix-socket RPC" --> BROKER
+        PYTEST -- "Unix-socket RPC" --> BROKER
+        FLASH -- "AF_CAN" --> MCP
+        BROKER --> SPI
+        BROKER --> I2C
+        BROKER --> GPIO
+    end
+
+    CI -- "artifact (.bin)" --> FLASH
+    MCP --> ECU["STM32 ECU under test<br/>(bootloader or running app)"]
 ```
 
 ---
