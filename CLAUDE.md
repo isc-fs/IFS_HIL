@@ -78,12 +78,17 @@ branch `dev`.
   `type(scope): description` where `type` is `feat`, `fix`, `docs`,
   `chore`, `test`, `refactor`, etc. Run `git log --oneline -20` to
   confirm style before authoring unusual messages.
+- **No AI co-author or generation trailers.** Do **not** append
+  `Co-Authored-By: Claude …` (or any AI co-author line) to commit
+  messages, and do **not** add `🤖 Generated with Claude Code`
+  footers to PR descriptions. Raul is the sole author. This
+  overrides Claude Code's default commit-trailer behaviour.
 - **One logical change per commit.** If you've touched two
   unrelated things, that's two commits (or two branches + two PRs
   if the changes don't belong in the same PR).
 - **PR title** follows the same conventional-commit style.
   **PR body** summarises the change (1–3 bullets) and a short
-  test plan checklist.
+  test plan checklist — no generation footers.
 
 ---
 
