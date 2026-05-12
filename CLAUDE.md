@@ -26,29 +26,50 @@ branch `dev`.
 
 ## Branch policy (READ THIS BEFORE ANY GIT OPERATION)
 
-- **`dev` is the working branch.** All day-to-day work happens here.
-  Commits and feature branches off `dev`, PRs back into `dev`.
+- **`dev` is the integration branch.** It receives all merged work
+  via PR. Do **not** commit directly to `dev` — branch off it
+  first, even for small changes (typo fixes, doc tweaks, etc.).
 - **`main` is release-only.** Never push to `main` directly, never
   rebase it, never merge into it without explicit user request. The
   release path is `dev` → tag/PR into `main`, and Raul drives it.
 - **`jb` is off-limits.** Do not check it out, rebase against it,
   cherry-pick from it, or include it in any operation. If a tool
   call would touch `jb`, stop and ask.
-- **Feature branches** (`feat/*`, `fix/*`, `docs/*`) are fine to
-  create off `dev` and PR back into `dev`.
+- **Work happens on feature branches off `dev`:**
+  - `feat/<short-slug>` for new functionality
+  - `fix/<short-slug>` for bug fixes
+  - `docs/<short-slug>` for documentation
+  - `chore/<short-slug>` for tooling/infra
+  - `test/<short-slug>` for test-only changes
+- **Every merge into `dev` goes through a PR.** Never `git merge`
+  or `git push origin dev` directly. Open a PR on GitHub, let CI
+  run, and Raul reviews/merges (or you do, once approved).
 - When unsure which branch you're on: `git branch --show-current`.
-  If you'd be operating on `main` or `jb`, stop.
+  If you'd be operating on `main`, `jb`, or directly on `dev`,
+  stop.
 
 ---
 
-## Commit policy
+## Commit / push / PR policy
 
-- **Commit freely** on `dev` or any feature branch — the user has
-  authorised default-commit behaviour for this repo. This overrides
-  Claude Code's default "ask before committing" behaviour. You do
-  not need to ask permission for each commit.
-- **Branch restrictions still apply** — no commits/merges/pushes to
-  `main` or `jb`, ever, without explicit request.
+- **Commit freely** on any feature branch (`feat/*`, `fix/*`,
+  `docs/*`, `chore/*`, `test/*`) without asking. This overrides
+  Claude Code's default "ask before committing" behaviour.
+- **Never commit directly to `dev`.** If you find yourself on `dev`
+  with changes, branch off first (`git checkout -b <type>/<slug>`)
+  and commit there.
+- **Branch restrictions are absolute** — no commits/merges/pushes
+  to `main` or `jb`, ever, without explicit request.
+- **Auto-push for `feat/*` and `fix/*` branches.** As soon as you
+  have one or more commits on a `feat/*` or `fix/*` branch ready
+  for review, push (`git push -u origin <branch>`) without asking.
+- **For other branch types (`docs/*`, `chore/*`, `test/*`)**, push
+  when it's the obvious next step — opening a PR, sharing for
+  review, or the user asks. No explicit confirmation needed if
+  the path is clear; ask if it isn't.
+- **Always open a PR to merge into `dev`.** Never `git push origin
+  dev` directly, never local-merge into `dev`. Use `gh pr create
+  --base dev`. The PR target is always `dev` (never `main`).
 - **Don't sweep unrelated changes into a commit.** Stage by file
   (`git add path/to/file`), not `git add -A` or `git add .`. Leave
   untracked work-in-progress that isn't yours (analysis scripts,
@@ -57,11 +78,12 @@ branch `dev`.
   `type(scope): description` where `type` is `feat`, `fix`, `docs`,
   `chore`, `test`, `refactor`, etc. Run `git log --oneline -20` to
   confirm style before authoring unusual messages.
-- **Don't push automatically.** Commits stay local until the user
-  asks for a push, or until pushing is obviously the next step of
-  the requested task (e.g. they said "open a PR").
 - **One logical change per commit.** If you've touched two
-  unrelated things in a session, that's two commits.
+  unrelated things, that's two commits (or two branches + two PRs
+  if the changes don't belong in the same PR).
+- **PR title** follows the same conventional-commit style.
+  **PR body** summarises the change (1–3 bullets) and a short
+  test plan checklist.
 
 ---
 
@@ -453,8 +475,11 @@ module, systemd units). Off-bench on a Mac/Linux laptop you can:
 | "deploy a new firmware via CI" | Push to firmware repo, open PR, comment `/hil-build <subdir>`. CI handles the rest. |
 | "regenerate fab files" | KiCad work in `docs/BACKPLANE_HIL/`. Outputs in `docs/BACKPLANE_HIL/production/`. PCB is working — confirm scope before regenerating. |
 | "review my PR" | Look for: (1) any direct `/dev/*` opens outside broker (NACK); (2) hw_config.py vs docs drift; (3) breaks the 6 invariants? (4) test coverage in `tests/broker/` for new RPCs; (5) sane systemd dependency order. |
-| "commit this" / *(after any coherent change)* | Stage only the relevant files (no `-A`), use conventional-commit style, commit without asking. Default branch is `dev` or a feature branch off `dev`. **Never commit to `main` or `jb`.** Don't push unless asked. |
-| "make a PR" | Branch off `dev` if not already on one. PR target is `dev`. Title in conventional-commit style; body summarises the change and any test plan. |
+| "commit this" / *(after any coherent change)* | If on `dev`, branch off first (`feat/`, `fix/`, `docs/`, etc.). Stage only the relevant files (no `-A`), use conventional-commit style, commit without asking. **Never commit to `main`, `jb`, or directly on `dev`.** |
+| *(after committing on `feat/*` or `fix/*`)* | Push automatically (`git push -u origin <branch>`). No need to ask. |
+| *(after committing on `docs/*`, `chore/*`, `test/*`)* | Push when opening a PR or when the next step is clearly remote. Otherwise leave it local. |
+| "make a PR" / "open a PR" | `gh pr create --base dev` from the feature branch. Title in conventional-commit style; body has 1–3 summary bullets + a short test-plan checklist. PR target is **always** `dev`. |
+| "merge into dev" | Open a PR — don't local-merge or direct-push. Raul reviews and merges (or you do once it's approved + green). |
 | "push to main" / "merge into main" | Stop and confirm. `main` is release-only; Raul drives it. |
 | "what's on `jb`?" | Don't check it out, don't inspect via `git checkout`. If they need info, use `git log origin/jb` read-only — but ask first. |
 
