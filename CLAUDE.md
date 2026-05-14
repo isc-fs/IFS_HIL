@@ -258,11 +258,14 @@ journalctl -u hil-broker -f
 journalctl -u hil-can-up -b
 ```
 
-Dashboard is **not** under systemd yet:
+Dashboard runs as `hil-dashboard.service` (broker client, port 8080):
 ```sh
-cd ~/IFS08_HIL && nohup python3 dashboard/app.py > /tmp/dashboard.log 2>&1 &
-pkill -f dashboard/app.py    # stop
+systemctl status hil-dashboard
+sudo systemctl restart hil-dashboard
+journalctl -u hil-dashboard -f
 ```
+For ad-hoc runs (different port, debugging), stop the service first
+to free 8080, then `python3 dashboard/app.py --port <n>`.
 
 ### Power a carrier (MLC slot)
 
@@ -360,7 +363,7 @@ if you skip the explicit stop.)
 | MLC ≤ 1 mA after relay close | Fuse blown or relay didn't switch | Check F5–F14, listen for relay click, `tca.read_port(0x20, 0)` |
 | `Cannot initialize MCP2515. Wrong wiring?` | Patched module not active | `xz -dc /lib/modules/$(uname -r)/.../mcp251x.ko.xz \| strings \| grep backplane_hil` |
 | `/dev/spidev0.3` missing | Overlay didn't load | `grep dtoverlay /boot/firmware/config.txt`; `dmesg \| grep overlay` |
-| `Address already in use` on 8080 | Stray dashboard process | `pkill -f dashboard/app.py` |
+| `Address already in use` on 8080 | Stray `nohup` dashboard fighting the service | `pkill -f dashboard/app.py && sudo systemctl restart hil-dashboard` |
 
 Diagnostic capture for help requests:
 ```sh
@@ -424,9 +427,6 @@ whim. Confirm with Raul before touching them.
   is kernel mcp251x; runtime flasher is the Rust `can-flasher`
   binary. The Python equivalents are kept for historical reference
   only — don't extend them, don't route new code through them.
-
-- **No `hil-dashboard.service` yet.** Dashboard is `nohup`'d. Adding
-  the unit is a known follow-up.
 
 - **+3V3_pi is "under-decoupled"** per the PCB design review
   (IC1 + nRF24 rail). Cosmetic for now; flagged for the next respin.

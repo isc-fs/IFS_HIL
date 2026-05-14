@@ -30,43 +30,42 @@ If all five pass, skip ahead. If any fail, see
 
 ## Starting and stopping services
 
-The bench runs three systemd services in dependency order:
+The bench runs four systemd services in dependency order:
 
 | Service | Role | Type |
 |---|---|---|
 | `hil-psu-on.service` | Assert `PS_ON#`, configure `PWR_OK` pin | oneshot |
 | `hil-can-up.service` | `ip link set canN up …` for all three chips | oneshot |
 | `hil-broker.service` | Broker daemon; single owner of SPI/I²C/GPIO | simple |
+| `hil-dashboard.service` | Flask observability UI on `:8080` | simple |
 
 ```sh
 pi$ # cold start (or after a reboot if something is off)
-pi$ sudo systemctl start hil-psu-on hil-can-up hil-broker
+pi$ sudo systemctl start hil-psu-on hil-can-up hil-broker hil-dashboard
 
 pi$ # stop everything cleanly
-pi$ sudo systemctl stop hil-broker hil-can-up hil-psu-on
+pi$ sudo systemctl stop hil-dashboard hil-broker hil-can-up hil-psu-on
 
 pi$ # full bounce — useful after editing broker code
 pi$ sudo systemctl restart hil-broker
 
 pi$ # view service logs
 pi$ journalctl -u hil-broker -f     # follow live
+pi$ journalctl -u hil-dashboard -f  # dashboard, live
 pi$ journalctl -u hil-can-up -b     # this boot only
 ```
-
-> **Note**: The dashboard is currently *not* under systemd; it lives
-> in a `nohup` invocation (see [dashboard section](#dashboard-access)
-> below). A `hil-dashboard.service` is a known follow-up.
 
 ---
 
 ## Dashboard access
 
-Start the dashboard (if it's not already running):
+The dashboard is a systemd service and starts automatically at boot
+(see [`infra/systemd/hil-dashboard.service`](../infra/systemd/hil-dashboard.service)).
 
 ```sh
-pi$ cd ~/IFS08_HIL
-pi$ nohup python3 dashboard/app.py > /tmp/dashboard.log 2>&1 &
-pi$ tail /tmp/dashboard.log         # confirm startup
+pi$ systemctl status hil-dashboard       # check it's running
+pi$ sudo systemctl restart hil-dashboard # after editing dashboard code
+pi$ journalctl -u hil-dashboard -f       # follow logs
 ```
 
 Browse to `http://<pi-ip>:8080/`. You get, at a glance:
@@ -81,10 +80,12 @@ Browse to `http://<pi-ip>:8080/`. You get, at a glance:
 - TCA9555 per-pin state and direction.
 - Timestamp of the last successful poll.
 
-To stop the dashboard:
+If port 8080 won't bind, a stray `nohup` instance from a pre-service
+install may still be running:
 
 ```sh
 pi$ pkill -f dashboard/app.py
+pi$ sudo systemctl restart hil-dashboard
 ```
 
 See [`docs/dashboard.md`](dashboard.md) for the HTTP API reference.
