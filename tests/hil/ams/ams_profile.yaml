@@ -1,0 +1,37 @@
+# Tunable thresholds and cadences for the AMS HIL tests.
+# Adjust here so test code stays free of magic numbers.
+
+# Power up + boot
+mlc_slot:                 1          # which carrier slot the BL-flashed STM32 lives in
+mlc_boot_current_mA:      120        # minimum expected current after K_n closes
+mlc_boot_settle_s:        2.0        # wait after relay close before discover
+
+# CAN buses (kernel netdev names, per docs/hardware-reference.md)
+bus_acu:                  can0       # FDCAN1 of the firmware
+bus_bms_bl:               can2       # FDCAN2 of the firmware (BL also lives here)
+
+# Bootloader
+bl_node_id:               0x01       # factory default; bench-side change if you reprovision
+bl_discover_timeout_ms:   3000
+bl_flash_timeout_s:       60
+app_flash_address:        0x08020000 # AMS app image start (sector 1)
+
+# BMS emulator defaults — keep within the firmware's healthy window
+bms_default_cell_mV:      3700       # well above kCellUVmV (2800), below kCellOVmV (4200)
+bms_default_temp_C:       25         # well below kCellOTC (60)
+
+# TX cadence checks (per CAN_MAP.md)
+tx_min_cell_v_period_ms:  500
+tx_min_cell_v_jitter_ms:  100        # tolerance band ±
+tx_current_period_ms:     250
+tx_current_jitter_ms:     50
+
+# BMS poll cadence we expect to observe (firmware → BMS bus)
+bms_voltage_poll_period_ms:  250
+bms_voltage_poll_jitter_ms:  50
+bms_temp_poll_period_ms:     500
+bms_temp_poll_jitter_ms:     100
+
+# Soak / fuzz
+soak_minutes:             30
+fuzz_frames_per_second:   200

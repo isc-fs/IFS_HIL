@@ -27,6 +27,8 @@ docker-compose.override.yml
 
 # PCB design files (kept locally for reference, not versioned in this repo)
 docs/BACKPLANE_HIL/
+docs/MLC/
+docs/AMS IFS08/
 
 # Prerequisites
 *.d
