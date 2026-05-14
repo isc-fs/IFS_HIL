@@ -1,0 +1,34 @@
+[Unit]
+Description=HIL observability dashboard — Flask UI on :8080
+After=network.target hil-broker.service
+Wants=hil-broker.service
+# The dashboard is a broker client: it polls hil-broker every 2 s via
+# Unix-socket RPC and exposes state at http://<pi>:8080/. It does NOT
+# open /dev/spidev*, /dev/i2c-*, or /dev/gpio* directly.
+#
+# `Wants=` (not `Requires=`) because the dashboard tolerates broker
+# absence: the poll loop catches exceptions and renders affected
+# panels in red, so the UI stays reachable for diagnostics even if
+# the broker died. systemd still starts the broker first when both
+# are activating concurrently (After= ordering).
+
+[Service]
+Type=simple
+User=isc
+Group=isc
+WorkingDirectory=/home/isc/IFS08_HIL
+ExecStart=/usr/bin/python3 dashboard/app.py
+Restart=on-failure
+RestartSec=2
+# Logs go to the systemd journal — view with `journalctl -u hil-dashboard -f`.
+# No /dev access required; the dashboard talks to the broker over the
+# Unix socket at /run/hil-broker/broker.sock (default), overridable
+# via HIL_BROKER_SOCKET if a side-car broker is ever needed.
+#
+# The dashboard binds 0.0.0.0:8080. If port 8080 is occupied (stray
+# `nohup python3 dashboard/app.py`), the service fails to start —
+# kill the stray with `pkill -f dashboard/app.py` and `systemctl
+# restart hil-dashboard`.
+
+[Install]
+WantedBy=multi-user.target

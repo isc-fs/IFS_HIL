@@ -12,26 +12,32 @@ Source: [`dashboard/app.py`](../dashboard/app.py) and
 
 ## Launching the dashboard
 
-Manually:
+The dashboard is a systemd service. Once installed it starts at boot
+and follows `hil-broker.service` in the dependency chain — see
+[`infra/systemd/hil-dashboard.service`](../infra/systemd/hil-dashboard.service)
+and [`infra/systemd/README.md`](../infra/systemd/README.md).
+
+Day-to-day:
 
 ```sh
-pi$ cd ~/IFS08_HIL
-pi$ nohup python3 dashboard/app.py > /tmp/dashboard.log 2>&1 &
+pi$ systemctl status hil-dashboard       # state + last log lines
+pi$ sudo systemctl restart hil-dashboard # after editing dashboard code
+pi$ sudo systemctl stop hil-dashboard    # bring it down
+pi$ journalctl -u hil-dashboard -f       # follow logs live
 ```
 
-Or with explicit arguments:
+For ad-hoc runs (different port, debugging, off-bench dev), launch
+manually instead — stop the service first to free port 8080:
 
 ```sh
+pi$ sudo systemctl stop hil-dashboard
+pi$ cd ~/IFS08_HIL
 pi$ python3 dashboard/app.py --port 8080 --poll-interval 2.0
 ```
 
 The dashboard needs a reachable broker socket. Default:
-`/run/hil-broker/broker.sock`, overridable via
-`HIL_BROKER_SOCKET`. With `hil-broker.service` enabled it's just
-there.
-
-A systemd `hil-dashboard.service` is a known follow-up; not
-shipped today.
+`/run/hil-broker/broker.sock`, overridable via `HIL_BROKER_SOCKET`.
+With `hil-broker.service` running, it's just there.
 
 ---
 

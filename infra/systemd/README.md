@@ -53,6 +53,62 @@ the canN interfaces are already up before the broker opens
 [patched mcp251x module](../kernel-module/mcp251x-patched/) to already
 be installed and the `mcp2515-triple` dtoverlay to be active.
 
+Install:
+
+```sh
+sudo cp hil-broker.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now hil-broker.service
+```
+
+## `hil-dashboard.service`
+
+Flask observability UI at `http://<pi-ip>:8080/`. Ordered
+`After=hil-broker.service` and `Wants=hil-broker.service` — the
+dashboard is a broker client (polls every 2 s over the Unix socket)
+and tolerates broker absence by colouring affected panels red, so it
+stays reachable for diagnostics even if the broker dies.
+
+Replaces the legacy `nohup python3 dashboard/app.py &` pattern. Logs
+go to the systemd journal (`journalctl -u hil-dashboard -f`), not
+`/tmp/dashboard.log`.
+
+Install:
+
+```sh
+sudo cp hil-dashboard.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now hil-dashboard.service
+```
+
+If you have a stray `nohup` instance still running, the new service
+will fail to bind 8080 — kill it first:
+
+```sh
+pkill -f dashboard/app.py
+sudo systemctl restart hil-dashboard.service
+```
+
+## Service dependency order
+
+```mermaid
+flowchart LR
+    PSU["hil-psu-on.service<br/>(oneshot, sysinit)"]
+    CAN["hil-can-up.service<br/>(oneshot)"]
+    BROKER["hil-broker.service<br/>(long-running)"]
+    DASH["hil-dashboard.service<br/>(long-running)"]
+
+    PSU --> CAN --> BROKER --> DASH
+
+    classDef oneshot fill:#fffde7,stroke:#f9a825,color:#6c4d00
+    classDef daemon fill:#fff3e0,stroke:#f57c00,color:#e65100
+    classDef ui fill:#e3f2fd,stroke:#1976d2,color:#0d47a1
+
+    class PSU,CAN oneshot
+    class BROKER daemon
+    class DASH ui
+```
+
 ## Kernel netdev ↔ PCB CAN mapping
 
 On this kernel, `mcp251x` probes the SPI children in *reverse* `reg`

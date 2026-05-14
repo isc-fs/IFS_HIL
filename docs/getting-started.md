@@ -211,8 +211,7 @@ Only `ip link set canN …` is allowed; no other escalation is granted.
 
 ## 7. Install systemd units
 
-Three oneshot/long-running units manage the bench at boot, in this
-order:
+Four units manage the bench at boot, in this order:
 
 1. `hil-psu-on.service` — asserts `PS_ON#` in userspace (complements
    the firmware `gpio=7` directive; compensates for the Pi 4's GPIO
@@ -220,17 +219,20 @@ order:
 2. `hil-can-up.service` — brings `can0`, `can1`, `can2` up at
    500 kbps with `txqueuelen=1000` and `restart-ms=200`.
 3. `hil-broker.service` — starts the broker daemon; depends on both.
+4. `hil-dashboard.service` — Flask UI on `:8080`; broker client.
 
-Install all three:
+Install all four:
 
 ```sh
 pi$ cd ~/IFS08_HIL/infra/systemd
-pi$ sudo cp hil-psu-on.service hil-can-up.service hil-broker.service \
+pi$ sudo cp hil-psu-on.service hil-can-up.service \
+            hil-broker.service hil-dashboard.service \
             /etc/systemd/system/
 pi$ sudo systemctl daemon-reload
 pi$ sudo systemctl enable hil-psu-on.service \
                           hil-can-up.service \
-                          hil-broker.service
+                          hil-broker.service \
+                          hil-dashboard.service
 ```
 
 Do **not** `systemctl start` them yet — they need the patched kernel
@@ -272,6 +274,11 @@ pi$ # broker and its socket up
 pi$ systemctl status hil-broker --no-pager | head
 pi$ ls -l /run/hil-broker/broker.sock
 # Expected: socket present, broker "active (running)"
+
+pi$ # dashboard service up and listening on 8080
+pi$ systemctl status hil-dashboard --no-pager | head
+pi$ curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/api/status
+# Expected: dashboard "active (running)", HTTP 200
 ```
 
 If any of these fails, go to
@@ -279,23 +286,22 @@ If any of these fails, go to
 
 ---
 
-## 9. Start the dashboard
+## 9. Reach the dashboard
 
-The dashboard is an operator UI that talks to the broker:
+The dashboard is already running as `hil-dashboard.service` (enabled
+in step 7, started on the reboot in step 8). Point a browser at
+`http://<pi-ip>:8080/` — you should see PSU state, carrier power
+monitors, ADC/DAC channels, CAN mode indicators, and TCA9555 I/O
+state, all updating.
+
+If port 8080 is unreachable:
 
 ```sh
-pi$ cd ~/IFS08_HIL
-pi$ nohup python3 dashboard/app.py \
-       > /tmp/dashboard.log 2>&1 &
+pi$ systemctl status hil-dashboard      # is it running?
+pi$ journalctl -u hil-dashboard -b -n 50 --no-pager
+pi$ pkill -f 'dashboard/app.py'         # kill any stray nohup
+pi$ sudo systemctl restart hil-dashboard
 ```
-
-Point a browser at `http://<pi-ip>:8080/`. You should see PSU state,
-carrier power monitors, ADC/DAC channels, CAN mode indicators, and
-TCA9555 I/O state. Everything should be reachable and updating.
-
-(A proper `hil-dashboard.service` unit is planned but not yet
-shipped — for now, `nohup` is the pragmatic option. Contributions
-welcome.)
 
 ---
 
