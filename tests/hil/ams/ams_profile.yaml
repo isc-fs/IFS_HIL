@@ -25,6 +25,15 @@ tx_min_cell_v_period_ms:  500
 tx_min_cell_v_jitter_ms:  100        # tolerance band ±
 tx_current_period_ms:     250
 tx_current_jitter_ms:     50
+tx_telemetry_period_ms:   500        # 0x4A0/4A1/4A2 cadence
+tx_telemetry_jitter_ms:   100
+
+# How long to wait for an FSM state transition before declaring failure.
+# Tests typically use this when stimulating a state change via ACU stim.
+state_transition_window_ms: 200
+
+# How long to wait for ERROR to latch after an explicit fault injection.
+error_latch_window_ms:    200
 
 # BMS poll cadence we expect to observe (firmware → BMS bus)
 bms_voltage_poll_period_ms:  250

@@ -153,3 +153,54 @@ def flasher(ams_profile, mlc_powered):
         node_id=int(ams_profile["bl_node_id"]),
         timeout_ms=int(ams_profile["bl_discover_timeout_ms"]),
     )
+
+
+# ---------------------------------------------------------------------------
+# FSM state helper — used by every Block C test
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def wait_for_state(observe_acu, ams_profile):
+    """Returns a function `wait(expected_state, timeout_ms)` that polls the
+    latest `0x4A0` telemetry frame until byte 0 == expected_state, or the
+    timeout expires.
+
+    Returns the decoded payload on success; raises AssertionError on timeout
+    with a diagnostic that includes the last state actually seen."""
+    import time
+    from tools.firmware_test.ams import can_map as M
+
+    def _wait(expected_state: int, timeout_ms: int | None = None,
+              poll_interval_s: float = 0.05) -> dict:
+        timeout_ms = timeout_ms or int(ams_profile["state_transition_window_ms"])
+        deadline = time.time() + timeout_ms / 1000.0
+        last_decoded = None
+        while time.time() < deadline:
+            frame = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
+            if frame is not None:
+                last_decoded = M.decode_telem_status(frame.data)
+                if last_decoded["state"] == expected_state:
+                    return last_decoded
+            time.sleep(poll_interval_s)
+        raise AssertionError(
+            f"FSM did not reach {M.FsmState.name(expected_state)} within "
+            f"{timeout_ms} ms. Last observed: "
+            f"{last_decoded['state_name'] if last_decoded else '(no 0x4A0 yet)'}"
+        )
+
+    return _wait
+
+
+@pytest.fixture
+def current_state(observe_acu):
+    """Returns a function `current_state()` that reads the latest FSM state
+    from the most recent `0x4A0` frame, or None if none seen yet."""
+    from tools.firmware_test.ams import can_map as M
+
+    def _read() -> int | None:
+        frame = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
+        if frame is None:
+            return None
+        return M.decode_telem_status(frame.data)["state"]
+
+    return _read

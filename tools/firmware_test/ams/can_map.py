@@ -110,12 +110,103 @@ ID_CURRENT_NORMAL   = 0x502
 TX_MIN_CELL_V_PERIOD_MS = 500
 TX_CURRENT_PERIOD_MS    = 250
 
-# AMS state byte encoding (0x20 reply)
+# AMS state byte encoding for the legacy 0x20 reply (kept for reference;
+# new code should prefer FsmState from the 0x4A0 telemetry frame).
 STATE_CPU_POWER         = 0x00
 STATE_CPU_PRECHARGE     = 0x01
 STATE_CPU_DISCONNECTED  = 0x02
 STATE_CPU_ERROR         = 0x03
 STATE_CPU_CHARGING      = 0x04
+
+# ---------------------------------------------------------------------------
+# AMS telemetry frames (FDCAN1, replaces UART debug path)
+# All standard ID, classic CAN, DLC 8, 500 ms cadence.
+# Source of truth: Core/Inc/app/telemetry_encoders.hpp.
+# ---------------------------------------------------------------------------
+ID_TELEM_STATUS  = 0x4A0   # FSM state, AMS_OK, module mask, min/max cell V
+ID_TELEM_PACK    = 0x4A1   # pack mV (u32 LE), filtered mA (i32 LE)
+ID_TELEM_TEMPS   = 0x4A2   # min/max/avg tempC, dc_bus_V, heartbeat
+
+TX_TELEM_PERIOD_MS = 500
+
+
+# FSM state enum, matches Core/Inc/app/state_machine.hpp `ams::fsm::State`.
+class FsmState:
+    START      = 0
+    PRECHARGE  = 1
+    TRANSITION = 2
+    RUN        = 3
+    CHARGE     = 4
+    ERROR      = 5
+
+    _NAMES = {0: "Start", 1: "Precharge", 2: "Transition",
+              3: "Run",   4: "Charge",    5: "Error"}
+
+    @classmethod
+    def name(cls, v: int) -> str:
+        return cls._NAMES.get(int(v), f"0x{int(v):02X}")
+
+
+# ---------------------------------------------------------------------------
+# Telemetry decoders. Each takes an 8-byte payload and returns a dict.
+# Layouts mirror telemetry_encoders.hpp byte-for-byte.
+# ---------------------------------------------------------------------------
+
+def decode_telem_status(data: bytes) -> dict:
+    """Decode 0x4A0 payload.
+    Layout:
+      byte 0     FSM state (FsmState)
+      byte 1     AMS_OK GPIO read-back (0/1)
+      byte 2     bms.module_online_mask (low byte)
+      byte 3     reserved
+      bytes 4-5  min_cell_mV (big-endian uint16)
+      bytes 6-7  max_cell_mV (big-endian uint16)
+    """
+    if len(data) < 8:
+        raise ValueError(f"0x4A0 needs 8 bytes, got {len(data)}")
+    return {
+        "state":              data[0],
+        "state_name":         FsmState.name(data[0]),
+        "ams_ok":             bool(data[1]),
+        "module_online_mask": data[2],
+        "min_cell_mV":        (data[4] << 8) | data[5],
+        "max_cell_mV":        (data[6] << 8) | data[7],
+    }
+
+
+def decode_telem_pack(data: bytes) -> dict:
+    """Decode 0x4A1 payload.
+    Layout:
+      bytes 0-3  pack_voltage_mV (little-endian uint32, mV)
+      bytes 4-7  filtered_mA     (little-endian int32, + discharge / - charge)
+    """
+    if len(data) < 8:
+        raise ValueError(f"0x4A1 needs 8 bytes, got {len(data)}")
+    pack_mV = int.from_bytes(data[0:4], "little", signed=False)
+    mA      = int.from_bytes(data[4:8], "little", signed=True)
+    return {"pack_voltage_mV": pack_mV, "filtered_mA": mA}
+
+
+def decode_telem_temps(data: bytes) -> dict:
+    """Decode 0x4A2 payload.
+    Layout:
+      byte 0     min_tempC (int8)
+      byte 1     max_tempC (int8)
+      byte 2     avg_tempC (int8)
+      bytes 3-4  dc_bus_V (little-endian uint16, volts)
+      bytes 5-6  reserved
+      byte 7     heartbeat counter (0..255, wraps)
+    """
+    if len(data) < 8:
+        raise ValueError(f"0x4A2 needs 8 bytes, got {len(data)}")
+    def i8(b): return b - 256 if b > 127 else b
+    return {
+        "min_tempC": i8(data[0]),
+        "max_tempC": i8(data[1]),
+        "avg_tempC": i8(data[2]),
+        "dc_bus_V":  data[3] | (data[4] << 8),
+        "heartbeat": data[7],
+    }
 
 # ---------------------------------------------------------------------------
 # Bootloader trigger (FDCAN2)

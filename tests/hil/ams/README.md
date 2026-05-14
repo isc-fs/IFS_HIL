@@ -22,15 +22,16 @@ cleanly if any of that is missing, so off-bench `pytest tests/` stays green.
 
 ```
 tests/hil/ams/
-├── README.md            ← you are here
-├── ams_profile.yaml     ← thresholds, cadences, bus mapping, slot index
-├── conftest.py          ← fixtures: mlc_powered, bms_emulator, acu, …
-├── test_block_a_boot.py ← HIL-002, 003 (and HIL-004 placeholder)
-├── test_block_b_safety.py    ← not implemented yet
-├── test_block_c_fsm.py       ← not implemented yet
-├── test_block_d_comms.py     ← not implemented yet
-├── test_block_e_bootloader.py ← not implemented yet
-└── test_block_f_soak.py      ← not implemented yet
+├── README.md                  ← you are here
+├── ams_profile.yaml           ← thresholds, cadences, bus mapping, slot index
+├── conftest.py                ← fixtures: mlc_powered, bms_emulator, acu, observe_acu,
+│                                observe_bms, wait_for_state, current_state, flasher
+├── test_block_a_boot.py       ← HIL-002, 003, 004
+├── test_block_b_safety.py     ← HIL-014, 015, 016, 017
+├── test_block_c_fsm.py        ← HIL-020..028
+├── test_block_d_comms.py      ← HIL-030, 031, 032, 033, 035, 036, 037, 038, 040
+├── test_block_e_bootloader.py ← HIL-041, 042, 043 (×6), 044, 046, 047
+└── test_block_f_soak.py       ← not implemented yet
 ```
 
 Generic helpers (BMS emulator, ACU stimulus, CAN observer, flasher wrapper)
@@ -51,32 +52,69 @@ won't false-fail on a degraded bench — but you'll see a lot of `SKIPPED`.
 
 ## What we can run vs what we can't
 
-The AMS firmware on `dev` hard-codes pins that **the MAIN_LITE carrier does
-not route to the bench connector** (PD3/PD4/PD5 relays, PE9 SDC, PF11 current
-sense, PF13 AMS_OK, PG7 charge button, PA2/PA3 USART2). Until either:
+The AMS firmware on `dev` (post-PR-#81, post-PR-#80) now:
+- emits **classic CAN frames** on both FDCAN1 and FDCAN2 — bench MCP2515s
+  can decode TX traffic ✓
+- drops the UART debug path in favour of three telemetry frames on FDCAN1:
+  `0x4A0` (state + cell V), `0x4A1` (pack V + current), `0x4A2` (temps +
+  DC bus + heartbeat), all at 500 ms cadence ✓
 
-- the firmware is re-pinned to MAIN_LITE GPIOs, or
-- a Nucleo-H733ZG with breakouts is wired into the rig,
+Combined with the BMS slave emulator and ACU stimulus on the bench side,
+this brings Blocks A, B (subset), C, D, and E into bench-doable territory.
 
-…the bench can run only CAN-observable tests. That covers Block A (boot via
-BL), Block D (CAN cadence + frame parsing — once the firmware emits classic
-CAN frames the MCP2515 can decode), and Block E (boot-trigger / BL
-integration). Blocks B, C, and F that depend on relay output or SDC input
-read-back are deferred.
+What's *still* deferred is anything that requires direct access to the
+STM32 pins the AMS firmware hard-codes but the MAIN_LITE carrier does not
+route to the bench: **PD3/PD4/PD5** (relays), **PE9** (SDC), **PF11**
+(current ADC), **PF13** (AMS_OK), **PG7** (charge button), **PA2/PA3**
+(USART2, now unused by firmware anyway). And anything that needs SWD/GDB
+(HIL-001, 005, 008, 010, 011, 013).
+
+Block-by-block status is in the table below.
 
 | Test ID | Status | Notes |
 |---|---|---|
-| HIL-001 | ⏸️ deferred | Needs SWD to erase flash; not routine on this bench |
-| HIL-002 | ✅ implemented | `test_block_a_boot.py::TestBlBringUp::test_bl_discover` |
-| HIL-003 | ✅ implemented | needs `AMS_FIRMWARE_BIN` env var or `/tmp/AMS.bin` |
-| HIL-004 | ⏸️ placeholder | needs UART access or FDCAN1-TX cadence (see Block D) |
+| HIL-001 | ⏸️ deferred | needs SWD to erase flash |
+| HIL-002 | ✅ done | `test_block_a_boot.py::TestBlBringUp::test_bl_discover` |
+| HIL-003 | ✅ done | needs `AMS_FIRMWARE_BIN` or `/tmp/AMS.bin` |
+| HIL-004 | ✅ done | observes `0x4A0` byte 0 = `FsmState.Start` after flash + jump |
 | HIL-005..008 | ⏸️ deferred | SWD / GDB / flash-dump heavy |
 | HIL-009 | ⏸️ deferred | needs GDB breakpoint in `HAL_FDCAN_RxFifo0Callback` |
-| HIL-010..019 (Block B) | ⏸️ deferred | needs relay-output read-back / GDB |
-| HIL-020..029 (Block C) | ⏸️ partial — FSM state inferable from TX cadence | |
-| HIL-030..040 (Block D) | 🔜 next workstream | CAN cadence + parsing — fully bench-doable |
-| HIL-041..047 (Block E) | 🔜 next workstream | CAN-only |
-| HIL-050..055 (Block F) | ⏸️ deferred | soak runs need UART or TX cadence as a heartbeat |
+| HIL-010..013 | ⏸️ deferred | need SafetyTask timing / GDB |
+| HIL-014 | ✅ done | cell UV via BMS emulator → `0x4A0` state=Error |
+| HIL-015 | ✅ done | cell OV via BMS emulator → `0x4A0` state=Error |
+| HIL-016 | ✅ done | cell OT via BMS emulator → `0x4A0` state=Error |
+| HIL-017 | ✅ done | BMS staleness via `stop_module()` → `0x4A0` state=Error |
+| HIL-018 | ⏸️ deferred | PF11 current ADC not routed on MAIN_LITE |
+| HIL-019 | ⏸️ deferred | PE9 SDC input not routed on MAIN_LITE |
+| HIL-020 | ✅ done | start button → Precharge |
+| HIL-021 | ✅ done | charger detect → Charge |
+| HIL-022 | ✅ done | Precharge → Transition on DC bus high |
+| HIL-023 | ✅ done | Precharge timeout → Error |
+| HIL-024 | ✅ done | Transition → Run after hold |
+| HIL-025 | ✅ done | Transition V drop → Error |
+| HIL-026 | ✅ done | Run is terminal |
+| HIL-027 | ✅ done | Charge is terminal |
+| HIL-028 | ✅ done | Error sticky within boot |
+| HIL-029 | ⏸️ deferred | needs software reset → app boots in Error (cross-boot persistence) |
+| HIL-030 | ✅ done | BMS voltage poll cadence 250 ms |
+| HIL-031 | ✅ done | BMS temp poll cadence 500 ms |
+| HIL-032 | ✅ done | BMS V parsing → `0x4A0` min/max |
+| HIL-033 | ✅ done | BMS temp parsing → `0x4A2` min/max |
+| HIL-034 | ⏸️ deferred | `g_bms_rx_dropped_unknown` not in telemetry |
+| HIL-035 | ✅ done | `0x100` DC bus → `0x4A2` dc_bus_V |
+| HIL-036 | ✅ done | `0x600` start button → state transition |
+| HIL-037 | ✅ done | `0x18FF50E7` → Charge transition |
+| HIL-038 | ✅ done | `0x12C` ext TX cadence 500 ms in Run |
+| HIL-039 | ⏸️ deferred | PF11 current ADC not routed |
+| HIL-040 | ✅ done | charger-suppress: `0x12C` ext + BMS polls silent in Charge |
+| HIL-041 | ✅ done | boot-trigger round-trip on FDCAN2 |
+| HIL-042 | ✅ done | wrong-bus trigger (FDCAN1) ignored |
+| HIL-043 | ✅ done | wrong-payload trigger ignored (6 sub-cases parametric) |
+| HIL-044 | ✅ done | wrong-DLC trigger ignored (DLC 3, 5, 8) |
+| HIL-045 | ⏸️ deferred | µs-resolution on PD3/4/5 + NRST; not routed |
+| HIL-046 | ✅ done | BL one-shot; post-trigger power-cycle boots app |
+| HIL-047 | ✅ done | flood of malformed + one valid |
+| HIL-050..055 | ⏸️ deferred | soak/fuzz — feasible but long; build last |
 
 ## Tuning
 

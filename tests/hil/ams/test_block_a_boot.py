@@ -95,14 +95,52 @@ class TestAppFlash:
         )
 
 
-# HIL-004 placeholder ------------------------------------------------------
-#
-# Confirming "app reaches Start" requires either UART telemetry (USART2 not
-# routed off the MAIN_LITE connector) or observing AMS TX cadence on FDCAN1.
-# Implement when test_block_d lands the cadence helpers; tracked here as a
-# skip so the test ID is visible in `pytest --collect-only`.
+# HIL-004 ------------------------------------------------------------------
 
-@pytest.mark.skip(reason="HIL-004 needs UART or FDCAN1-TX observability — "
-                  "rework once Block D's cadence helpers are in place.")
-def test_hil_004_app_reaches_start():
-    pass
+class TestAppReachesStart:
+    """HIL-004: post-flash reset hands off cleanly to the app, the FSM comes
+    up in Start, and the 500 ms telemetry stream is alive.
+
+    The firmware drops UART telemetry in favour of three CAN frames on
+    FDCAN1 (`0x4A0` AMS status, `0x4A1` pack, `0x4A2` temps + diagnostics).
+    HIL-004 is therefore observable purely from the bench's CAN sniff."""
+
+    def test_app_boots_and_reaches_start(self, ams_firmware_bin, flasher,
+                                         bms_emulator, observe_acu,
+                                         ams_profile):
+        from tools.firmware_test.ams import can_map as M
+        import time
+
+        # Get into BL if not already (HIL-003 path may have left an app)
+        if not flasher.discover():
+            flasher.send_boot_trigger()
+            time.sleep(1.5)
+
+        # Flash + jump
+        observe_acu.clear()
+        flasher.flash(ams_firmware_bin,
+                      address=int(ams_profile["app_flash_address"]),
+                      verify=True, jump=True,
+                      timeout_s=float(ams_profile["bl_flash_timeout_s"]))
+
+        # Wait for first 0x4A0 — gives the app ~2 cadence intervals to settle
+        deadline = time.time() + 2 * (int(ams_profile["tx_telemetry_period_ms"]) / 1000.0) + 1.0
+        first = None
+        while time.time() < deadline:
+            first = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
+            if first is not None:
+                break
+            time.sleep(0.05)
+
+        assert first is not None, (
+            f"No 0x4A0 telemetry within {2 * ams_profile['tx_telemetry_period_ms']} ms "
+            "of jump. App didn't reach the telemetry task, or FDCAN1 frame format "
+            "is still FD (re-check the classic-CAN switch landed)."
+        )
+
+        snap = M.decode_telem_status(first.data)
+        assert snap["state"] == M.FsmState.START, (
+            f"First state was {snap['state_name']} (expected Start). "
+            "Either the app booted into a fault, or BMS / SDC defaults trip ERROR "
+            "before the first telemetry frame."
+        )
