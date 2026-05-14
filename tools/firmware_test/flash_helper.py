@@ -4,23 +4,75 @@ the canonical flasher and shelling out is the right pattern for the bench.
 
 Example:
 
-    from tools.firmware_test.flash_helper import CanFlasher
+    from tools.firmware_test.flash_helper import CanFlasher, CanFlasherError
 
     fl = CanFlasher(channel="can2", node_id=0x01)
     fl.discover()                          # returns parsed node list or []
-    fl.flash("/tmp/AMS.bin", verify=True, jump=True)
+    try:
+        fl.flash("/tmp/AMS.bin", verify=True, jump=True)
+    except CanFlasherError as e:
+        # e.stdout / e.stderr carry the actual flasher output — surfaced
+        # in str(e) too, so a bare `raise` in a test gives a useful trace.
+        ...
 """
 
 from __future__ import annotations
 
 import logging
 import re
+import shlex
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
 log = logging.getLogger(__name__)
+
+
+class CanFlasherError(RuntimeError):
+    """`can-flasher` subprocess returned a non-zero exit.
+
+    Unlike a bare `subprocess.CalledProcessError`, this class includes the
+    captured stdout / stderr in `str(self)` so pytest's traceback (and any
+    `raise` re-throw) shows the real reason — NO_VALID_APP, FLASH_HW,
+    TRANSPORT_TIMEOUT, etc. — instead of just "exit status 1".
+    """
+
+    def __init__(self, *, cmd: List[str], returncode: int,
+                 stdout: str, stderr: str):
+        self.cmd_argv  = list(cmd)
+        self.returncode = returncode
+        self.stdout    = stdout or ""
+        self.stderr    = stderr or ""
+
+        def _trim(s: str, n: int = 800) -> str:
+            s = (s or "").rstrip()
+            if not s:
+                return "(empty)"
+            return s if len(s) <= n else s[:n] + " …(truncated)"
+
+        super().__init__(
+            "can-flasher exit {rc} on `{cmd}`\n"
+            "  stdout: {out}\n"
+            "  stderr: {err}".format(
+                rc=returncode,
+                cmd=shlex.join(self.cmd_argv),
+                out=_trim(self.stdout),
+                err=_trim(self.stderr),
+            )
+        )
+
+
+def _run(cmd: List[str], *, timeout_s: float,
+         check: bool = True) -> subprocess.CompletedProcess:
+    """Run a subprocess with captured output; on non-zero exit (when
+    `check=True`) raise CanFlasherError with stdout/stderr inline."""
+    log.info("$ %s", " ".join(cmd[1:]))
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+    if check and r.returncode != 0:
+        raise CanFlasherError(cmd=cmd, returncode=r.returncode,
+                              stdout=r.stdout, stderr=r.stderr)
+    return r
 
 
 @dataclass
@@ -62,10 +114,16 @@ class CanFlasher:
 
     def discover(self, timeout_ms: Optional[int] = None) -> List[DiscoveredNode]:
         """Run `can-flasher discover` and parse the output table.
-        Returns an empty list if no bootloaders replied."""
+        Returns an empty list if no bootloaders replied. Other non-zero
+        exits raise CanFlasherError with the captured output inline."""
         args = self._base_args() + ["discover",
                                     "--timeout-ms", str(timeout_ms or self.timeout_ms)]
-        r = subprocess.run(args, capture_output=True, text=True, timeout=15)
+        # discover returns 0 on success including the "no bootloaders replied"
+        # case (it's not an error to find nothing), so don't `check`.
+        r = _run(args, timeout_s=15.0, check=False)
+        if r.returncode != 0:
+            raise CanFlasherError(cmd=args, returncode=r.returncode,
+                                  stdout=r.stdout, stderr=r.stderr)
         if "No bootloaders replied" in (r.stdout + r.stderr):
             return []
         nodes: List[DiscoveredNode] = []
@@ -90,23 +148,22 @@ class CanFlasher:
               jump: bool = True,
               extra_args: Optional[List[str]] = None,
               timeout_s: float = 60.0) -> subprocess.CompletedProcess:
-        """Run `can-flasher flash <image>`. Raises CalledProcessError on
-        non-zero exit; returns the CompletedProcess otherwise."""
+        """Run `can-flasher flash <image>`. On non-zero exit raises
+        CanFlasherError; the exception message includes the can-flasher
+        stdout/stderr so the real reason (NO_VALID_APP, FLASH_HW, etc.)
+        is visible in the pytest traceback."""
         args = (self._base_args() + self._node_args() +
                 ["flash", str(image_path),
                  "--address", f"0x{address:X}"])
         if verify: args.append("--verify-after")
         if jump:   args.append("--jump")
         if extra_args: args.extend(extra_args)
-        log.info("can-flasher flash %s", " ".join(args[1:]))
-        return subprocess.run(args, capture_output=True, text=True,
-                              check=True, timeout=timeout_s)
+        return _run(args, timeout_s=timeout_s)
 
     def send_boot_trigger(self) -> None:
         """Shortcut: cansend the boot-trigger frame on this CAN channel.
         Useful when an app is running and we want to drop it back to BL."""
-        subprocess.run(["cansend", self.channel, "002#B007AD11"],
-                       check=True, capture_output=True)
+        _run(["cansend", self.channel, "002#B007AD11"], timeout_s=5.0)
 
     def app_to_bl(self) -> None:
         """Older path some apps support: send-raw 0x001 03 06 01.
@@ -114,4 +171,4 @@ class CanFlasher:
         opcode rather than parsing the boot trigger directly."""
         args = self._base_args() + self._node_args() + [
             "send-raw", "0x001", "03", "06", "01"]
-        subprocess.run(args, check=True, capture_output=True, timeout=5)
+        _run(args, timeout_s=5.0)
