@@ -182,10 +182,17 @@ class CanFlasher:
         if extra_args: args.extend(extra_args)
         return _run(args, timeout_s=timeout_s)
 
-    def send_boot_trigger(self) -> None:
-        """Shortcut: cansend the boot-trigger frame on this CAN channel.
-        Useful when an app is running and we want to drop it back to BL."""
-        _run(["cansend", self.channel, "002#B007AD11"], timeout_s=5.0)
+    def send_boot_trigger(self, channel: Optional[str] = None) -> None:
+        """Cansend the boot-trigger frame to drop a running app back to BL.
+
+        `channel` overrides the default (this flasher's BL channel). Since
+        the AMS v1.2.0-ltc6811 refactor (#73), the AMS app listens for
+        the boot-trigger frame on FDCAN1 (the ACU bus) rather than FDCAN2
+        (the BL bus). Callers from a HIL fixture should pass the ACU bus
+        channel here. Falls back to the BL channel for older firmware /
+        other ECUs."""
+        ch = channel or self.channel
+        _run(["cansend", ch, "002#B007AD11"], timeout_s=5.0)
 
     def app_to_bl(self) -> None:
         """Older path some apps support: send-raw 0x001 03 06 01.
