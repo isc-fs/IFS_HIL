@@ -87,16 +87,37 @@ class DiscoveredNode:
 
 
 class CanFlasher:
-    """Wraps the `can-flasher` CLI for SocketCAN."""
+    """Wraps the `can-flasher` CLI for SocketCAN.
+
+    Two timeouts, deliberately split:
+      - `discover_timeout_ms` → `--timeout-ms` on the discover subcommand
+        (how long to wait for any bootloader replies; should stay short
+        because empty == fail-fast).
+      - `per_frame_timeout_ms` → top-level `--timeout` (per-frame timeout
+        for every ISO-TP transaction in flash / send-raw / etc.). Needs
+        to be generous because the first write chunk after a fresh erase
+        can take seconds while the BL settles. The `can-flasher` default
+        of 500 ms is too aggressive; the IFS08 BL needs ≥ 10 s in
+        practice.
+    """
 
     def __init__(self, channel: str = "can2", bitrate: int = 500_000,
-                 node_id: int = 0x01, timeout_ms: int = 5000,
-                 binary: str = "can-flasher"):
-        self.channel    = channel
-        self.bitrate    = bitrate
-        self.node_id    = node_id
-        self.timeout_ms = timeout_ms
-        self.binary     = binary
+                 node_id: int = 0x01,
+                 discover_timeout_ms: int = 3000,
+                 per_frame_timeout_ms: int = 30_000,
+                 binary: str = "can-flasher",
+                 *,
+                 timeout_ms: Optional[int] = None):
+        """`timeout_ms=` (deprecated) maps to `discover_timeout_ms` for
+        backwards compatibility with the v1 API."""
+        if timeout_ms is not None:
+            discover_timeout_ms = timeout_ms
+        self.channel              = channel
+        self.bitrate              = bitrate
+        self.node_id              = node_id
+        self.discover_timeout_ms  = discover_timeout_ms
+        self.per_frame_timeout_ms = per_frame_timeout_ms
+        self.binary               = binary
 
     # -- low-level argv builders ---------------------------------------
 
@@ -108,7 +129,7 @@ class CanFlasher:
 
     def _node_args(self) -> List[str]:
         return ["--node-id", f"0x{self.node_id:X}",
-                "--timeout", str(self.timeout_ms)]
+                "--timeout", str(self.per_frame_timeout_ms)]
 
     # -- commands -------------------------------------------------------
 
@@ -117,7 +138,8 @@ class CanFlasher:
         Returns an empty list if no bootloaders replied. Other non-zero
         exits raise CanFlasherError with the captured output inline."""
         args = self._base_args() + ["discover",
-                                    "--timeout-ms", str(timeout_ms or self.timeout_ms)]
+                                    "--timeout-ms",
+                                    str(timeout_ms or self.discover_timeout_ms)]
         # discover returns 0 on success including the "no bootloaders replied"
         # case (it's not an error to find nothing), so don't `check`.
         r = _run(args, timeout_s=15.0, check=False)
