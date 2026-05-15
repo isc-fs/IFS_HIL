@@ -3,7 +3,10 @@
 
 # Power up + boot
 mlc_slot:                 1          # which carrier slot the BL-flashed STM32 lives in
-mlc_boot_current_mA:      120        # minimum expected current after K_n closes
+mlc_boot_current_mA:      100        # minimum expected current after K_n closes
+                                     # (bench-observed draw is 118-128 mA depending on
+                                     #  task state; 100 mA leaves margin yet still well
+                                     #  above the ~30 mA "relay open" floor)
 mlc_boot_settle_s:        2.0        # wait after relay close before discover
 
 # CAN buses (kernel netdev names, per docs/hardware-reference.md)
@@ -12,13 +15,30 @@ bus_bms_bl:               can2       # FDCAN2 of the firmware (BL also lives her
 
 # Bootloader
 bl_node_id:               0x01       # factory default; bench-side change if you reprovision
-bl_discover_timeout_ms:   3000
-bl_flash_timeout_s:       60
+bl_discover_timeout_ms:   3000       # --timeout-ms on `can-flasher discover` (fast-fail)
+bl_per_frame_timeout_ms:  30000      # --timeout on flash / send-raw (per ISO-TP transaction)
+                                     # First write chunk after fresh erase can take seconds
+                                     # while the BL settles; default 500 ms is too tight.
+bl_flash_timeout_s:       60         # overall subprocess timeout for `flash` command
 app_flash_address:        0x08020000 # AMS app image start (sector 1)
 
 # BMS emulator defaults — keep within the firmware's healthy window
 bms_default_cell_mV:      3700       # well above kCellUVmV (2800), below kCellOVmV (4200)
 bms_default_temp_C:       25         # well below kCellOTC (60)
+
+# SDC stim — the AMS firmware reads DIGITAL1 (PE9 on the MCU) as the
+# shutdown-circuit-closed signal. On this bench DIGITAL1 is wired
+# bench-side from the IFS08 carrier's SLOT1_DIG1 net to TCA9555 #U7
+# (I²C 0x21) port 1 pin 0 (= net name `IOEXP2_P10`). Driving it
+# HIGH closes SDC from the firmware's point of view.
+sdc_tca_addr:             0x21
+sdc_tca_port:             1
+sdc_tca_pin:              0
+
+# ACU heartbeat — kVcuStaleMs in the firmware is 200 ms; we emit at
+# 20 Hz (50 ms) for comfortable margin.
+acu_heartbeat_period_ms:  50
+acu_heartbeat_dc_bus_v:   0          # DC bus voltage reported by the stim (0 V is fine for boot)
 
 # TX cadence checks (per CAN_MAP.md)
 tx_min_cell_v_period_ms:  500

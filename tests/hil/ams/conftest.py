@@ -138,6 +138,97 @@ def observe_bms(ams_profile, mlc_powered):
 
 
 # ---------------------------------------------------------------------------
+# SDC stim — bench-side `DIGITAL1` (= `SLOT1_DIG1` ↔ `IOEXP2_P10`) drive
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def sdc_closed(ams_profile, mlc_powered):
+    """Drive `DIGITAL1` HIGH on the carrier so the AMS firmware reads SDC
+    as closed.
+
+    This is a bench wiring detail: the carrier's `SLOT1_DIG1` net (= MCU
+    PE9) is jumpered to TCA9555 U7 P10 on the backplane. The TCA9555 sits
+    on standby power so it's safe to drive without first powering the
+    carrier, but we still depend on `mlc_powered` so the test ordering
+    matches the rest of Block A.
+
+    Use this fixture for tests that should observe a healthy SDC. Tests
+    that need to verify SDC-open behaviour (HIL-019) should NOT request
+    this fixture; their conftest entry-point can drive the pin LOW
+    explicitly."""
+    from broker.server import BrokerClient
+    import os
+    client = BrokerClient(os.environ.get("HIL_BROKER_SOCKET",
+                                         "/run/hil-broker/broker.sock"))
+    addr = int(ams_profile["sdc_tca_addr"])
+    port = int(ams_profile["sdc_tca_port"])
+    pin  = int(ams_profile["sdc_tca_pin"])
+
+    # Configure the whole port as outputs (mask=0x00) so the pin actually
+    # drives; the other pins on the port retain whatever state the
+    # `tca.write_pin` calls have left them in.
+    client.call("tca.set_direction", addr=addr, port=port, mask=0x00)
+    client.call("tca.write_pin",     addr=addr, port=port, pin=pin, value=True)
+    log.info("SDC closed via TCA 0x%02X port %d pin %d", addr, port, pin)
+    yield {"addr": addr, "port": port, "pin": pin}
+
+    # Teardown — open SDC, leave the carrier in the safest state.
+    client.call("tca.write_pin", addr=addr, port=port, pin=pin, value=False)
+    client.close()
+
+
+# ---------------------------------------------------------------------------
+# ACU heartbeat — periodic 0x100 DC-bus frame so the VCU staleness
+# predicate doesn't immediately fault after the chip jumps to the app.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def acu_heartbeat(ams_profile, mlc_powered):
+    """Run a background thread that emits the VCU DC-bus frame at
+    `acu_heartbeat_period_ms` cadence (default 50 ms = 20 Hz, well under
+    the firmware's `kVcuStaleMs` = 200 ms).
+
+    The thread stops cleanly on teardown. Coexists with the `acu` fixture
+    (separate `AcuStim` instance, separate SocketCAN socket) so a single
+    test can do one-shot ACU stimulation on top of a steady heartbeat."""
+    import threading
+    from tools.firmware_test.acu_stim import AcuStim
+
+    bus = ams_profile["bus_acu"]
+    _skip_if_no_can(bus)
+
+    period_s = float(ams_profile["acu_heartbeat_period_ms"]) / 1000.0
+    volts    = int(ams_profile["acu_heartbeat_dc_bus_v"])
+
+    stim = AcuStim(channel=bus)
+    stim.start()
+    stop_evt = threading.Event()
+
+    def _loop():
+        # Emit one frame, sleep, repeat. `emit_dc_bus_v_periodic` would do
+        # the same but its arg shape (callable + period + event) is
+        # awkward when we want a constant value; inline is clearer.
+        while not stop_evt.is_set():
+            try:
+                stim.send_dc_bus_v(volts)
+            except Exception as e:
+                log.warning("acu_heartbeat send failed: %s", e)
+                break
+            stop_evt.wait(period_s)
+
+    t = threading.Thread(target=_loop, name="acu-heartbeat", daemon=True)
+    t.start()
+    log.info("ACU heartbeat running on %s @ %d ms (%d V)",
+             bus, int(period_s * 1000), volts)
+
+    yield {"channel": bus, "period_ms": int(period_s * 1000), "volts": volts}
+
+    stop_evt.set()
+    t.join(timeout=1.0)
+    stim.stop()
+
+
+# ---------------------------------------------------------------------------
 # Flasher
 # ---------------------------------------------------------------------------
 
@@ -151,7 +242,8 @@ def flasher(ams_profile, mlc_powered):
         channel=ams_profile["bus_bms_bl"],
         bitrate=500_000,
         node_id=int(ams_profile["bl_node_id"]),
-        timeout_ms=int(ams_profile["bl_discover_timeout_ms"]),
+        discover_timeout_ms=int(ams_profile["bl_discover_timeout_ms"]),
+        per_frame_timeout_ms=int(ams_profile["bl_per_frame_timeout_ms"]),
     )
 
 

@@ -84,15 +84,27 @@ class TestAppFlash:
             jump=True,
             timeout_s=float(ams_profile["bl_flash_timeout_s"]),
         )
-        assert "Done" in r.stdout, f"flash output missing Done marker:\n{r.stdout}"
-
-        # After --jump, BL is gone (app is running). discover should be empty.
-        import time; time.sleep(0.5)
-        nodes_after = flasher.discover()
-        assert nodes_after == [], (
-            "BL still answering after flash --jump. The app didn't boot, "
-            "or the BL didn't relinquish control."
+        # `can-flasher` exits non-zero on protocol failure (the `_run`
+        # wrapper would have raised), so reaching this point already
+        # proves the flash succeeded. Belt-and-braces: check for the
+        # structured success markers, which live on stdout *or* stderr
+        # depending on the can-flasher version (1.3.x split progress to
+        # stderr while keeping the summary on stdout).
+        combined = (r.stdout or "") + "\n" + (r.stderr or "")
+        assert "Done" in combined, (
+            f"flash output missing 'Done' marker:\n--- stdout ---\n{r.stdout}\n"
+            f"--- stderr ---\n{r.stderr}"
         )
+        assert "jumped to app" in combined, (
+            f"flash output missing jump confirmation:\n--- stdout ---\n{r.stdout}\n"
+            f"--- stderr ---\n{r.stderr}"
+        )
+
+        # We deliberately do NOT assert "BL is silent after jump" here:
+        # whether the app stays alive depends on bench stim (SDC, BMS,
+        # ACU heartbeat) that this test doesn't set up. HIL-003 is about
+        # the BL flash protocol, not app boot — that's HIL-004's job.
+        # We only check the flasher itself reports a successful jump.
 
 
 # HIL-004 ------------------------------------------------------------------
@@ -107,9 +119,16 @@ class TestAppReachesStart:
 
     def test_app_boots_and_reaches_start(self, ams_firmware_bin, flasher,
                                          bms_emulator, observe_acu,
+                                         acu_heartbeat, sdc_closed,
                                          ams_profile):
         from tools.firmware_test.ams import can_map as M
         import time
+
+        # `acu_heartbeat` + `sdc_closed` + `bms_emulator` must already be live
+        # before the chip is told to jump — otherwise SafetyTask's first
+        # 10 ms tick faults on `last_*_tick == 0` and IWDG resets the chip
+        # back to BL before any telemetry is emitted. See
+        # `isc-fs/IFS08-CE-AMS#104` for the firmware-side discussion.
 
         # Get into BL if not already (HIL-003 path may have left an app)
         if not flasher.discover():
