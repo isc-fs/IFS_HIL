@@ -30,13 +30,22 @@ import pytest
 class TestBlBringUp:
     """HIL-002: bootloader responds to DISCOVER on FDCAN2."""
 
-    def test_bl_discover(self, flasher):
+    def test_bl_discover(self, flasher, ams_profile):
         nodes = flasher.discover()
+        if not nodes:
+            # An app may already be running from a previous session's
+            # flash+jump. Drop it back to BL via the ACU-bus trigger
+            # (FDCAN1 per the AMS v1.2.0-ltc6811 refactor #73) and retry.
+            import time
+            flasher.send_boot_trigger(channel=ams_profile["bus_acu"])
+            time.sleep(0.5)
+            nodes = flasher.discover()
         assert nodes, (
             "No bootloaders replied on the BL bus. Check: "
             "(1) the carrier in MLC1 has the BL flashed, "
             "(2) ams_profile.bus_bms_bl matches the kernel netdev wired to "
-            "the carrier's CAN2 transceiver."
+            "the carrier's CAN2 transceiver, "
+            "(3) any running app responds to the boot-trigger frame on bus_acu."
         )
         assert len(nodes) == 1, (
             f"Expected exactly one node on the BL bus, got {len(nodes)}. "
@@ -70,9 +79,11 @@ class TestAppFlash:
         # Sanity: BL is the one currently listening (no app already running)
         nodes_before = flasher.discover()
         if not nodes_before:
-            # If an app is already running, try to drop it back to BL first
-            flasher.send_boot_trigger()
-            import time; time.sleep(1.5)
+            # App was already running — drop it back to BL via FDCAN1
+            # (per AMS v1.2.0-ltc6811 refactor #73). Retry discover after.
+            import time
+            flasher.send_boot_trigger(channel=ams_profile["bus_acu"])
+            time.sleep(0.5)
             nodes_before = flasher.discover()
         assert nodes_before, "BL not reachable even after boot-trigger; cannot flash"
 
@@ -119,31 +130,42 @@ class TestAppReachesStart:
 
     def test_app_boots_and_reaches_start(self, ams_firmware_bin, flasher,
                                          bms_emulator, observe_acu,
-                                         acu_heartbeat, sdc_closed,
+                                         acu_heartbeat,
                                          ams_profile):
         from tools.firmware_test.ams import can_map as M
         import time
 
-        # `acu_heartbeat` + `sdc_closed` + `bms_emulator` must already be live
-        # before the chip is told to jump — otherwise SafetyTask's first
-        # 10 ms tick faults on `last_*_tick == 0` and IWDG resets the chip
-        # back to BL before any telemetry is emitted. See
-        # `isc-fs/IFS08-CE-AMS#104` for the firmware-side discussion.
+        # Strategy: power-cycle MLC1, let the BL auto-jump to the
+        # already-installed app, then observe the FIRST `0x4A0` frame.
+        # We deliberately don't re-flash here — HIL-003 already proved
+        # the flash protocol works, and the AMS app's boot-trigger path
+        # (CAN frame `0x002`#`B007AD11` on FDCAN1) doesn't reliably
+        # drop a running app back to BL on this firmware build
+        # (tracked separately). Cleanest reset is a hardware power-cycle.
+        #
+        # `acu_heartbeat` + `bms_emulator` must already be live before
+        # the app boots so SafetyTask's predicates have fresh data once
+        # the boot grace expires.
 
-        # Get into BL if not already (HIL-003 path may have left an app)
-        if not flasher.discover():
-            flasher.send_boot_trigger()
-            time.sleep(1.5)
+        from broker.server import BrokerClient
+        import os
+        client = BrokerClient(os.environ.get("HIL_BROKER_SOCKET",
+                                             "/run/hil-broker/broker.sock"))
+        slot_pin = int(ams_profile["mlc_slot"]) - 1
+        try:
+            # K1 open → drain → K1 close. Settle long enough for BL +
+            # auto-jump; the app will start emitting `0x4A0` within
+            # `tx_telemetry_period_ms` of jump.
+            client.call("tca.write_pin", addr=0x20, port=0, pin=slot_pin, value=False)
+            time.sleep(2.0)
+            observe_acu.clear()
+            client.call("tca.write_pin", addr=0x20, port=0, pin=slot_pin, value=True)
+        finally:
+            client.close()
 
-        # Flash + jump
-        observe_acu.clear()
-        flasher.flash(ams_firmware_bin,
-                      address=int(ams_profile["app_flash_address"]),
-                      verify=True, jump=True,
-                      timeout_s=float(ams_profile["bl_flash_timeout_s"]))
-
-        # Wait for first 0x4A0 — gives the app ~2 cadence intervals to settle
-        deadline = time.time() + 2 * (int(ams_profile["tx_telemetry_period_ms"]) / 1000.0) + 1.0
+        # Wait for the first `0x4A0` frame post-app-boot. BL boot +
+        # auto-jump is < 3 s on this carrier; budget 5 s.
+        deadline = time.time() + 5.0
         first = None
         while time.time() < deadline:
             first = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
@@ -152,9 +174,10 @@ class TestAppReachesStart:
             time.sleep(0.05)
 
         assert first is not None, (
-            f"No 0x4A0 telemetry within {2 * ams_profile['tx_telemetry_period_ms']} ms "
-            "of jump. App didn't reach the telemetry task, or FDCAN1 frame format "
-            "is still FD (re-check the classic-CAN switch landed)."
+            "No 0x4A0 telemetry within 5 s of power-cycle. The app didn't "
+            "reach the telemetry task — either the BL didn't auto-jump, "
+            "or FDCAN1 isn't transmitting. Check INA1 current and "
+            "`candump can0` to localise."
         )
 
         snap = M.decode_telem_status(first.data)
