@@ -1,135 +1,199 @@
 """
-Block B — Safety supervisor (subset that's bench-observable).
+Block B — Safety supervisor (post-refactor: SafetyTask + StateTask +
+TelemetryTask are merged into MainTask, single 10 ms loop).
 
-Without external access to PD3/PD4/PD5 (relays), PE9 (SDC), PF11 (current
-ADC), or PG7 (charge button) on this MLC-only stack, we can only test
-safety predicates that the bench can stimulate via the BMS emulator on
-FDCAN2, and observe the firmware's response via the FSM-state byte in the
-0x4A0 telemetry frame on FDCAN1.
+Implements B-010..B-017 from `isc-fs/IFS08-CE-AMS#123`.
 
-Implemented:
-  HIL-014  Cell undervoltage trips ERROR
-  HIL-015  Cell overvoltage trips ERROR
-  HIL-016  Cell overtemperature trips ERROR
-  HIL-017  BMS module staleness trips ERROR
-
-Deferred (need external GPIO access or GDB):
-  HIL-010  SafetyTask 10 ms cadence
-  HIL-011  IWDG resets the chip if SafetyTask hangs
-  HIL-012  Watchdog reset re-opens relays
-  HIL-013  FORCE_ERROR event flag opens AIRs
-  HIL-018  Current sensor staleness
-  HIL-019  SDC open trips ERROR
+| Test  | What it checks                                            | Status     |
+|-------|-----------------------------------------------------------|------------|
+| B-010 | MainTask 10 ms cadence via heartbeat indirection (60 s)   | implemented|
+| B-011 | IWDG resets the chip if MainTask hangs                    | needs GDB  |
+| B-012 | Watchdog reset re-opens relays                            | needs GDB  |
+| B-013 | ErrorLatch clears on boot under HIL_STUB                  | needs GDB  |
+| B-014 | BMS predicates trip on cell UV/OV/OT                      | deferred (LTC chain) |
+| B-015 | Current overlimit predicate trips → Error                 | needs PF11 stim |
+| B-016 | Current sensor stale → Error                              | needs GDB  |
+| B-017 | VCU heartbeat stale → Error                               | implemented|
 """
 
 from __future__ import annotations
 
 import time
-
 import pytest
 
 from tools.firmware_test.ams import can_map as M
 
 
 # ---------------------------------------------------------------------------
-# All Block B tests run with the AMS app already on the carrier.
-# Test order: bring the firmware up first (relies on Block A having flashed
-# a `.bin` to the app slot at some prior point).
+# B-010 — MainTask 10 ms cadence via heartbeat
 # ---------------------------------------------------------------------------
 
-@pytest.fixture(autouse=True)
-def _require_running_app(observe_acu, ams_profile):
-    """Skip if no 0x4A0 telemetry is observed within the start-up window.
-    Implies the carrier doesn't have the AMS app installed (run Block A first)."""
-    import time
-    deadline = time.time() + 1.5
-    while time.time() < deadline:
-        if observe_acu.last(M.ID_TELEM_STATUS, extended=False) is not None:
-            return
-        time.sleep(0.05)
-    pytest.skip("No AMS telemetry on FDCAN1 — flash the app via Block A first")
+class TestB010MainTaskCadence:
 
+    def test_b010_heartbeat_advances_at_500ms_for_60s(self, fresh_boot,
+                                                       heartbeat_helper,
+                                                       ams_profile):
+        period_ms = int(ams_profile["tx_telemetry_period_ms"])
+        # Per the test plan: over 60 s, expected delta is 120 ± 1 increments
+        # (= 60_000 / 500 = 120, tolerance for boundary windowing).
+        baseline = heartbeat_helper["read"]()
+        # Spin until we have a baseline (chip may have just booted).
+        deadline = time.monotonic() + 5.0
+        while baseline is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+            baseline = heartbeat_helper["read"]()
+        assert baseline is not None, "no heartbeat seen yet — MainTask alive?"
 
-# ---------------------------------------------------------------------------
-# HIL-014: cell undervoltage trips ERROR
-# ---------------------------------------------------------------------------
-
-class TestCellUndervoltage:
-    def test_uv_trips_error(self, bms_emulator, observe_acu, wait_for_state,
-                            ams_profile):
-        # Establish baseline: pack healthy, expect not-Error
-        bms_emulator.set_all_cells(int(ams_profile["bms_default_cell_mV"]))
-        time.sleep(0.5)
-        baseline = observe_acu.last(M.ID_TELEM_STATUS).data
-        assert M.decode_telem_status(baseline)["state"] != M.FsmState.ERROR, (
-            "Pre-test FSM is already in Error — clear residual fault before retesting."
-        )
-
-        # Inject a single undervoltage cell
-        bms_emulator.set_cell(module=2, cell=5, mV=M.CELL_UV_MV - 100)
-
-        snap = wait_for_state(M.FsmState.ERROR,
-                              timeout_ms=int(ams_profile["error_latch_window_ms"]) + 100)
-        assert snap["min_cell_mV"] <= M.CELL_UV_MV, (
-            f"FSM entered Error but min_cell_mV in 0x4A0 was {snap['min_cell_mV']} "
-            f"(expected ≤ {M.CELL_UV_MV})."
+        # Wait 60 s of wall-clock and check the counter has advanced by
+        # 120 ± 1.
+        time.sleep(60.0)
+        final = heartbeat_helper["read"]()
+        assert final is not None
+        delta = (final - baseline) % 256
+        expected = int(60_000 / period_ms)
+        assert abs(delta - expected) <= 1, (
+            f"heartbeat advanced by {delta} in 60 s, expected "
+            f"{expected} ± 1. MainTask may be running too fast/slow "
+            "or hanging intermittently."
         )
 
 
 # ---------------------------------------------------------------------------
-# HIL-015: cell overvoltage trips ERROR
+# B-011 — IWDG resets the chip if MainTask hangs
 # ---------------------------------------------------------------------------
 
-class TestCellOvervoltage:
-    def test_ov_trips_error(self, bms_emulator, wait_for_state, ams_profile):
-        bms_emulator.set_all_cells(int(ams_profile["bms_default_cell_mV"]))
-        time.sleep(0.5)
+class TestB011IWDGOnMainTaskHang:
 
-        bms_emulator.set_cell(module=1, cell=10, mV=M.CELL_OV_MV + 50)
+    @pytest.mark.skip(reason=(
+        "B-011 requires GDB+OpenOCD to set a breakpoint inside the 10 ms "
+        "MainTask loop and hold the chip past the IWDG window. No SWD "
+        "interface on this rig's MLC. Open a follow-up issue when "
+        "SWD/JTAG is wired to a slot."
+    ))
+    def test_b011_iwdg_resets_on_hang(self):
+        pass
 
-        snap = wait_for_state(M.FsmState.ERROR,
-                              timeout_ms=int(ams_profile["error_latch_window_ms"]) + 100)
-        assert snap["max_cell_mV"] >= M.CELL_OV_MV, (
-            f"FSM entered Error but max_cell_mV in 0x4A0 was {snap['max_cell_mV']} "
-            f"(expected ≥ {M.CELL_OV_MV})."
+
+# ---------------------------------------------------------------------------
+# B-012 — Watchdog reset re-opens relays
+# ---------------------------------------------------------------------------
+
+class TestB012WatchdogReopensRelays:
+
+    @pytest.mark.skip(reason=(
+        "B-012 requires (a) IWDG injection (GDB, see B-011) and "
+        "(b) a logic-analyser probe on PB5/6/7 to observe the relay "
+        "lines within milliseconds of the reset. Neither is available "
+        "on the current rig."
+    ))
+    def test_b012_relays_reopen_after_iwdg(self):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# B-013 — ErrorLatch clears on boot under HIL_STUB
+# ---------------------------------------------------------------------------
+
+class TestB013ErrorLatchClearsOnBoot:
+
+    @pytest.mark.skip(reason=(
+        "B-013 requires GDB to write `RTC->BKP1R = 0xA115EE51` (the ERROR "
+        "magic) before the power-cycle so we can observe whether "
+        "App_InitTask::ErrorLatch::clear() wipes it. We can't poke "
+        "backup-domain registers from outside without SWD. The "
+        "auto-clear behaviour is exercised every time `fresh_boot` runs "
+        "(every test in this suite starts from a clean BKP1R), so the "
+        "clear is implicitly tested — this test just isolates it."
+    ))
+    def test_b013_latch_clears_under_hil_stub(self):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# B-014 — BMS predicates trip on cell UV/OV/OT
+# ---------------------------------------------------------------------------
+
+class TestB014BMSPredicates:
+
+    @pytest.mark.skip(reason=(
+        "B-014 is deferred until an LTC6811 isoSPI chain is present on "
+        "the bench (per #123 'Deferred' section). The HIL_STUB seeder "
+        "writes cell_mV=3750 / cell_tempC=25 deep inside the predicate "
+        "windows, so no fault is reachable from the bench under this "
+        "build flag. Repeat on a real-chain rig with a flight build."
+    ))
+    def test_b014_bms_predicates_trip(self):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# B-015 — Current overlimit predicate trips
+# ---------------------------------------------------------------------------
+
+class TestB015CurrentOverlimit:
+
+    @pytest.mark.skip(reason=(
+        "B-015 needs an analog source driving PF11 (ADC1 ch2) past "
+        "kImaxMa worth of voltage (≈ 4.6 V offset from kCurrentZeroMv "
+        "for 200 A, well over Vref). The bench's DAC80504 outputs are "
+        "not currently routed to SLOT1_AN0 (= GPIO7 = PF11). When the "
+        "bench respin wires DAC2_OUT0 → SLOT1_AN0, this test becomes "
+        "directly runnable."
+    ))
+    def test_b015_current_overlimit_trips_error(self):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# B-016 — Current sensor stale trips
+# ---------------------------------------------------------------------------
+
+class TestB016CurrentStale:
+
+    @pytest.mark.skip(reason=(
+        "B-016 requires halting CurrentSensorTask via GDB so its "
+        "last_update_tick goes stale. No SWD on the rig."
+    ))
+    def test_b016_current_stale_trips_error(self):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# B-017 — VCU heartbeat stale trips
+# ---------------------------------------------------------------------------
+
+class TestB017VCUHeartbeatStale:
+    """Pause the bench's 0x100 emission, wait kVcuStaleMs + slack, and
+    confirm the FSM latches Error. The chip must be past boot grace
+    first — pre-grace the predicate is gated."""
+
+    def test_b017_vcu_stale_trips_error(self, fresh_boot, acu_heartbeat,
+                                         observe_acu, wait_for_state,
+                                         ams_profile):
+        # Wait grace + a couple of telemetry cycles so we're firmly in
+        # post-grace evaluate-fault territory with VCU still fresh.
+        time.sleep(int(ams_profile["boot_grace_ms"]) / 1000.0 + 0.2)
+
+        # Sanity: chip is still in Start (heartbeat keeping VCU fresh,
+        # nothing else in the predicate is tripping on this rig).
+        frame = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
+        assert frame is not None
+        pre_state = M.decode_telem_status(frame.data)["state"]
+        assert pre_state == M.FsmState.START, (
+            f"Chip was in {M.FsmState.name(pre_state)} before B-017 began. "
+            "Some other predicate is already tripping — investigate before "
+            "treating this as a VCU-stale test."
         )
 
-
-# ---------------------------------------------------------------------------
-# HIL-016: cell overtemperature trips ERROR
-# ---------------------------------------------------------------------------
-
-class TestCellOvertemperature:
-    def test_ot_trips_error(self, bms_emulator, observe_acu, wait_for_state,
-                            ams_profile):
-        bms_emulator.set_all_temps(int(ams_profile["bms_default_temp_C"]))
-        time.sleep(0.5)
-
-        bms_emulator.set_temp(module=3, sensor=15, C=M.CELL_OT_C + 5)
-
-        wait_for_state(M.FsmState.ERROR,
-                       timeout_ms=int(ams_profile["error_latch_window_ms"]) + 200)
-
-        # Cross-check via the 0x4A2 telemetry that max_tempC reflects the injected sensor
-        temps_frame = observe_acu.last(M.ID_TELEM_TEMPS, extended=False)
-        if temps_frame is not None:
-            t = M.decode_telem_temps(temps_frame.data)
-            assert t["max_tempC"] >= M.CELL_OT_C, (
-                f"FSM entered Error but max_tempC in 0x4A2 was {t['max_tempC']} "
-                f"(expected ≥ {M.CELL_OT_C})."
-            )
-
-
-# ---------------------------------------------------------------------------
-# HIL-017: BMS module staleness trips ERROR
-# ---------------------------------------------------------------------------
-
-class TestBmsStaleness:
-    def test_stop_module_3_trips_error(self, bms_emulator, wait_for_state):
-        # Healthy baseline
-        time.sleep(0.5)
-        # Simulate dead slave — emulator stops responding for module 3
-        bms_emulator.stop_module(3)
-
-        # Firmware staleness threshold is 1500 ms; allow 500 ms slack
-        wait_for_state(M.FsmState.ERROR, timeout_ms=2000)
+        # Stop emitting 0x100 and wait for the staleness predicate to
+        # fire. Budget: kVcuStaleMs + the kSafetyPeriodMs check cycle
+        # + one telemetry cycle for the new state to be visible.
+        acu_heartbeat["pause"]()
+        try:
+            window_ms = (int(ams_profile["vcu_stale_ms"]) +
+                         int(ams_profile["tx_telemetry_period_ms"]) + 200)
+            wait_for_state(M.FsmState.ERROR, timeout_ms=window_ms)
+        finally:
+            # Always resume — leaving the heartbeat off would cascade
+            # into subsequent tests in the same session.
+            acu_heartbeat["resume"]()

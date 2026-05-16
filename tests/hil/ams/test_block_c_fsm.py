@@ -1,212 +1,251 @@
 """
 Block C — FSM transitions.
 
-FSM state is read from byte 0 of the `0x4A0` AMS-status telemetry frame on
-FDCAN1 (per `Core/Inc/app/telemetry_encoders.hpp`):
+Implements C-020..C-028 from `isc-fs/IFS08-CE-AMS#123`. All tests drive
+the FSM by injecting frames on FDCAN1 (`can0`) and observe the
+resulting state byte in the `0x4A0` telemetry stream.
 
-    0 = Start    3 = Run
-    1 = Precharge 4 = Charge
-    2 = Transition 5 = Error
-
-ACU stimulus drives the transitions:
-  - `0x600` standard, byte 0 = 1 → start-button press   (Start → Precharge)
-  - `0x18FF50E7` extended         → charger detected     (Start → Charge)
-  - `0x100` extended, LE V       → DC bus voltage       (Precharge → Transition,
-                                                          Transition → Run / Error)
-
-Implemented:
-  HIL-020  Start → Precharge on start button
-  HIL-021  Start → Charge on charger detect
-  HIL-022  Precharge → Transition on DC-bus target
-  HIL-023  Precharge timeout → Error
-  HIL-024  Transition → Run after hold
-  HIL-025  Transition voltage drop → Error
-  HIL-026  Run is terminal (charger toggle ignored)
-  HIL-027  Charge is terminal (charger toggle ignored)
-  HIL-028  Error is sticky within a boot
+| Test  | What it checks                                          | Status      |
+|-------|---------------------------------------------------------|-------------|
+| C-020 | Start → Precharge on start button                       | implemented |
+| C-021 | Start → Charge on charger detect                        | implemented |
+| C-022 | Precharge → Transition on DC bus target                 | implemented |
+| C-023 | Transition → Run after hold window                      | implemented |
+| C-024 | Precharge timeout → Error                               | implemented |
+| C-025 | Run is terminal (charger toggle ignored)                | implemented |
+| C-026 | Charge is terminal (charger drop ignored)               | implemented |
+| C-027 | Error sticky within a boot                              | implemented |
+| C-028 | Error survives reset (flight semantics)                 | deferred    |
 """
 
 from __future__ import annotations
 
-import threading
 import time
-
 import pytest
 
 from tools.firmware_test.ams import can_map as M
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Helpers — drive the chip into a known state from fresh_boot
 # ---------------------------------------------------------------------------
 
-@pytest.fixture(autouse=True)
-def _require_start(wait_for_state, ams_profile):
-    """Every Block-C test starts from a known Start state. If the firmware
-    came up in any other state, we skip — the bench should be cleanly reset
-    between tests (run order matters)."""
-    try:
-        wait_for_state(M.FsmState.START,
-                       timeout_ms=2 * int(ams_profile["tx_telemetry_period_ms"]))
-    except AssertionError as e:
-        pytest.skip(f"Test prereq: FSM must start in Start. {e}")
+def _drive_to_precharge(acu_stim, wait_for_state, ams_profile):
+    """From Start, press the start button. Returns when state == Precharge."""
+    acu_stim.send_start_button(pressed=True)
+    return wait_for_state(M.FsmState.PRECHARGE,
+                          timeout_ms=int(ams_profile["state_transition_window_ms"]))
 
 
-@pytest.fixture
-def dc_bus_loop(acu):
-    """Background thread that emits `0x100` at 50 Hz with a caller-controlled
-    voltage. Returns (set_v, stop). The thread terminates on `stop.set()`."""
-    state = {"v": 0}
-    stop = threading.Event()
+def _drive_to_run(acu_stim, acu_heartbeat, wait_for_state, ams_profile):
+    """From Start, button → Precharge → ramp DC bus → Transition → hold → Run."""
+    _drive_to_precharge(acu_stim, wait_for_state, ams_profile)
 
-    def _run():
-        while not stop.is_set():
-            acu.send_dc_bus_v(state["v"])
+    # Pack voltage under stub = 356_250 mV → 356.25 V. 95% target ≈ 339 V.
+    # Push the heartbeat target above that to satisfy precharge_target_reached.
+    pack_V = int(ams_profile["stub_expected_pack_mV"]) // 1000
+    target_V = int(pack_V * 0.96)  # comfortably above the 95% gate
+    acu_heartbeat["set_volts"](target_V)
+
+    # Wait for Transition (chip should react within the safety period).
+    wait_for_state(M.FsmState.TRANSITION,
+                   timeout_ms=int(ams_profile["state_transition_window_ms"]) + 100)
+
+    # Hold the DC bus for kTransitionHoldMs + slack, then expect Run.
+    hold_ms = int(ams_profile["transition_hold_ms"])
+    return wait_for_state(M.FsmState.RUN,
+                          timeout_ms=hold_ms + int(ams_profile["state_transition_window_ms"]) + 100)
+
+
+# ---------------------------------------------------------------------------
+# C-020 — Start → Precharge on start button
+# ---------------------------------------------------------------------------
+
+class TestC020StartToPrecharge:
+
+    def test_c020(self, fresh_boot, acu_stim, wait_for_state, ams_profile):
+        # Ensure we're in Start before the stim. fresh_boot guarantees
+        # the first frame was Start; verify nothing else fired before
+        # we send the button press.
+        assert fresh_boot["first_frame"]["state"] == M.FsmState.START
+
+        # Issue start button. Standard ID 0x600, payload 0x01.
+        acu_stim.send_start_button(pressed=True)
+        snap = wait_for_state(M.FsmState.PRECHARGE,
+                              timeout_ms=int(ams_profile["state_transition_window_ms"]) + 50)
+        assert snap["state"] == M.FsmState.PRECHARGE
+
+
+# ---------------------------------------------------------------------------
+# C-021 — Start → Charge on charger detect
+# ---------------------------------------------------------------------------
+
+class TestC021StartToCharge:
+
+    def test_c021(self, fresh_boot, acu_stim, wait_for_state, ams_profile):
+        assert fresh_boot["first_frame"]["state"] == M.FsmState.START
+
+        # Extended ID 0x18FF50E7, any payload — VehicleService::update_from_frame
+        # passes the frame through to CurrentService::set_charger_detected(true).
+        acu_stim.send_charger_detect()
+        wait_for_state(M.FsmState.CHARGE,
+                       timeout_ms=int(ams_profile["state_transition_window_ms"]) + 50)
+
+
+# ---------------------------------------------------------------------------
+# C-022 — Precharge → Transition on DC bus target
+# ---------------------------------------------------------------------------
+
+class TestC022PrechargeToTransition:
+
+    def test_c022(self, fresh_boot, acu_stim, acu_heartbeat,
+                  wait_for_state, ams_profile):
+        # Get into Precharge first.
+        _drive_to_precharge(acu_stim, wait_for_state, ams_profile)
+
+        # Bump heartbeat DC bus voltage above the 95% target.
+        pack_V = int(ams_profile["stub_expected_pack_mV"]) // 1000
+        target_V = int(pack_V * 0.96)
+        acu_heartbeat["set_volts"](target_V)
+
+        wait_for_state(M.FsmState.TRANSITION,
+                       timeout_ms=int(ams_profile["state_transition_window_ms"]) + 100)
+
+
+# ---------------------------------------------------------------------------
+# C-023 — Transition → Run after hold window
+# ---------------------------------------------------------------------------
+
+class TestC023TransitionToRun:
+
+    def test_c023(self, fresh_boot, acu_stim, acu_heartbeat,
+                  wait_for_state, ams_profile):
+        run = _drive_to_run(acu_stim, acu_heartbeat, wait_for_state, ams_profile)
+        assert run["state"] == M.FsmState.RUN
+
+
+# ---------------------------------------------------------------------------
+# C-024 — Precharge timeout → Error
+# ---------------------------------------------------------------------------
+
+class TestC024PrechargeTimeout:
+
+    def test_c024(self, fresh_boot, acu_stim, acu_heartbeat,
+                  wait_for_state, ams_profile):
+        # Get into Precharge but keep DC bus voltage at the quiescent
+        # value (well below the 95% target). Wait kPrechargeMaxMs + slack.
+        _drive_to_precharge(acu_stim, wait_for_state, ams_profile)
+        # heartbeat stays at the default quiescent voltage (0 V) — never reaches target.
+
+        window_ms = (int(ams_profile["precharge_max_ms"]) +
+                     int(ams_profile["state_transition_window_ms"]) + 200)
+        wait_for_state(M.FsmState.ERROR, timeout_ms=window_ms)
+
+
+# ---------------------------------------------------------------------------
+# C-025 — Run is terminal (charger toggle ignored)
+# ---------------------------------------------------------------------------
+
+class TestC025RunTerminal:
+
+    def test_c025(self, fresh_boot, acu_stim, acu_heartbeat,
+                  wait_for_state, observe_acu, ams_profile):
+        _drive_to_run(acu_stim, acu_heartbeat, wait_for_state, ams_profile)
+
+        # Send a charger-detect frame while in Run. State must stay Run.
+        acu_stim.send_charger_detect()
+
+        # Watch a full state-transition window; state must not change.
+        deadline = time.monotonic() + (int(ams_profile["state_transition_window_ms"]) + 100) / 1000.0
+        while time.monotonic() < deadline:
+            f = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
+            if f is not None:
+                state = M.decode_telem_status(f.data)["state"]
+                assert state == M.FsmState.RUN, (
+                    f"Run was disturbed by charger-detect: now in "
+                    f"{M.FsmState.name(state)}. Run is supposed to be terminal."
+                )
             time.sleep(0.02)
 
-    t = threading.Thread(target=_run, daemon=True, name="dc-bus-loop")
-    t.start()
 
-    def set_v(v: int):
-        state["v"] = int(v)
+# ---------------------------------------------------------------------------
+# C-026 — Charge is terminal (charger drop ignored)
+# ---------------------------------------------------------------------------
 
-    yield set_v
-    stop.set()
-    t.join(timeout=1.0)
+class TestC026ChargeTerminal:
+
+    def test_c026(self, fresh_boot, acu_stim, wait_for_state, observe_acu,
+                  ams_profile):
+        assert fresh_boot["first_frame"]["state"] == M.FsmState.START
+        acu_stim.send_charger_detect()
+        wait_for_state(M.FsmState.CHARGE,
+                       timeout_ms=int(ams_profile["state_transition_window_ms"]) + 50)
+
+        # There's no "charger absent" frame — CurrentService.set_charger_detected
+        # is set sticky from the 0x18FF50E7 frame. Nothing in the bench can
+        # un-set it short of a power-cycle, which is what Charge being
+        # terminal means: even if we stop sending charger frames, we
+        # stay in Charge.
+        deadline = time.monotonic() + (int(ams_profile["state_transition_window_ms"]) + 500) / 1000.0
+        while time.monotonic() < deadline:
+            f = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
+            if f is not None:
+                state = M.decode_telem_status(f.data)["state"]
+                assert state == M.FsmState.CHARGE, (
+                    f"Charge was disturbed: now in {M.FsmState.name(state)}. "
+                    "Charge is supposed to be terminal."
+                )
+            time.sleep(0.02)
 
 
 # ---------------------------------------------------------------------------
-# HIL-020: Start → Precharge on start button
+# C-027 — Error sticky within a boot
 # ---------------------------------------------------------------------------
 
-class TestStartToPrecharge:
-    def test_start_button(self, acu, wait_for_state):
-        acu.send_start_button(pressed=True)
-        wait_for_state(M.FsmState.PRECHARGE)
+class TestC027ErrorSticky:
 
+    def test_c027(self, fresh_boot, acu_heartbeat, wait_for_state,
+                  observe_acu, ams_profile):
+        # Trip Error via VCU staleness (same path as B-017). Other
+        # fault paths (current overlimit) need PF11 stim we don't have.
+        time.sleep(int(ams_profile["boot_grace_ms"]) / 1000.0 + 0.2)
 
-# ---------------------------------------------------------------------------
-# HIL-021: Start → Charge on charger detect
-# ---------------------------------------------------------------------------
+        acu_heartbeat["pause"]()
+        try:
+            window_ms = (int(ams_profile["vcu_stale_ms"]) +
+                         int(ams_profile["tx_telemetry_period_ms"]) + 200)
+            wait_for_state(M.FsmState.ERROR, timeout_ms=window_ms)
+        finally:
+            acu_heartbeat["resume"]()
 
-class TestStartToCharge:
-    def test_charger_detect(self, acu, wait_for_state):
-        acu.send_charger_detect()
-        wait_for_state(M.FsmState.CHARGE)
-
-
-# ---------------------------------------------------------------------------
-# HIL-022 + HIL-024: Precharge → Transition → Run
-# ---------------------------------------------------------------------------
-
-class TestPrechargeToRun:
-    def test_precharge_to_transition_to_run(self, acu, dc_bus_loop,
-                                            wait_for_state):
-        # Enter Precharge
-        acu.send_start_button(pressed=True)
-        wait_for_state(M.FsmState.PRECHARGE)
-
-        # Drive DC bus high — firmware target is 0.95 × pack ≈ 350 V on a
-        # healthy emulator (3700 mV × 19 cells × 5 modules ≈ 350 V)
-        dc_bus_loop(360)
-        wait_for_state(M.FsmState.TRANSITION)
-
-        # Hold for kTransitionHoldMs (100 ms) → Run
-        wait_for_state(M.FsmState.RUN, timeout_ms=M.TRANSITION_HOLD_MS + 200)
+        # Heartbeat is back on, predicate is no longer tripping. If
+        # Error is sticky, state stays at Error for at least 5 s.
+        # Per the test plan: 5 s budget.
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            f = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
+            assert f is not None
+            state = M.decode_telem_status(f.data)["state"]
+            assert state == M.FsmState.ERROR, (
+                f"Error was not sticky: chip transitioned back to "
+                f"{M.FsmState.name(state)} after the heartbeat resumed."
+            )
+            time.sleep(0.2)
 
 
 # ---------------------------------------------------------------------------
-# HIL-023: Precharge timeout → Error
+# C-028 — Error survives reset (flight semantics)
 # ---------------------------------------------------------------------------
 
-class TestPrechargeTimeoutError:
-    def test_precharge_timeout(self, acu, dc_bus_loop, wait_for_state):
-        acu.send_start_button(pressed=True)
-        wait_for_state(M.FsmState.PRECHARGE)
+class TestC028ErrorSurvivesReset:
 
-        # Hold DC bus well below target for kPrechargeMaxMs + slack
-        dc_bus_loop(50)
-        wait_for_state(M.FsmState.ERROR,
-                       timeout_ms=M.PRECHARGE_MAX_MS + 200)
-
-
-# ---------------------------------------------------------------------------
-# HIL-025: Transition voltage drop → Error
-# ---------------------------------------------------------------------------
-
-class TestTransitionVoltageDrop:
-    def test_v_drop_in_transition(self, acu, dc_bus_loop, wait_for_state):
-        acu.send_start_button(pressed=True)
-        wait_for_state(M.FsmState.PRECHARGE)
-
-        dc_bus_loop(360)
-        wait_for_state(M.FsmState.TRANSITION)
-
-        # Before the 100 ms hold elapses, drop the voltage
-        time.sleep(0.030)
-        dc_bus_loop(80)
-
-        wait_for_state(M.FsmState.ERROR)
-
-
-# ---------------------------------------------------------------------------
-# HIL-026: Run is terminal (charger toggle ignored)
-# ---------------------------------------------------------------------------
-
-class TestRunTerminal:
-    def test_run_ignores_charger(self, acu, dc_bus_loop, wait_for_state,
-                                 current_state):
-        acu.send_start_button(pressed=True)
-        wait_for_state(M.FsmState.PRECHARGE)
-        dc_bus_loop(360)
-        wait_for_state(M.FsmState.TRANSITION)
-        wait_for_state(M.FsmState.RUN, timeout_ms=M.TRANSITION_HOLD_MS + 200)
-
-        # Send charger detect — must NOT transition out of Run
-        acu.send_charger_detect()
-        time.sleep(0.300)
-        assert current_state() == M.FsmState.RUN, (
-            "Run is terminal: charger-detect frame must not cause a transition. "
-            f"Observed state = {M.FsmState.name(current_state())}."
-        )
-
-
-# ---------------------------------------------------------------------------
-# HIL-027: Charge is terminal (stopping charger frames must not exit Charge)
-# ---------------------------------------------------------------------------
-
-class TestChargeTerminal:
-    def test_charge_sticks(self, acu, wait_for_state, current_state):
-        acu.send_charger_detect()
-        wait_for_state(M.FsmState.CHARGE)
-
-        # Stop sending charger frames; the legacy/refactor design says the
-        # charger flag is sticky once seen. Wait a generous 2 s.
-        time.sleep(2.0)
-
-        assert current_state() == M.FsmState.CHARGE, (
-            f"Charge is terminal: state changed to {M.FsmState.name(current_state())} "
-            "after charger frames stopped (expected stay in Charge)."
-        )
-
-
-# ---------------------------------------------------------------------------
-# HIL-028: Error is sticky within a boot
-# ---------------------------------------------------------------------------
-
-class TestErrorSticky:
-    def test_error_sticky(self, bms_emulator, wait_for_state, current_state,
-                          ams_profile):
-        # Trip Error via cell UV
-        bms_emulator.set_cell(module=0, cell=0, mV=M.CELL_UV_MV - 100)
-        wait_for_state(M.FsmState.ERROR,
-                       timeout_ms=int(ams_profile["error_latch_window_ms"]) + 100)
-
-        # Restore healthy values
-        bms_emulator.set_all_cells(int(ams_profile["bms_default_cell_mV"]))
-        time.sleep(2.0)
-
-        assert current_state() == M.FsmState.ERROR, (
-            "Error should stick across the fault being cleared until a reset. "
-            f"Observed state = {M.FsmState.name(current_state())}."
-        )
+    @pytest.mark.skip(reason=(
+        "C-028 needs a flight build (no -DAMS_BMS_HIL_STUB) — the stub "
+        "build's App_InitTask explicitly clears ErrorLatch on every boot, "
+        "which is the inverse of what this test asserts. A flight build "
+        "on this rig would latch ERROR immediately on the missing LTC "
+        "chain, so C-028 is doubly blocked. Defer until the bench has "
+        "an LTC chain and we can run a flight build that boots clean."
+    ))
+    def test_c028_error_survives_reset(self):
+        pass

@@ -1,93 +1,127 @@
 """
 Block A — Boot & bring-up.
 
-Adapted subset of `IFS08-CE-AMS/docs/HIL_TESTS.md` HIL-001..009 for the
-IFS08_HIL bench with a bare MAIN_LITE carrier in MLC1. Tests that need
-SWD / GDB / GPIO-pin readback are deferred until the firmware is re-pinned
-to MAIN_LITE GPIOs (or a Nucleo-with-breakouts rig is added).
+Implements A-001..A-008 from `isc-fs/IFS08-CE-AMS#123` against the
+chain-less rig (firmware built with `-DAMS_BMS_HIL_STUB=1`).
 
-Currently implemented:
-
-  HIL-002  Bootloader is alive and identifies itself
-  HIL-003  AMS firmware flashes via the bootloader (requires a built .bin)
-
-To run:
-
-    pytest tests/hil/ams/test_block_a_boot.py -v
-    AMS_FIRMWARE_BIN=/path/to/AMS.bin pytest tests/hil/ams/test_block_a_boot.py -v
+| Test  | What it checks                                          | Status        |
+|-------|---------------------------------------------------------|---------------|
+| A-001 | Relays open on power-up (PB5/6/7 LOW within 50 ms)      | needs probe   |
+| A-002 | Bootloader discoverable on FDCAN2                       | implemented   |
+| A-003 | App flashes via BL + jump                               | implemented   |
+| A-004 | MainTask reaches Start within boot grace                | implemented   |
+| A-005 | Stub seeder populates BmsState                          | implemented   |
+| A-006 | 0x4A1 pack frame decodes correctly                      | implemented   |
+| A-007 | 0x4A2 temps + heartbeat decodes correctly               | implemented   |
+| A-008 | Telemetry cadence 500 ms ± 20 ms over 60 s              | implemented   |
 """
 
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 import pytest
 
+from tools.firmware_test.ams import can_map as M
 
-# HIL-002 ------------------------------------------------------------------
 
-class TestBlBringUp:
-    """HIL-002: bootloader responds to DISCOVER on FDCAN2."""
+# ---------------------------------------------------------------------------
+# A-001 — Relays open on power-up
+# ---------------------------------------------------------------------------
 
-    def test_bl_discover(self, flasher, ams_profile):
+class TestA001RelaysOpenOnPowerUp:
+    """Per the test plan, PB5 (AIR+), PB6 (AIR-), PB7 (Precharge) must
+    read LOW within 50 ms of power-on. The bench rig has no logic-
+    analyser probes on the SLOT1_DIG* lines, so we can't time the
+    transition directly. As a proxy, this test would observe via a
+    TCA9555 input wired to the slot's relay-control pins — which the
+    BACKPLANE_HIL doesn't currently route."""
+
+    @pytest.mark.skip(reason=(
+        "A-001 requires a logic analyser or TCA9555 input wired to "
+        "SLOT1_DIG0..2 to observe the 50 ms relay-open assertion. "
+        "Not present on this rig. The FSM=Start state read in A-004 "
+        "is the indirect bench-observable guarantee that relays are open."
+    ))
+    def test_a001_relays_open_within_50ms(self):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# A-002 — Bootloader discoverable on FDCAN2
+# ---------------------------------------------------------------------------
+
+class TestA002BootloaderDiscoverable:
+
+    def test_a002_bl_discover(self, mlc_powered, flasher, ams_profile):
+        # Power-cycle so the BL is in its discover-listen window.
+        from broker.server import BrokerClient
+        client = BrokerClient(os.environ.get("HIL_BROKER_SOCKET",
+                                             "/run/hil-broker/broker.sock"))
+        try:
+            relay_bit = mlc_powered["relay_bit"]
+            client.call("tca.write_pin", addr=0x20, port=0, pin=relay_bit, value=False)
+            time.sleep(2.0)
+            client.call("tca.write_pin", addr=0x20, port=0, pin=relay_bit, value=True)
+            time.sleep(float(ams_profile["mlc_boot_settle_s"]))
+        finally:
+            client.close()
+
         nodes = flasher.discover()
-        if not nodes:
-            # An app may already be running from a previous session's
-            # flash+jump. Drop it back to BL via the ACU-bus trigger
-            # (FDCAN1 per the AMS v1.2.0-ltc6811 refactor #73) and retry.
-            import time
-            flasher.send_boot_trigger(channel=ams_profile["bus_acu"])
-            time.sleep(0.5)
-            nodes = flasher.discover()
         assert nodes, (
-            "No bootloaders replied on the BL bus. Check: "
-            "(1) the carrier in MLC1 has the BL flashed, "
-            "(2) ams_profile.bus_bms_bl matches the kernel netdev wired to "
-            "the carrier's CAN2 transceiver, "
-            "(3) any running app responds to the boot-trigger frame on bus_acu."
+            "No bootloaders replied on FDCAN2 within "
+            f"{ams_profile['bl_discover_timeout_ms']} ms of power-on. "
+            "Either the BL isn't flashed, or the auto-jump window is "
+            "shorter than `mlc_boot_settle_s`."
         )
         assert len(nodes) == 1, (
-            f"Expected exactly one node on the BL bus, got {len(nodes)}. "
-            "Either multiple carriers are powered, or distinct node IDs need "
-            "provisioning (`can-flasher … config --set node-id 0xN`)."
+            f"Expected exactly one node on the BL bus, got {len(nodes)} "
+            "(distinct node IDs need provisioning if multiple carriers)."
         )
         n = nodes[0]
         assert n.node_id == flasher.node_id, (
-            f"BL responded with node 0x{n.node_id:02X}, expected "
-            f"0x{flasher.node_id:02X} (from ams_profile.bl_node_id)."
+            f"BL replied with node 0x{n.node_id:02X}, expected "
+            f"0x{flasher.node_id:02X} (per ams_profile.bl_node_id)."
         )
 
 
-# HIL-003 ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# A-003 — App flashes via BL + jump
+# ---------------------------------------------------------------------------
 
 @pytest.fixture(scope="session")
 def ams_firmware_bin(ams_profile) -> Path:
-    """Path to the AMS app .bin. Default location is `/tmp/AMS.bin`; override
-    with `AMS_FIRMWARE_BIN`. Skips if the file isn't present so test runs in
-    CI without a built firmware stay clean."""
+    """Path to the AMS app .bin built with `-DAMS_BMS_HIL_STUB=1`.
+    Default `/tmp/AMS.bin`; override with `AMS_FIRMWARE_BIN`. Skips
+    if missing so off-bench `pytest tests/` stays clean."""
     p = Path(os.environ.get("AMS_FIRMWARE_BIN", "/tmp/AMS.bin"))
     if not p.is_file():
         pytest.skip(f"AMS firmware not found at {p} (set AMS_FIRMWARE_BIN)")
     return p
 
 
-class TestAppFlash:
-    """HIL-003: AMS .bin installs in-system via the BL flash protocol."""
+class TestA003AppFlashesViaBL:
 
-    def test_app_flashes_via_bl(self, flasher, ams_firmware_bin, ams_profile):
-        # Sanity: BL is the one currently listening (no app already running)
-        nodes_before = flasher.discover()
-        if not nodes_before:
-            # App was already running — drop it back to BL via FDCAN1
-            # (per AMS v1.2.0-ltc6811 refactor #73). Retry discover after.
-            import time
-            flasher.send_boot_trigger(channel=ams_profile["bus_acu"])
-            time.sleep(0.5)
-            nodes_before = flasher.discover()
-        assert nodes_before, "BL not reachable even after boot-trigger; cannot flash"
+    def test_a003_flash_and_jump(self, mlc_powered, flasher, ams_firmware_bin,
+                                 ams_profile):
+        # Get into BL state (power-cycle into the discover window).
+        from broker.server import BrokerClient
+        client = BrokerClient(os.environ.get("HIL_BROKER_SOCKET",
+                                             "/run/hil-broker/broker.sock"))
+        try:
+            relay_bit = mlc_powered["relay_bit"]
+            client.call("tca.write_pin", addr=0x20, port=0, pin=relay_bit, value=False)
+            time.sleep(2.0)
+            client.call("tca.write_pin", addr=0x20, port=0, pin=relay_bit, value=True)
+            time.sleep(float(ams_profile["mlc_boot_settle_s"]))
+        finally:
+            client.close()
 
-        # Flash + verify + jump
+        nodes = flasher.discover()
+        assert nodes, "BL not reachable; cannot flash."
+
         r = flasher.flash(
             ams_firmware_bin,
             address=int(ams_profile["app_flash_address"]),
@@ -95,94 +129,176 @@ class TestAppFlash:
             jump=True,
             timeout_s=float(ams_profile["bl_flash_timeout_s"]),
         )
-        # `can-flasher` exits non-zero on protocol failure (the `_run`
-        # wrapper would have raised), so reaching this point already
-        # proves the flash succeeded. Belt-and-braces: check for the
-        # structured success markers, which live on stdout *or* stderr
-        # depending on the can-flasher version (1.3.x split progress to
-        # stderr while keeping the summary on stdout).
         combined = (r.stdout or "") + "\n" + (r.stderr or "")
         assert "Done" in combined, (
-            f"flash output missing 'Done' marker:\n--- stdout ---\n{r.stdout}\n"
-            f"--- stderr ---\n{r.stderr}"
+            f"flash output missing 'Done' marker:\n"
+            f"--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
         )
         assert "jumped to app" in combined, (
-            f"flash output missing jump confirmation:\n--- stdout ---\n{r.stdout}\n"
-            f"--- stderr ---\n{r.stderr}"
+            f"flash output missing jump confirmation:\n"
+            f"--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
         )
 
-        # We deliberately do NOT assert "BL is silent after jump" here:
-        # whether the app stays alive depends on bench stim (SDC, BMS,
-        # ACU heartbeat) that this test doesn't set up. HIL-003 is about
-        # the BL flash protocol, not app boot — that's HIL-004's job.
-        # We only check the flasher itself reports a successful jump.
 
+# ---------------------------------------------------------------------------
+# A-004 — MainTask reaches Start within boot grace
+# ---------------------------------------------------------------------------
 
-# HIL-004 ------------------------------------------------------------------
+class TestA004ReachesStart:
 
-class TestAppReachesStart:
-    """HIL-004: post-flash reset hands off cleanly to the app, the FSM comes
-    up in Start, and the 500 ms telemetry stream is alive.
-
-    The firmware drops UART telemetry in favour of three CAN frames on
-    FDCAN1 (`0x4A0` AMS status, `0x4A1` pack, `0x4A2` temps + diagnostics).
-    HIL-004 is therefore observable purely from the bench's CAN sniff."""
-
-    def test_app_boots_and_reaches_start(self, ams_firmware_bin, flasher,
-                                         bms_emulator, observe_acu,
-                                         acu_heartbeat,
-                                         ams_profile):
-        from tools.firmware_test.ams import can_map as M
-        import time
-
-        # Strategy: power-cycle MLC1, let the BL auto-jump to the
-        # already-installed app, then observe the FIRST `0x4A0` frame.
-        # We deliberately don't re-flash here — HIL-003 already proved
-        # the flash protocol works, and the AMS app's boot-trigger path
-        # (CAN frame `0x002`#`B007AD11` on FDCAN1) doesn't reliably
-        # drop a running app back to BL on this firmware build
-        # (tracked separately). Cleanest reset is a hardware power-cycle.
-        #
-        # `acu_heartbeat` + `bms_emulator` must already be live before
-        # the app boots so SafetyTask's predicates have fresh data once
-        # the boot grace expires.
-
-        from broker.server import BrokerClient
-        import os
-        client = BrokerClient(os.environ.get("HIL_BROKER_SOCKET",
-                                             "/run/hil-broker/broker.sock"))
-        slot_pin = int(ams_profile["mlc_slot"]) - 1
-        try:
-            # K1 open → drain → K1 close. Settle long enough for BL +
-            # auto-jump; the app will start emitting `0x4A0` within
-            # `tx_telemetry_period_ms` of jump.
-            client.call("tca.write_pin", addr=0x20, port=0, pin=slot_pin, value=False)
-            time.sleep(2.0)
-            observe_acu.clear()
-            client.call("tca.write_pin", addr=0x20, port=0, pin=slot_pin, value=True)
-        finally:
-            client.close()
-
-        # Wait for the first `0x4A0` frame post-app-boot. BL boot +
-        # auto-jump is < 3 s on this carrier; budget 5 s.
-        deadline = time.time() + 5.0
-        first = None
-        while time.time() < deadline:
-            first = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
-            if first is not None:
-                break
-            time.sleep(0.05)
-
-        assert first is not None, (
-            "No 0x4A0 telemetry within 5 s of power-cycle. The app didn't "
-            "reach the telemetry task — either the BL didn't auto-jump, "
-            "or FDCAN1 isn't transmitting. Check INA1 current and "
-            "`candump can0` to localise."
+    def test_a004_first_telemetry_is_start(self, fresh_boot, ams_profile):
+        first = fresh_boot["first_frame"]
+        elapsed_ms = (fresh_boot["t_first_frame"] - fresh_boot["t_power_on"]) * 1000
+        # First telemetry should land well before grace expires
+        # (kSafetyBootGraceMs = 2000 ms). Allow generous slack for BL
+        # auto-jump latency + first telemetry cycle.
+        assert elapsed_ms < 5000, (
+            f"First 0x4A0 took {elapsed_ms:.0f} ms from power-on; expected "
+            "< 5000 ms. BL auto-jump may be delayed, or app boot is slow."
+        )
+        # State byte must read Start (=0); AMS_OK is allowed to be either
+        # 0 (FSM has not transitioned out of Start yet) or 1 (already
+        # left Start during this frame — racy but acceptable).
+        assert first["state"] == M.FsmState.START, (
+            f"First state byte was {first['state_name']} "
+            f"(0x{first['state']:02X}); expected Start (0x00)."
         )
 
-        snap = M.decode_telem_status(first.data)
-        assert snap["state"] == M.FsmState.START, (
-            f"First state was {snap['state_name']} (expected Start). "
-            "Either the app booted into a fault, or BMS / SDC defaults trip ERROR "
-            "before the first telemetry frame."
+
+# ---------------------------------------------------------------------------
+# A-005 — Stub seeder populates BmsState
+# ---------------------------------------------------------------------------
+
+class TestA005StubSeederPopulates:
+
+    def test_a005_module_mask_and_cell_v(self, fresh_boot, observe_acu,
+                                          ams_profile):
+        # Wait one full telemetry cycle past first frame so the seeder
+        # has had at least one BmsPollTask iteration (kBmsPollVoltMs = 250 ms).
+        # First frame is already there from fresh_boot; sleep a beat
+        # and grab the newest.
+        time.sleep(int(ams_profile["tx_telemetry_period_ms"]) / 1000.0 + 0.2)
+
+        frame = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
+        assert frame is not None, "no 0x4A0 after settle"
+        decoded = M.decode_telem_status(frame.data)
+
+        assert decoded["module_online_mask"] == int(ams_profile["stub_module_online_mask"]), (
+            f"module_online_mask = 0x{decoded['module_online_mask']:02X}; "
+            f"expected 0x{int(ams_profile['stub_module_online_mask']):02X} "
+            "(all 5 modules online under HIL_STUB seed)."
+        )
+        expected_cell_mV = int(ams_profile["stub_cell_mV"])
+        assert decoded["min_cell_mV"] == expected_cell_mV, (
+            f"min_cell_mV = {decoded['min_cell_mV']}; expected "
+            f"{expected_cell_mV} (HIL_STUB seed)."
+        )
+        assert decoded["max_cell_mV"] == expected_cell_mV, (
+            f"max_cell_mV = {decoded['max_cell_mV']}; expected "
+            f"{expected_cell_mV}."
+        )
+
+
+# ---------------------------------------------------------------------------
+# A-006 — 0x4A1 pack frame decodes correctly
+# ---------------------------------------------------------------------------
+
+class TestA006PackFrame:
+
+    def test_a006_pack_voltage(self, fresh_boot, observe_acu, ams_profile):
+        time.sleep(int(ams_profile["tx_telemetry_period_ms"]) / 1000.0 + 0.2)
+
+        frame = observe_acu.last(M.ID_TELEM_PACK, extended=False)
+        assert frame is not None, "no 0x4A1 after settle"
+        decoded = M.decode_telem_pack(frame.data)
+
+        expected = int(ams_profile["stub_expected_pack_mV"])
+        assert decoded["pack_voltage_mV"] == expected, (
+            f"pack_voltage_mV = {decoded['pack_voltage_mV']} mV; expected "
+            f"{expected} mV "
+            f"({ams_profile['stub_module_count']} × "
+            f"{ams_profile['stub_cells_per_module']} × "
+            f"{ams_profile['stub_cell_mV']} mV)."
+        )
+        # Current sensor is open-circuit on this rig; just verify the
+        # field decodes into a reasonable int32 (not garbage / NaN).
+        assert isinstance(decoded["filtered_mA"], int)
+
+
+# ---------------------------------------------------------------------------
+# A-007 — 0x4A2 temps + heartbeat decodes correctly
+# ---------------------------------------------------------------------------
+
+class TestA007TempsAndHeartbeat:
+
+    def test_a007_temps(self, fresh_boot, observe_acu, ams_profile):
+        time.sleep(int(ams_profile["tx_telemetry_period_ms"]) / 1000.0 + 0.2)
+
+        frame = observe_acu.last(M.ID_TELEM_TEMPS, extended=False)
+        assert frame is not None, "no 0x4A2 after settle"
+        decoded = M.decode_telem_temps(frame.data)
+
+        expected_t = int(ams_profile["stub_temp_C"])
+        assert decoded["min_tempC"] == expected_t, (
+            f"min_tempC = {decoded['min_tempC']} °C; expected "
+            f"{expected_t} °C (stub seed)."
+        )
+        assert decoded["max_tempC"] == expected_t
+        assert decoded["avg_tempC"] == expected_t
+
+    def test_a007_heartbeat_increments(self, fresh_boot, observe_acu,
+                                       ams_profile, heartbeat_helper):
+        # Wait for one telemetry cycle, snapshot, wait for the next.
+        # Counter should advance by ≥ 1 modulo-256.
+        period_ms = int(ams_profile["tx_telemetry_period_ms"])
+        time.sleep(period_ms / 1000.0 + 0.1)
+        baseline = heartbeat_helper["read"]()
+        assert baseline is not None
+        advanced = heartbeat_helper["wait_advance"](baseline, n=2)
+        assert advanced is not None, (
+            f"heartbeat counter didn't advance from {baseline} within "
+            f"{2 * period_ms} ms. MainTask may be stalled."
+        )
+
+
+# ---------------------------------------------------------------------------
+# A-008 — Telemetry cadence over 60 s
+# ---------------------------------------------------------------------------
+
+class TestA008TelemetryCadence:
+
+    def test_a008_cadence_60s(self, fresh_boot, observe_acu, ams_profile):
+        period_ms = int(ams_profile["tx_telemetry_period_ms"])
+        jitter_ms = int(ams_profile["tx_telemetry_jitter_ms"])
+        # Capture 60 s. Use 0x4A2 timestamps since the heartbeat byte
+        # gives an unambiguous monotonic anchor and the cadence is
+        # locked to the same MainTask loop as the other two IDs.
+        observe_acu.clear()
+        deadline = time.monotonic() + 60.0
+        timestamps: list[float] = []
+        last_hb: int | None = None
+        while time.monotonic() < deadline:
+            f = observe_acu.last(M.ID_TELEM_TEMPS, extended=False)
+            if f is not None:
+                hb = M.decode_telem_temps(f.data)["heartbeat"]
+                if hb != last_hb:
+                    timestamps.append(f.timestamp)
+                    last_hb = hb
+            time.sleep(period_ms / 1000.0 / 4)
+
+        # Expect ~120 frames in 60 s at 500 ms; allow ±2 for boundary
+        # windowing.
+        expected = int(60_000 / period_ms)
+        assert abs(len(timestamps) - expected) <= 2, (
+            f"saw {len(timestamps)} 0x4A2 frames in 60 s, expected ~{expected}"
+        )
+
+        # Inter-frame periods within ±jitter_ms of the nominal period.
+        deltas_ms = [(b - a) * 1000.0 for a, b in zip(timestamps, timestamps[1:])]
+        outliers = [(i, d) for i, d in enumerate(deltas_ms)
+                    if abs(d - period_ms) > jitter_ms]
+        assert not outliers, (
+            f"{len(outliers)} of {len(deltas_ms)} inter-frame periods "
+            f"out of {period_ms} ± {jitter_ms} ms window. First few "
+            f"offenders: {outliers[:3]}"
         )

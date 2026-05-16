@@ -1,31 +1,44 @@
 """
-AMS HIL test fixtures.
+AMS HIL test fixtures (v1.3.0-flatten / chain-less rig).
 
-Layered on top of `tests/hil/conftest.py`, which provides `broker_available`
-and `psu_on`. Here we add:
-  - `ams_profile`     — loaded YAML thresholds & cadences
-  - `mlc_powered`     — energises the carrier slot, waits for BL boot
-  - `bms_emulator`    — runs BmsEmulator on FDCAN2 for the test duration
-  - `acu`             — AcuStim on FDCAN1
-  - `observe_acu`     — CanObserver on FDCAN1
-  - `observe_bms`     — CanObserver on FDCAN2
-  - `flasher`         — CanFlasher pre-pointed at FDCAN2
+Aligned with `isc-fs/IFS08-CE-AMS#123`. The firmware is built with
+`-DAMS_BMS_HIL_STUB=1` so `BmsPollTask::seed_for_hil_stub` populates a
+nominal-healthy `BmsState` internally — there's no bench-side BMS
+emulator on FDCAN2 anymore.
 
-Many of these need real hardware; they call `pytest.skip` on missing pieces
-so an off-bench `pytest tests/` stays clean.
+Fixtures provided here, layered on top of `tests/hil/conftest.py`'s
+`broker_available` + `psu_on`:
+
+  - `ams_profile`     YAML thresholds & cadences (session-scoped)
+  - `mlc_powered`     energises the carrier slot, waits for boot
+  - `flasher`         `CanFlasher` pre-pointed at FDCAN2 (BL bus)
+  - `observe_acu`     passive sniffer on FDCAN1 (telemetry)
+  - `acu_heartbeat`   periodic `0x100` so the VCU staleness predicate
+                      doesn't trip after grace
+  - `acu_stim`        one-shot ACU stim helper (start button, charger,
+                      DC bus voltage one-off)
+  - `fresh_boot`      power-cycle MLC, wait for app to come up; returns
+                      the first decoded `0x4A0` (state byte, etc.)
+  - `wait_for_state`  poll `0x4A0` until state == expected
+  - `wait_for_heartbeat_advance` poll `0x4A2[7]` until counter advances
+
+Tests requiring real hardware that the rig doesn't have (PF11 analog
+stim, GDB attach, scope) call `pytest.skip` with a clear reason — the
+suite stays green off-bench.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import shutil
+import threading
 import time
 from pathlib import Path
 
 import pytest
 import yaml
 
-from tools import hw_config as CFG
 from tools.hil_client import psu_status                       # noqa: F401
 
 log = logging.getLogger(__name__)
@@ -50,13 +63,11 @@ def ams_profile() -> dict:
 
 @pytest.fixture(scope="session")
 def mlc_powered(broker_available, psu_on, ams_profile):
-    """Energise the AMS carrier slot, wait for the chip to boot, hand back to
-    the test. De-energises on session teardown."""
+    """Energise the AMS carrier slot, wait for the BL to settle, hand back
+    to the test. De-energises on session teardown."""
     from broker.server import BrokerClient
-    import os
     client = BrokerClient(os.environ.get("HIL_BROKER_SOCKET",
                                          "/run/hil-broker/broker.sock"))
-
     slot = int(ams_profile["mlc_slot"])
     if slot not in (1, 2, 3, 4):
         pytest.fail(f"ams_profile.mlc_slot must be 1..4, got {slot}")
@@ -78,7 +89,8 @@ def mlc_powered(broker_available, psu_on, ams_profile):
         )
 
     log.info("MLC%d powered, %.1f mA", slot, current_mA)
-    yield {"slot": slot, "current_mA": current_mA}
+    yield {"slot": slot, "relay_bit": relay_bit, "ina_addr": ina_addr,
+           "current_mA": current_mA}
 
     # teardown — drop the relay
     client.call("tca.write_pin", addr=0x20, port=0, pin=relay_bit, value=False)
@@ -95,8 +107,22 @@ def _skip_if_no_can(channel: str) -> None:
 
 
 @pytest.fixture
-def acu(ams_profile, mlc_powered):
-    """ACU-bus stimulus (FDCAN1, kernel `can0`)."""
+def observe_acu(ams_profile, mlc_powered):
+    """Passive CAN sniffer on the ACU bus (FDCAN1, kernel `can0`)."""
+    from tools.firmware_test.can_observer import CanObserver
+    bus = ams_profile["bus_acu"]
+    _skip_if_no_can(bus)
+    with CanObserver(channel=bus) as obs:
+        yield obs
+
+
+@pytest.fixture
+def acu_stim(ams_profile, mlc_powered):
+    """One-shot ACU stimulus (start button, charger, DC bus one-off).
+
+    Coexists with `acu_heartbeat` — separate `AcuStim` instance, separate
+    SocketCAN socket — so a test can mix periodic heartbeat with sporadic
+    transition stimuli."""
     from tools.firmware_test.acu_stim import AcuStim
     bus = ams_profile["bus_acu"]
     _skip_if_no_can(bus)
@@ -105,123 +131,58 @@ def acu(ams_profile, mlc_powered):
 
 
 @pytest.fixture
-def bms_emulator(ams_profile, mlc_powered):
-    """BMS slave emulator on FDCAN2. Defaults to a healthy pack
-    (cells at 3700 mV, temps at 25 °C)."""
-    from tools.firmware_test.ams.bms_emulator import BmsEmulator
-    bus = ams_profile["bus_bms_bl"]
-    _skip_if_no_can(bus)
-    with BmsEmulator(channel=bus) as emu:
-        emu.set_all_cells(int(ams_profile["bms_default_cell_mV"]))
-        emu.set_all_temps(int(ams_profile["bms_default_temp_C"]))
-        yield emu
-
-
-@pytest.fixture
-def observe_acu(ams_profile, mlc_powered):
-    """Passive CAN sniffer on the ACU bus."""
-    from tools.firmware_test.can_observer import CanObserver
-    bus = ams_profile["bus_acu"]
-    _skip_if_no_can(bus)
-    with CanObserver(channel=bus) as obs:
-        yield obs
-
-
-@pytest.fixture
-def observe_bms(ams_profile, mlc_powered):
-    """Passive CAN sniffer on the BMS/BL bus."""
-    from tools.firmware_test.can_observer import CanObserver
-    bus = ams_profile["bus_bms_bl"]
-    _skip_if_no_can(bus)
-    with CanObserver(channel=bus) as obs:
-        yield obs
-
-
-# ---------------------------------------------------------------------------
-# SDC stim — bench-side `DIGITAL1` (= `SLOT1_DIG1` ↔ `IOEXP2_P10`) drive
-# ---------------------------------------------------------------------------
-
-@pytest.fixture
-def sdc_closed(ams_profile, mlc_powered):
-    """Drive `DIGITAL1` HIGH on the carrier so the AMS firmware reads SDC
-    as closed.
-
-    This is a bench wiring detail: the carrier's `SLOT1_DIG1` net (= MCU
-    PE9) is jumpered to TCA9555 U7 P10 on the backplane. The TCA9555 sits
-    on standby power so it's safe to drive without first powering the
-    carrier, but we still depend on `mlc_powered` so the test ordering
-    matches the rest of Block A.
-
-    Use this fixture for tests that should observe a healthy SDC. Tests
-    that need to verify SDC-open behaviour (HIL-019) should NOT request
-    this fixture; their conftest entry-point can drive the pin LOW
-    explicitly."""
-    from broker.server import BrokerClient
-    import os
-    client = BrokerClient(os.environ.get("HIL_BROKER_SOCKET",
-                                         "/run/hil-broker/broker.sock"))
-    addr = int(ams_profile["sdc_tca_addr"])
-    port = int(ams_profile["sdc_tca_port"])
-    pin  = int(ams_profile["sdc_tca_pin"])
-
-    # Configure the whole port as outputs (mask=0x00) so the pin actually
-    # drives; the other pins on the port retain whatever state the
-    # `tca.write_pin` calls have left them in.
-    client.call("tca.set_direction", addr=addr, port=port, mask=0x00)
-    client.call("tca.write_pin",     addr=addr, port=port, pin=pin, value=True)
-    log.info("SDC closed via TCA 0x%02X port %d pin %d", addr, port, pin)
-    yield {"addr": addr, "port": port, "pin": pin}
-
-    # Teardown — open SDC, leave the carrier in the safest state.
-    client.call("tca.write_pin", addr=addr, port=port, pin=pin, value=False)
-    client.close()
-
-
-# ---------------------------------------------------------------------------
-# ACU heartbeat — periodic 0x100 DC-bus frame so the VCU staleness
-# predicate doesn't immediately fault after the chip jumps to the app.
-# ---------------------------------------------------------------------------
-
-@pytest.fixture
 def acu_heartbeat(ams_profile, mlc_powered):
-    """Run a background thread that emits the VCU DC-bus frame at
-    `acu_heartbeat_period_ms` cadence (default 50 ms = 20 Hz, well under
-    the firmware's `kVcuStaleMs` = 200 ms).
+    """Background thread that emits `0x100` DC-bus frames at 20 Hz so the
+    VCU staleness predicate doesn't trip after boot grace.
 
-    The thread stops cleanly on teardown. Coexists with the `acu` fixture
-    (separate `AcuStim` instance, separate SocketCAN socket) so a single
-    test can do one-shot ACU stimulation on top of a steady heartbeat."""
-    import threading
+    Exposes:
+      - `set_volts(v)` — change the value on the fly (C-022 ramp-to-target)
+      - `pause()`      — stop emission (B-017 / C-* fault injection)
+      - `resume()`     — restart emission after a pause
+      - `volts`        — current value
+      - `paused`       — current state
+    """
     from tools.firmware_test.acu_stim import AcuStim
 
     bus = ams_profile["bus_acu"]
     _skip_if_no_can(bus)
 
     period_s = float(ams_profile["acu_heartbeat_period_ms"]) / 1000.0
-    volts    = int(ams_profile["acu_heartbeat_dc_bus_v"])
+    state = {
+        "volts":     int(ams_profile["acu_heartbeat_dc_bus_v"]),
+        "paused":    False,
+        "channel":   bus,
+        "period_ms": int(period_s * 1000),
+    }
 
     stim = AcuStim(channel=bus)
     stim.start()
     stop_evt = threading.Event()
 
     def _loop():
-        # Emit one frame, sleep, repeat. `emit_dc_bus_v_periodic` would do
-        # the same but its arg shape (callable + period + event) is
-        # awkward when we want a constant value; inline is clearer.
         while not stop_evt.is_set():
-            try:
-                stim.send_dc_bus_v(volts)
-            except Exception as e:
-                log.warning("acu_heartbeat send failed: %s", e)
-                break
+            if not state["paused"]:
+                try:
+                    stim.send_dc_bus_v(state["volts"])
+                except Exception as e:
+                    log.warning("acu_heartbeat send failed: %s", e)
+                    break
             stop_evt.wait(period_s)
 
     t = threading.Thread(target=_loop, name="acu-heartbeat", daemon=True)
     t.start()
-    log.info("ACU heartbeat running on %s @ %d ms (%d V)",
-             bus, int(period_s * 1000), volts)
+    log.info("ACU heartbeat running on %s @ %d ms (start volts=%d)",
+             bus, int(period_s * 1000), state["volts"])
 
-    yield {"channel": bus, "period_ms": int(period_s * 1000), "volts": volts}
+    def set_volts(v: int) -> None: state["volts"] = int(v)
+    def pause() -> None:           state["paused"] = True
+    def resume() -> None:          state["paused"] = False
+
+    state["set_volts"] = set_volts
+    state["pause"]     = pause
+    state["resume"]    = resume
+
+    yield state
 
     stop_evt.set()
     t.join(timeout=1.0)
@@ -248,26 +209,80 @@ def flasher(ams_profile, mlc_powered):
 
 
 # ---------------------------------------------------------------------------
-# FSM state helper — used by every Block C test
+# Power-cycle + first-telemetry helper (used by every block)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def fresh_boot(ams_profile, mlc_powered, observe_acu, acu_heartbeat):
+    """Power-cycle the MLC, let the BL auto-jump to the app, return once
+    the first `0x4A0` telemetry frame has arrived.
+
+    Returns a dict:
+      - `first_frame`: the decoded first 0x4A0 (state, ams_ok, mask, …)
+      - `t_power_on`: monotonic time when K_n closed
+      - `t_first_frame`: monotonic time of the first 0x4A0
+
+    `acu_heartbeat` is started before power-on so the VCU staleness
+    predicate sees fresh data within the boot-grace window.
+    """
+    from broker.server import BrokerClient
+    from tools.firmware_test.ams import can_map as M
+
+    client = BrokerClient(os.environ.get("HIL_BROKER_SOCKET",
+                                         "/run/hil-broker/broker.sock"))
+    relay_bit = mlc_powered["relay_bit"]
+    try:
+        client.call("tca.write_pin", addr=0x20, port=0, pin=relay_bit, value=False)
+        time.sleep(2.0)
+        observe_acu.clear()
+        client.call("tca.write_pin", addr=0x20, port=0, pin=relay_bit, value=True)
+        t_power_on = time.monotonic()
+    finally:
+        client.close()
+
+    # BL boot + auto-jump + first telemetry should land within ~3 s.
+    # Allow 5 s slack for the first ever boot on a fresh-flashed chip.
+    deadline = time.monotonic() + 5.0
+    first = None
+    while time.monotonic() < deadline:
+        f = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
+        if f is not None:
+            first = f
+            break
+        time.sleep(0.05)
+
+    if first is None:
+        pytest.fail(
+            "No 0x4A0 telemetry within 5 s of power-on. App didn't reach "
+            "MainTask, or FDCAN1 isn't transmitting. INA / candump can0 "
+            "would localise."
+        )
+
+    decoded = M.decode_telem_status(first.data)
+    return {
+        "first_frame":    decoded,
+        "t_power_on":     t_power_on,
+        "t_first_frame":  time.monotonic(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Polling helpers
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
 def wait_for_state(observe_acu, ams_profile):
-    """Returns a function `wait(expected_state, timeout_ms)` that polls the
-    latest `0x4A0` telemetry frame until byte 0 == expected_state, or the
-    timeout expires.
-
-    Returns the decoded payload on success; raises AssertionError on timeout
-    with a diagnostic that includes the last state actually seen."""
-    import time
+    """Return a callable `wait(expected_state, timeout_ms=None)` that
+    polls the latest `0x4A0` until byte 0 == expected_state. Returns the
+    decoded payload on success; raises AssertionError on timeout."""
     from tools.firmware_test.ams import can_map as M
 
     def _wait(expected_state: int, timeout_ms: int | None = None,
-              poll_interval_s: float = 0.05) -> dict:
+              poll_interval_s: float = 0.02) -> dict:
         timeout_ms = timeout_ms or int(ams_profile["state_transition_window_ms"])
-        deadline = time.time() + timeout_ms / 1000.0
+        deadline = time.monotonic() + timeout_ms / 1000.0
         last_decoded = None
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             frame = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
             if frame is not None:
                 last_decoded = M.decode_telem_status(frame.data)
@@ -284,15 +299,28 @@ def wait_for_state(observe_acu, ams_profile):
 
 
 @pytest.fixture
-def current_state(observe_acu):
-    """Returns a function `current_state()` that reads the latest FSM state
-    from the most recent `0x4A0` frame, or None if none seen yet."""
+def heartbeat_helper(observe_acu, ams_profile):
+    """Returns helpers to read and wait on the `0x4A2[7]` heartbeat
+    counter. `read()` returns the latest counter or `None`. `wait_advance(n)`
+    blocks until the counter has advanced by `n` modulo-256."""
     from tools.firmware_test.ams import can_map as M
 
     def _read() -> int | None:
-        frame = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
-        if frame is None:
+        f = observe_acu.last(M.ID_TELEM_TEMPS, extended=False)
+        if f is None:
             return None
-        return M.decode_telem_status(frame.data)["state"]
+        return M.decode_telem_temps(f.data)["heartbeat"]
 
-    return _read
+    def _wait_advance(baseline: int, n: int = 1,
+                      timeout_s: float | None = None) -> int | None:
+        period_ms = int(ams_profile["tx_telemetry_period_ms"])
+        timeout_s = timeout_s or (n * period_ms / 1000.0 + 1.0)
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            hb = _read()
+            if hb is not None and (hb - baseline) % 256 >= n:
+                return hb
+            time.sleep(period_ms / 1000.0 / 4)
+        return None
+
+    return {"read": _read, "wait_advance": _wait_advance}
