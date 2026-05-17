@@ -1,0 +1,64 @@
+# Tunable thresholds and cadences for the AMS HIL tests.
+# Adjust here so test code stays free of magic numbers.
+#
+# Aligned with `isc-fs/IFS08-CE-AMS#123` (v1.3.0-flatten bench session,
+# chain-less rig, -DAMS_BMS_HIL_STUB=1 build). Mirrors constants in the
+# firmware's `Core/Inc/app/ams_config.hpp`; if firmware moves, this file
+# moves with it.
+
+# -- Carrier slot -----------------------------------------------------
+mlc_slot:                 1          # which carrier slot the AMS is in
+mlc_boot_current_mA:      100        # min draw after K_n closes (bench: 118-128 mA)
+mlc_boot_settle_s:        0.5        # delay after relay close before discover
+                                     # short enough to catch BL before auto-jump
+
+# -- CAN buses --------------------------------------------------------
+bus_acu:                  can0       # FDCAN1 of the firmware (telemetry + ACU stim)
+bus_bms_bl:               can2       # FDCAN2 (BL only; the app no longer listens here)
+
+# -- Bootloader -------------------------------------------------------
+bl_node_id:               0x02       # kAmsNodeId in ams_config.hpp
+bl_discover_timeout_ms:   3000       # `--timeout-ms` on `can-flasher discover`
+bl_per_frame_timeout_ms:  30000      # `--timeout` (per ISO-TP transaction)
+bl_flash_timeout_s:       60         # overall subprocess timeout for `flash`
+app_flash_address:        0x08020000 # AMS app image start (sector 1)
+firmware_info_address:    0x08020400 # bl_fwinfo_t record (BL_APP_BASE + 0x400)
+
+# -- Telemetry cadence (firmware: kTelemetryPeriodMs in MainTask) ----
+tx_telemetry_period_ms:   500        # 0x4A0/4A1/4A2 cadence
+tx_telemetry_jitter_ms:   20         # tolerance ± per A-008
+
+# -- Stub-seeded BMS expectations (firmware: BmsService::seed_for_hil_stub)
+stub_cell_mV:             3750       # all cells nominal mid-pack
+stub_temp_C:              25         # all temps ambient
+stub_module_count:        5          # kBmsModuleCount
+stub_cells_per_module:    19         # kCellsPerModule
+stub_module_online_mask:  0x1F       # kAllModulesMask (all 5 present)
+stub_expected_pack_mV:    356250     # 5 * 19 * 3750 mV = pack_voltage_mV under stub
+
+# -- FSM / predicate windows (firmware: ams_config.hpp) --------------
+boot_grace_ms:            2000       # kSafetyBootGraceMs
+state_transition_window_ms: 100       # observable window for FSM transitions
+                                     # (3x kSafetyPeriodMs gives the 10 ms loop
+                                     #  a couple of iterations to settle)
+precharge_max_ms:         1500       # kPrechargeMaxMs (timeout → Error)
+transition_hold_ms:       100        # kTransitionHoldMs (DC bus held → Run)
+vcu_stale_ms:             200        # kVcuStaleMs
+i_stale_ms:               200        # kIStaleMs
+i_max_mA:                 200000     # kImaxMa (200 A)
+
+# -- ACU heartbeat (bench → AMS, simulates VCU 0x100) ----------------
+acu_heartbeat_period_ms:  50         # 20 Hz, well under kVcuStaleMs = 200
+acu_heartbeat_dc_bus_v:   0          # quiescent value (precharge tests override)
+
+# -- ACU stim frame IDs (mirror firmware kAcuRx*) --------------------
+acu_rx_dc_bus_id:         0x100      # extended, DLC 2, LE uint16 volts
+acu_rx_start_btn_id:      0x600      # standard, DLC 1
+acu_rx_charger_id:        0x18FF50E7 # extended, any payload
+
+# -- Block E soak budgets --------------------------------------------
+soak_idle_minutes:        30         # E-050 idle in Start
+soak_run_minutes:         30         # E-051 in Run
+power_cycle_count:        50         # E-052
+power_cycle_on_s:         10
+power_cycle_off_s:        5

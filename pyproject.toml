@@ -16,6 +16,7 @@ dependencies = [
     "smbus2>=0.4",
     "RPi.GPIO>=0.7",
     "python-can>=4.0",
+    "pyyaml>=6.0",
 ]
 
 [project.scripts]
