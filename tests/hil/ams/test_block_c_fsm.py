@@ -6,10 +6,15 @@ driven Start triggers (`0x600`, `0x18FF50E7`) were retired; the FSM now
 gates on two physical GPIO inputs and distinguishes car-vs-charger by
 VCU `0x100` heartbeat freshness captured at Start -> Precharge.
 
+TSMS lives on the side of the car (external operator master switch);
+DASH_CHG is the cockpit dashboard / charger button. They're driven by
+two independent pytest fixtures (`tsms`, `dash_chg`) -- no `cockpit`
+abstraction.
+
 | Test  | What it checks                                                   | Status      |
 |-------|------------------------------------------------------------------|-------------|
-| C-020 | Start stays put with only TSMS or only DASH_CHG                   | implemented |
-| C-021 | Start -> Precharge on TSMS && DASH_CHG                            | implemented |
+| C-020 | Start stays put with only TSMS or only DASH_CHG                  | implemented |
+| C-021 | Start -> Precharge on TSMS && DASH_CHG                           | implemented |
 | C-022 | Precharge -> Transition once DC bus hits 95% of pack             | implemented |
 | C-023 | Transition -> Run after hold in car mode (VCU heartbeat fresh)   | implemented |
 | C-024 | Precharge timeout -> Error                                       | implemented |
@@ -18,9 +23,10 @@ VCU `0x100` heartbeat freshness captured at Start -> Precharge.
 | C-027 | Error sticky within a boot                                       | implemented |
 | C-028 | Error survives reset (flight semantics)                          | deferred    |
 
-All tests skip cleanly when the cockpit fixture is unavailable
-(cockpit_* keys absent from `ams_profile.yaml` -- happens until the
-bench wires PF9/PF10 through the TCA9555).
+All TSMS/DASH_CHG-driven tests skip cleanly when either fixture is
+unavailable (`tsms_*` / `dash_chg_*` keys absent from
+`ams_profile.yaml` -- happens until the bench wires PF9/PF10 through
+the TCA9555).
 """
 
 from __future__ import annotations
@@ -35,24 +41,29 @@ from tools.firmware_test.ams import can_map as M
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _require_cockpit(cockpit):
-    if cockpit is None:
-        pytest.skip("cockpit fixture unavailable -- fill cockpit_* keys in "
-                    "ams_profile.yaml once PF9/PF10 are wired through "
-                    "the TCA9555.")
+def _require_inputs(tsms, dash_chg):
+    """Skip the test when either pin fixture is disabled."""
+    missing = []
+    if tsms     is None: missing.append("tsms_*")
+    if dash_chg is None: missing.append("dash_chg_*")
+    if missing:
+        pytest.skip(f"Pin fixture(s) unavailable: {' + '.join(missing)} "
+                    "keys absent from ams_profile.yaml. Fill in once "
+                    "PF9/PF10 are wired through the TCA9555.")
 
 
-def _drive_to_precharge(cockpit, wait_for_state, ams_profile):
-    """Cockpit-asserted Start -> Precharge.  Returns the Precharge snapshot."""
-    cockpit.assert_both()
+def _drive_to_precharge(tsms, dash_chg, wait_for_state, ams_profile):
+    """Assert both inputs -> Start -> Precharge.  Returns Precharge snapshot."""
+    tsms.assert_()
+    dash_chg.assert_()
     return wait_for_state(
         M.FsmState.PRECHARGE,
         timeout_ms=int(ams_profile["state_transition_window_ms"]) + 50)
 
 
-def _drive_to_run(cockpit, acu_heartbeat, wait_for_state, ams_profile):
-    """Cockpit + ramped DC bus -> Run (car mode)."""
-    _drive_to_precharge(cockpit, wait_for_state, ams_profile)
+def _drive_to_run(tsms, dash_chg, acu_heartbeat, wait_for_state, ams_profile):
+    """Both inputs + ramped DC bus -> Run (car mode)."""
+    _drive_to_precharge(tsms, dash_chg, wait_for_state, ams_profile)
 
     # Pack voltage under stub = 356_250 mV -> 356.25 V. 95% target ~ 339 V.
     pack_V   = int(ams_profile["stub_expected_pack_mV"]) // 1000
@@ -70,18 +81,18 @@ def _drive_to_run(cockpit, acu_heartbeat, wait_for_state, ams_profile):
 
 
 # ---------------------------------------------------------------------------
-# C-020 -- Start stays put with only one of the two cockpit inputs
+# C-020 -- Start stays put with only one of the two inputs
 # ---------------------------------------------------------------------------
 
-class TestC020CockpitGateRequiresBoth:
+class TestC020GateRequiresBoth:
 
-    def test_c020_tsms_only(self, fresh_boot, cockpit, wait_for_state,
+    def test_c020_tsms_only(self, fresh_boot, tsms, dash_chg, wait_for_state,
                             observe_acu, ams_profile):
-        _require_cockpit(cockpit)
+        _require_inputs(tsms, dash_chg)
         assert fresh_boot["first_frame"]["state"] == M.FsmState.START
 
-        cockpit.deassert_all()
-        cockpit.assert_tsms()
+        dash_chg.deassert()
+        tsms.assert_()
 
         # Watch a full transition window; state must NOT leave Start.
         window_ms = int(ams_profile["state_transition_window_ms"]) + 100
@@ -96,13 +107,13 @@ class TestC020CockpitGateRequiresBoth:
                     f"must be high to fire the gate.")
             time.sleep(0.02)
 
-    def test_c020_dash_chg_only(self, fresh_boot, cockpit, wait_for_state,
-                               observe_acu, ams_profile):
-        _require_cockpit(cockpit)
+    def test_c020_dash_chg_only(self, fresh_boot, tsms, dash_chg, wait_for_state,
+                                observe_acu, ams_profile):
+        _require_inputs(tsms, dash_chg)
         assert fresh_boot["first_frame"]["state"] == M.FsmState.START
 
-        cockpit.deassert_all()
-        cockpit.assert_dash_chg()
+        tsms.deassert()
+        dash_chg.assert_()
 
         window_ms = int(ams_profile["state_transition_window_ms"]) + 100
         deadline = time.monotonic() + window_ms / 1000.0
@@ -122,11 +133,12 @@ class TestC020CockpitGateRequiresBoth:
 
 class TestC021StartToPrecharge:
 
-    def test_c021(self, fresh_boot, cockpit, wait_for_state, ams_profile):
-        _require_cockpit(cockpit)
+    def test_c021(self, fresh_boot, tsms, dash_chg, wait_for_state, ams_profile):
+        _require_inputs(tsms, dash_chg)
         assert fresh_boot["first_frame"]["state"] == M.FsmState.START
 
-        cockpit.assert_both()
+        tsms.assert_()
+        dash_chg.assert_()
         snap = wait_for_state(
             M.FsmState.PRECHARGE,
             timeout_ms=int(ams_profile["state_transition_window_ms"]) + 50)
@@ -139,10 +151,10 @@ class TestC021StartToPrecharge:
 
 class TestC022PrechargeToTransition:
 
-    def test_c022(self, fresh_boot, cockpit, acu_heartbeat,
+    def test_c022(self, fresh_boot, tsms, dash_chg, acu_heartbeat,
                   wait_for_state, ams_profile):
-        _require_cockpit(cockpit)
-        _drive_to_precharge(cockpit, wait_for_state, ams_profile)
+        _require_inputs(tsms, dash_chg)
+        _drive_to_precharge(tsms, dash_chg, wait_for_state, ams_profile)
 
         pack_V   = int(ams_profile["stub_expected_pack_mV"]) // 1000
         target_V = int(pack_V * 0.96)
@@ -159,10 +171,11 @@ class TestC022PrechargeToTransition:
 
 class TestC023TransitionToRun:
 
-    def test_c023(self, fresh_boot, cockpit, acu_heartbeat,
+    def test_c023(self, fresh_boot, tsms, dash_chg, acu_heartbeat,
                   wait_for_state, ams_profile):
-        _require_cockpit(cockpit)
-        run = _drive_to_run(cockpit, acu_heartbeat, wait_for_state, ams_profile)
+        _require_inputs(tsms, dash_chg)
+        run = _drive_to_run(tsms, dash_chg, acu_heartbeat, wait_for_state,
+                            ams_profile)
         assert run["state"] == M.FsmState.RUN
 
 
@@ -172,10 +185,10 @@ class TestC023TransitionToRun:
 
 class TestC024PrechargeTimeout:
 
-    def test_c024(self, fresh_boot, cockpit, acu_heartbeat,
+    def test_c024(self, fresh_boot, tsms, dash_chg, acu_heartbeat,
                   wait_for_state, ams_profile):
-        _require_cockpit(cockpit)
-        _drive_to_precharge(cockpit, wait_for_state, ams_profile)
+        _require_inputs(tsms, dash_chg)
+        _drive_to_precharge(tsms, dash_chg, wait_for_state, ams_profile)
         # Heartbeat stays at default 0 V -- precharge never reaches target.
 
         window_ms = (int(ams_profile["precharge_max_ms"]) +
@@ -190,14 +203,15 @@ class TestC024PrechargeTimeout:
 # is a sticky fault requiring power-cycle. Run / Charge no longer have
 # a "clean shutdown back to Start" path.
 
-class TestC025RunToErrorOnCockpitDrop:
+class TestC025RunToErrorOnInputDrop:
 
-    def test_c025_tsms_drop(self, fresh_boot, cockpit, acu_heartbeat,
+    def test_c025_tsms_drop(self, fresh_boot, tsms, dash_chg, acu_heartbeat,
                             wait_for_state, ams_profile):
-        _require_cockpit(cockpit)
-        _drive_to_run(cockpit, acu_heartbeat, wait_for_state, ams_profile)
+        _require_inputs(tsms, dash_chg)
+        _drive_to_run(tsms, dash_chg, acu_heartbeat, wait_for_state,
+                      ams_profile)
 
-        cockpit.deassert_tsms()
+        tsms.deassert()
         wait_for_state(
             M.FsmState.ERROR,
             timeout_ms=int(ams_profile["state_transition_window_ms"]) + 50)
@@ -208,32 +222,29 @@ class TestC025RunToErrorOnCockpitDrop:
 # ---------------------------------------------------------------------------
 # Car-vs-charger is captured at Start -> Precharge from VCU 0x100
 # heartbeat freshness. Pause the heartbeat first, wait > kVcuFreshMs,
-# then assert cockpit -> mode locks to Charger. After the lock fires the
-# heartbeat can resume (or a oneshot bump) so precharge actually
-# completes; the locked mode does NOT re-evaluate.
+# then assert TSMS+DASH_CHG -> mode locks to Charger. After the lock
+# fires the heartbeat can resume (or a oneshot bump) so precharge
+# actually completes; the locked mode does NOT re-evaluate.
 
 class TestC026TransitionToCharge:
 
-    def test_c026(self, fresh_boot, cockpit, acu_heartbeat, acu_stim,
+    def test_c026(self, fresh_boot, tsms, dash_chg, acu_heartbeat, acu_stim,
                   wait_for_state, ams_profile):
-        _require_cockpit(cockpit)
+        _require_inputs(tsms, dash_chg)
 
         # Silence the VCU heartbeat for > kVcuFreshMs (1 s in firmware).
         acu_heartbeat["pause"]()
-        # Conservative wait: 1 s (kVcuFreshMs) + safety margin.
         time.sleep(1.2)
 
-        # Cockpit gate -> Start->Precharge with mode_locked = Charger.
-        cockpit.assert_both()
+        # Assert both inputs -> Start->Precharge with mode_locked = Charger.
+        tsms.assert_()
+        dash_chg.assert_()
         wait_for_state(
             M.FsmState.PRECHARGE,
             timeout_ms=int(ams_profile["state_transition_window_ms"]) + 50)
 
         # Mode already locked; safe to drive DC bus high so precharge
-        # completes. Use a one-shot send so we don't accidentally
-        # re-prime the freshness window before the lock decision (the
-        # decision has already been made, so it doesn't matter -- but
-        # being explicit keeps the intent clear).
+        # completes.
         pack_V   = int(ams_profile["stub_expected_pack_mV"]) // 1000
         target_V = int(pack_V * 0.96)
         acu_stim.send_dc_bus_v(target_V)
@@ -258,7 +269,7 @@ class TestC027ErrorSticky:
     def test_c027(self, fresh_boot, acu_heartbeat, wait_for_state,
                   observe_acu, ams_profile):
         # Trip Error via VCU staleness (same path as B-017). Other fault
-        # paths (current overlimit) need PF11 stim we don't have.
+        # paths (current overlimit) need PF7 stim we don't have.
         time.sleep(int(ams_profile["boot_grace_ms"]) / 1000.0 + 0.2)
 
         acu_heartbeat["pause"]()

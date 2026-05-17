@@ -8,8 +8,10 @@ same helpers with different frame IDs.
 
 The `send_start_button` / `send_charger_detect` helpers were retired in
 isc-fs/IFS08-CE-AMS#187 -- the FSM no longer consumes 0x600 or
-0x18FF50E7. Cockpit triggers (TSMS, DASH_CHG) are now GPIO inputs driven
-via `tools.firmware_test.cockpit.Cockpit`.
+0x18FF50E7. TSMS (side-of-car master switch) and DASH_CHG (cockpit
+dashboard / charger button) are now GPIO inputs driven via the
+`tsms` and `dash_chg` pytest fixtures (see
+`tools.firmware_test.tca_pin.TcaPin`).
 
 Example:
 
