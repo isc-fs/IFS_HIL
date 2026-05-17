@@ -15,6 +15,12 @@ Fixtures provided here, layered on top of `tests/hil/conftest.py`'s
   - `observe_acu`     passive sniffer on FDCAN1 (telemetry)
   - `acu_heartbeat`   periodic `0x100` so the VCU staleness predicate
                       doesn't trip after grace
+  - `current_heartbeat` optional DAC stim on PF11 so the current-stale
+                      predicate doesn't trip in non-stub flight builds
+                      (no-op when `current_heartbeat_dac_idx` /
+                      `current_heartbeat_dac_channel` are absent from
+                      ams_profile.yaml; relies on AMS PR #182's
+                      HIL_STUB gate in that case)
   - `acu_stim`        one-shot ACU stim helper (start button, charger,
                       DC bus voltage one-off)
   - `fresh_boot`      power-cycle MLC, wait for app to come up; returns
@@ -208,6 +214,105 @@ def acu_heartbeat(ams_profile, mlc_powered):
     stim.stop()
 
 
+@pytest.fixture
+def current_heartbeat(ams_profile, mlc_powered):
+    """Background thread that drives the MLC's PF11 (current-sensor Hall
+    input) via a backplane DAC channel so the firmware's current
+    freshness + Imax predicates see a plausible "0 A" reading.
+
+    Layered on top of AMS PR #182 (which gated the current-stale check
+    under -DAMS_BMS_HIL_STUB): when the firmware is built without the
+    stub, this fixture restores meaningful current-predicate coverage
+    on the bench. When the firmware IS stub-gated, it's still useful
+    because:
+      - `sensor_fault` and `|filtered_mA| > kImaxMa` checks remain
+        active even under HIL_STUB
+      - tests that want to inject a non-zero current (e.g. future
+        current-overlimit fault tests) can call `set_mA(value)`
+
+    Opt-in: requires `current_heartbeat_dac_idx` and
+    `current_heartbeat_dac_channel` in ams_profile.yaml. If either is
+    absent, the fixture is a no-op (background thread doesn't drive
+    the DAC) — tests still get a state dict so they can call
+    `set_mA / pause / resume` without conditionals. The DAC routing
+    from a specific channel to a specific MLC's PF11 is bench-
+    physical (J2 pinout dependent) and must be verified before
+    enabling; see CLAUDE.md for the DAC80504 wiring.
+
+    Exposes (same shape as `acu_heartbeat`):
+      - `set_mA(mA)`  — set the simulated current (default 0)
+      - `pause()`     — stop driving (DAC holds last value)
+      - `resume()`    — resume driving
+      - `mA`          — current value
+      - `paused`      — current state
+    """
+    period_s = float(ams_profile.get("current_heartbeat_period_ms", 50)) / 1000.0
+    dac_idx     = ams_profile.get("current_heartbeat_dac_idx")
+    dac_channel = ams_profile.get("current_heartbeat_dac_channel")
+    enabled     = dac_idx is not None and dac_channel is not None
+
+    state = {
+        "mA":        int(ams_profile.get("current_heartbeat_default_mA", 0)),
+        "paused":    False,
+        "enabled":   enabled,
+        "dac_idx":   dac_idx,
+        "dac_channel": dac_channel,
+        "period_ms": int(period_s * 1000),
+    }
+
+    def _ma_to_volts(mA: int) -> float:
+        # Hall-effect transducer model from ams_config.hpp:
+        #   2.5 V at 0 A, 5.7 mV/A sensitivity
+        # (kCurrentZeroMv=2500, kCurrentMvPerAmpe1=57 / 10)
+        return 2.5 + (mA / 1000.0) * (0.057 / 10.0)  # mA → A → V
+
+    if enabled:
+        from broker.server import BrokerClient
+        client = BrokerClient(
+            os.environ.get("HIL_BROKER_SOCKET", "/run/hil-broker/broker.sock"))
+        stop_evt = threading.Event()
+
+        def _loop():
+            while not stop_evt.is_set():
+                if not state["paused"]:
+                    try:
+                        client.call("dac.set_voltage",
+                                    idx=dac_idx,
+                                    channel=dac_channel,
+                                    volts=_ma_to_volts(state["mA"]))
+                    except Exception as e:
+                        log.warning("current_heartbeat DAC write failed: %s", e)
+                        break
+                stop_evt.wait(period_s)
+
+        t = threading.Thread(target=_loop, name="current-heartbeat", daemon=True)
+        t.start()
+        log.info("current_heartbeat driving DAC %d ch %d @ %d ms (start mA=%d)",
+                 dac_idx, dac_channel, int(period_s * 1000), state["mA"])
+    else:
+        log.info("current_heartbeat: DISABLED (no current_heartbeat_dac_idx + "
+                 "current_heartbeat_dac_channel in ams_profile.yaml). "
+                 "Relying on AMS PR #182's stub-gated current_stale check.")
+        stop_evt = None
+        t = None
+
+    def set_mA(mA: int) -> None: state["mA"] = int(mA)
+    def pause() -> None:         state["paused"] = True
+    def resume() -> None:        state["paused"] = False
+
+    state["set_mA"]  = set_mA
+    state["pause"]   = pause
+    state["resume"]  = resume
+
+    yield state
+
+    if stop_evt is not None:
+        stop_evt.set()
+        if t is not None:
+            t.join(timeout=1.0)
+    stim.stop()
+
+
 # ---------------------------------------------------------------------------
 # Flasher
 # ---------------------------------------------------------------------------
@@ -232,7 +337,8 @@ def flasher(ams_profile, mlc_powered):
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def fresh_boot(ams_profile, mlc_powered, observe_acu, acu_heartbeat):
+def fresh_boot(ams_profile, mlc_powered, observe_acu, acu_heartbeat,
+               current_heartbeat):
     """Power-cycle the MLC, let the BL auto-jump to the app, return once
     the first `0x4A0` telemetry frame has arrived.
 
