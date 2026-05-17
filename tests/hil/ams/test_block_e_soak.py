@@ -27,19 +27,12 @@ from tools.firmware_test.ams import can_map as M
 
 # ---------------------------------------------------------------------------
 # CLI knob — scale soak durations for CI runs
-# ---------------------------------------------------------------------------
-
-def pytest_addoption(parser):
-    parser.addoption(
-        "--soak-scale", action="store", default="1.0", type=float,
-        help="Scale factor for Block E soak durations (default 1.0 = full).",
-    )
-
-
-@pytest.fixture(scope="session")
-def soak_scale(request) -> float:
-    return float(request.config.getoption("--soak-scale"))
-
+# `--soak-scale` CLI option and the `soak_scale` fixture moved to
+# `tests/hil/ams/conftest.py` so pytest registers the option during
+# its conftest pass (before collection). Previously, the option was
+# only registered when this file itself was collected, which made
+# `pytest --soak-scale=0.1 path/to/something_else.py` reject the
+# option as unknown.
 
 # ---------------------------------------------------------------------------
 # Shared soak runner

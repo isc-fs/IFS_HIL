@@ -47,6 +47,25 @@ PROFILE_PATH = Path(__file__).parent / "ams_profile.yaml"
 
 
 # ---------------------------------------------------------------------------
+# CLI options
+# ---------------------------------------------------------------------------
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--soak-scale", action="store", default="1.0", type=float,
+        help=(
+            "Scale factor for Block E soak durations "
+            "(default 1.0 = full, 0.1 makes a 30-minute soak run for 3 min)."
+        ),
+    )
+
+
+@pytest.fixture(scope="session")
+def soak_scale(request) -> float:
+    return float(request.config.getoption("--soak-scale"))
+
+
+# ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
