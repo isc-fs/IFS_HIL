@@ -310,7 +310,6 @@ def current_heartbeat(ams_profile, mlc_powered):
         stop_evt.set()
         if t is not None:
             t.join(timeout=1.0)
-    stim.stop()
 
 
 # ---------------------------------------------------------------------------
