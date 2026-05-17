@@ -4,7 +4,7 @@ inputs that took over the role of the retired 0x600 / 0x18FF50E7 CAN
 frames (see isc-fs/IFS08-CE-AMS#187):
 
     TSMS    -- Tractive System Master Switch (PF9, active-high)
-    RST_PIL -- Reset Pilot                   (PF10, active-high)
+    DASH_CHG -- Reset Pilot                   (PF10, active-high)
 
 Both are wired to TCA9555 output pins on the BACKPLANE_HIL; this class
 just hides the `tca.write_pin` RPC behind a clearer interface.
@@ -17,7 +17,7 @@ Example:
 
     from tools.firmware_test.cockpit import Cockpit
     with Cockpit(client, tsms=(0x21, 0, 0),
-                          rst_pil=(0x21, 0, 1)) as c:
+                          dash_chg=(0x21, 0, 1)) as c:
         c.deassert_all()
         ...
         c.assert_both()
@@ -35,7 +35,7 @@ PinTriple = Tuple[int, int, int]
 
 
 class Cockpit:
-    """TCA9555-driven TSMS + RST_PIL helper.
+    """TCA9555-driven TSMS + DASH_CHG helper.
 
     Constructed with a connected `BrokerClient` and the two pin triples.
     On enter / `start()`, both pins are configured as outputs and driven
@@ -45,10 +45,10 @@ class Cockpit:
 
     def __init__(self, client, *,
                  tsms: PinTriple,
-                 rst_pil: PinTriple):
+                 dash_chg: PinTriple):
         self._client  = client
         self._tsms    = tsms
-        self._rst_pil = rst_pil
+        self._dash_chg = dash_chg
 
     # -- lifecycle ------------------------------------------------------
 
@@ -59,13 +59,13 @@ class Cockpit:
         # whatever the previous client left it as. The bench's MLC-power
         # fixture already calls `tca.set_direction` for 0x20 port 0; we
         # mirror that pattern here.
-        for (addr, port, pin) in (self._tsms, self._rst_pil):
+        for (addr, port, pin) in (self._tsms, self._dash_chg):
             self._client.call("tca.set_direction",
                               addr=addr, port=port,
                               mask=self._direction_mask_with_output(addr, port, pin))
         self.deassert_all()
-        log.info("cockpit: TSMS=tca0x%02x p%d.b%d, RST_PIL=tca0x%02x p%d.b%d",
-                 *self._tsms, *self._rst_pil)
+        log.info("cockpit: TSMS=tca0x%02x p%d.b%d, DASH_CHG=tca0x%02x p%d.b%d",
+                 *self._tsms, *self._dash_chg)
         return self
 
     def stop(self) -> None:
@@ -88,21 +88,21 @@ class Cockpit:
     def deassert_tsms(self) -> None:
         self._write(self._tsms, False)
 
-    def assert_rst_pil(self) -> None:
-        self._write(self._rst_pil, True)
+    def assert_dash_chg(self) -> None:
+        self._write(self._dash_chg, True)
 
-    def deassert_rst_pil(self) -> None:
-        self._write(self._rst_pil, False)
+    def deassert_dash_chg(self) -> None:
+        self._write(self._dash_chg, False)
 
     def assert_both(self) -> None:
         """Most common move: drive Start -> Precharge."""
         self.assert_tsms()
-        self.assert_rst_pil()
+        self.assert_dash_chg()
 
     def deassert_all(self) -> None:
         """Safe state -- mid-Run this latches Error (sticky)."""
         self.deassert_tsms()
-        self.deassert_rst_pil()
+        self.deassert_dash_chg()
 
     # -- internal -------------------------------------------------------
 

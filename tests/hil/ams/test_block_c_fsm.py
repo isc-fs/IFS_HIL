@@ -1,15 +1,15 @@
 """
 Block C — FSM transitions.
 
-Rewritten for `isc-fs/IFS08-CE-AMS#187` (TSMS + RST_PIL FSM). The CAN-
+Rewritten for `isc-fs/IFS08-CE-AMS#187` (TSMS + DASH_CHG FSM). The CAN-
 driven Start triggers (`0x600`, `0x18FF50E7`) were retired; the FSM now
 gates on two physical GPIO inputs and distinguishes car-vs-charger by
 VCU `0x100` heartbeat freshness captured at Start -> Precharge.
 
 | Test  | What it checks                                                   | Status      |
 |-------|------------------------------------------------------------------|-------------|
-| C-020 | Start stays put with only TSMS or only RST_PIL                   | implemented |
-| C-021 | Start -> Precharge on TSMS && RST_PIL                            | implemented |
+| C-020 | Start stays put with only TSMS or only DASH_CHG                   | implemented |
+| C-021 | Start -> Precharge on TSMS && DASH_CHG                            | implemented |
 | C-022 | Precharge -> Transition once DC bus hits 95% of pack             | implemented |
 | C-023 | Transition -> Run after hold in car mode (VCU heartbeat fresh)   | implemented |
 | C-024 | Precharge timeout -> Error                                       | implemented |
@@ -92,17 +92,17 @@ class TestC020CockpitGateRequiresBoth:
                 state = M.decode_telem_status(f.data)["state"]
                 assert state == M.FsmState.START, (
                     f"FSM left Start with only TSMS asserted (now in "
-                    f"{M.FsmState.name(state)}). Both TSMS and RST_PIL "
+                    f"{M.FsmState.name(state)}). Both TSMS and DASH_CHG "
                     f"must be high to fire the gate.")
             time.sleep(0.02)
 
-    def test_c020_rst_pil_only(self, fresh_boot, cockpit, wait_for_state,
+    def test_c020_dash_chg_only(self, fresh_boot, cockpit, wait_for_state,
                                observe_acu, ams_profile):
         _require_cockpit(cockpit)
         assert fresh_boot["first_frame"]["state"] == M.FsmState.START
 
         cockpit.deassert_all()
-        cockpit.assert_rst_pil()
+        cockpit.assert_dash_chg()
 
         window_ms = int(ams_profile["state_transition_window_ms"]) + 100
         deadline = time.monotonic() + window_ms / 1000.0
@@ -111,13 +111,13 @@ class TestC020CockpitGateRequiresBoth:
             if f is not None:
                 state = M.decode_telem_status(f.data)["state"]
                 assert state == M.FsmState.START, (
-                    f"FSM left Start with only RST_PIL asserted (now in "
+                    f"FSM left Start with only DASH_CHG asserted (now in "
                     f"{M.FsmState.name(state)}).")
             time.sleep(0.02)
 
 
 # ---------------------------------------------------------------------------
-# C-021 -- Start -> Precharge on TSMS && RST_PIL
+# C-021 -- Start -> Precharge on TSMS && DASH_CHG
 # ---------------------------------------------------------------------------
 
 class TestC021StartToPrecharge:

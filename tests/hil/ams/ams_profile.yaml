@@ -54,13 +54,13 @@ acu_heartbeat_dc_bus_v:   0          # quiescent value (precharge tests override
 # -- ACU stim frame IDs (mirror firmware kAcuRx*) --------------------
 acu_rx_dc_bus_id:         0x100      # extended, DLC 2, LE uint16 volts
 # Retired in isc-fs/IFS08-CE-AMS#187: 0x600 start_button and 0x18FF50E7
-# charger_detect are no longer FSM triggers. TSMS + RST_PIL GPIO inputs
+# charger_detect are no longer FSM triggers. TSMS + DASH_CHG GPIO inputs
 # replace them; see cockpit_* keys below.
 
-# -- Cockpit GPIO routing (TSMS, RST_PIL) ----------------------------
+# -- Cockpit GPIO routing (TSMS, DASH_CHG) ----------------------------
 # Both pins drive the AMS firmware's Start -> Precharge gate (see PR #187).
 # Wired from a TCA9555 output channel on the BACKPLANE_HIL into the AMS
-# carrier's PF9 (TSMS) and PF10 (RST_PIL). Both active-high.
+# carrier's PF9 (TSMS) and PF10 (DASH_CHG). Both active-high.
 #
 # TODO(bench): pick the actual TCA9555 + port + pin once PF9/PF10 are
 # physically wired. Defaults below assume the 0x21 (U6) expander, port 0,
@@ -72,9 +72,9 @@ acu_rx_dc_bus_id:         0x100      # extended, DLC 2, LE uint16 volts
 # cockpit_tsms_tca_addr:    0x21
 # cockpit_tsms_tca_port:    0
 # cockpit_tsms_tca_pin:     0
-# cockpit_rst_pil_tca_addr: 0x21
-# cockpit_rst_pil_tca_port: 0
-# cockpit_rst_pil_tca_pin:  1
+# cockpit_dash_chg_tca_addr: 0x21
+# cockpit_dash_chg_tca_port: 0
+# cockpit_dash_chg_tca_pin:  1
 
 # -- Block E soak budgets --------------------------------------------
 soak_idle_minutes:        30         # E-050 idle in Start

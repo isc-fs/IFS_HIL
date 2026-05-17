@@ -24,8 +24,8 @@ Fixtures provided here, layered on top of `tests/hil/conftest.py`'s
   - `acu_stim`        one-shot ACU stim helper (DC bus voltage one-off);
                       start_button / charger frames retired upstream in
                       isc-fs/IFS08-CE-AMS#187
-  - `cockpit`         TSMS / RST_PIL GPIO driver via TCA9555. Opt-in:
-                      requires `cockpit_tsms_*` and `cockpit_rst_pil_*`
+  - `cockpit`         TSMS / DASH_CHG GPIO driver via TCA9555. Opt-in:
+                      requires `cockpit_tsms_*` and `cockpit_dash_chg_*`
                       in ams_profile.yaml. Without them the fixture
                       yields None and Block C tests that need it skip.
   - `fresh_boot`      power-cycle MLC, wait for app to come up; returns
@@ -318,12 +318,12 @@ def current_heartbeat(ams_profile, mlc_powered):
 
 
 # ---------------------------------------------------------------------------
-# Cockpit GPIO stimulus -- TSMS + RST_PIL
+# Cockpit GPIO stimulus -- TSMS + DASH_CHG
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
 def cockpit(ams_profile, mlc_powered):
-    """TCA9555-driven TSMS + RST_PIL inputs replacing the retired
+    """TCA9555-driven TSMS + DASH_CHG inputs replacing the retired
     0x600 start_button / 0x18FF50E7 charger_detect CAN frames (see
     isc-fs/IFS08-CE-AMS#187).
 
@@ -332,9 +332,9 @@ def cockpit(ams_profile, mlc_powered):
         cockpit_tsms_tca_addr:    0x21
         cockpit_tsms_tca_port:    0
         cockpit_tsms_tca_pin:     0
-        cockpit_rst_pil_tca_addr: 0x21
-        cockpit_rst_pil_tca_port: 0
-        cockpit_rst_pil_tca_pin:  1
+        cockpit_dash_chg_tca_addr: 0x21
+        cockpit_dash_chg_tca_port: 0
+        cockpit_dash_chg_tca_pin:  1
 
     If any key is absent, yields `None`. Tests that need the cockpit
     should guard with `if cockpit is None: pytest.skip(...)`.
@@ -344,8 +344,8 @@ def cockpit(ams_profile, mlc_powered):
     """
     keys = ("cockpit_tsms_tca_addr",    "cockpit_tsms_tca_port",
             "cockpit_tsms_tca_pin",
-            "cockpit_rst_pil_tca_addr", "cockpit_rst_pil_tca_port",
-            "cockpit_rst_pil_tca_pin")
+            "cockpit_dash_chg_tca_addr", "cockpit_dash_chg_tca_port",
+            "cockpit_dash_chg_tca_pin")
     missing = [k for k in keys if k not in ams_profile]
     if missing:
         log.info("cockpit: DISABLED (missing ams_profile keys: %s). "
@@ -365,9 +365,9 @@ def cockpit(ams_profile, mlc_powered):
             tsms=(int(ams_profile["cockpit_tsms_tca_addr"]),
                   int(ams_profile["cockpit_tsms_tca_port"]),
                   int(ams_profile["cockpit_tsms_tca_pin"])),
-            rst_pil=(int(ams_profile["cockpit_rst_pil_tca_addr"]),
-                     int(ams_profile["cockpit_rst_pil_tca_port"]),
-                     int(ams_profile["cockpit_rst_pil_tca_pin"])),
+            dash_chg=(int(ams_profile["cockpit_dash_chg_tca_addr"]),
+                     int(ams_profile["cockpit_dash_chg_tca_port"]),
+                     int(ams_profile["cockpit_dash_chg_tca_pin"])),
         )
         with cock:
             yield cock

@@ -8,7 +8,7 @@ same helpers with different frame IDs.
 
 The `send_start_button` / `send_charger_detect` helpers were retired in
 isc-fs/IFS08-CE-AMS#187 -- the FSM no longer consumes 0x600 or
-0x18FF50E7. Cockpit triggers (TSMS, RST_PIL) are now GPIO inputs driven
+0x18FF50E7. Cockpit triggers (TSMS, DASH_CHG) are now GPIO inputs driven
 via `tools.firmware_test.cockpit.Cockpit`.
 
 Example:
