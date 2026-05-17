@@ -21,8 +21,13 @@ Fixtures provided here, layered on top of `tests/hil/conftest.py`'s
                       `current_heartbeat_dac_channel` are absent from
                       ams_profile.yaml; relies on AMS PR #182's
                       HIL_STUB gate in that case)
-  - `acu_stim`        one-shot ACU stim helper (start button, charger,
-                      DC bus voltage one-off)
+  - `acu_stim`        one-shot ACU stim helper (DC bus voltage one-off);
+                      start_button / charger frames retired upstream in
+                      isc-fs/IFS08-CE-AMS#187
+  - `cockpit`         TSMS / RST_PIL GPIO driver via TCA9555. Opt-in:
+                      requires `cockpit_tsms_*` and `cockpit_rst_pil_*`
+                      in ams_profile.yaml. Without them the fixture
+                      yields None and Block C tests that need it skip.
   - `fresh_boot`      power-cycle MLC, wait for app to come up; returns
                       the first decoded `0x4A0` (state byte, etc.)
   - `wait_for_state`  poll `0x4A0` until state == expected
@@ -310,6 +315,64 @@ def current_heartbeat(ams_profile, mlc_powered):
         stop_evt.set()
         if t is not None:
             t.join(timeout=1.0)
+
+
+# ---------------------------------------------------------------------------
+# Cockpit GPIO stimulus -- TSMS + RST_PIL
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def cockpit(ams_profile, mlc_powered):
+    """TCA9555-driven TSMS + RST_PIL inputs replacing the retired
+    0x600 start_button / 0x18FF50E7 charger_detect CAN frames (see
+    isc-fs/IFS08-CE-AMS#187).
+
+    Opt-in. Requires six keys in `ams_profile.yaml`:
+
+        cockpit_tsms_tca_addr:    0x21
+        cockpit_tsms_tca_port:    0
+        cockpit_tsms_tca_pin:     0
+        cockpit_rst_pil_tca_addr: 0x21
+        cockpit_rst_pil_tca_port: 0
+        cockpit_rst_pil_tca_pin:  1
+
+    If any key is absent, yields `None`. Tests that need the cockpit
+    should guard with `if cockpit is None: pytest.skip(...)`.
+
+    On enter: both pins driven LOW (Start state).
+    On exit:  both pins driven LOW (safe; mid-Run this latches Error).
+    """
+    keys = ("cockpit_tsms_tca_addr",    "cockpit_tsms_tca_port",
+            "cockpit_tsms_tca_pin",
+            "cockpit_rst_pil_tca_addr", "cockpit_rst_pil_tca_port",
+            "cockpit_rst_pil_tca_pin")
+    missing = [k for k in keys if k not in ams_profile]
+    if missing:
+        log.info("cockpit: DISABLED (missing ams_profile keys: %s). "
+                 "Cockpit-driven tests will skip. Fill in once PF9/PF10 "
+                 "are wired through the TCA9555.", ", ".join(missing))
+        yield None
+        return
+
+    from broker.server import BrokerClient
+    from tools.firmware_test.cockpit import Cockpit
+
+    client = BrokerClient(
+        os.environ.get("HIL_BROKER_SOCKET", "/run/hil-broker/broker.sock"))
+    try:
+        cock = Cockpit(
+            client,
+            tsms=(int(ams_profile["cockpit_tsms_tca_addr"]),
+                  int(ams_profile["cockpit_tsms_tca_port"]),
+                  int(ams_profile["cockpit_tsms_tca_pin"])),
+            rst_pil=(int(ams_profile["cockpit_rst_pil_tca_addr"]),
+                     int(ams_profile["cockpit_rst_pil_tca_port"]),
+                     int(ams_profile["cockpit_rst_pil_tca_pin"])),
+        )
+        with cock:
+            yield cock
+    finally:
+        client.close()
 
 
 # ---------------------------------------------------------------------------

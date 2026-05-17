@@ -1,10 +1,15 @@
 """
-ACU bus (FDCAN1) stimulus helpers — DC bus voltage, start button, charger
-detect frames. Used to drive the AMS firmware's FSM from the bench.
+ACU bus (FDCAN1) stimulus helpers — DC bus voltage frames. Used to drive
+the AMS firmware's freshness predicate + precharge logic from the bench.
 
 Generic: not AMS-specific. The frame IDs themselves come from the AMS CAN
 map but the transmit path is just SocketCAN. VCU/MicroDV tests can use the
 same helpers with different frame IDs.
+
+The `send_start_button` / `send_charger_detect` helpers were retired in
+isc-fs/IFS08-CE-AMS#187 -- the FSM no longer consumes 0x600 or
+0x18FF50E7. Cockpit triggers (TSMS, RST_PIL) are now GPIO inputs driven
+via `tools.firmware_test.cockpit.Cockpit`.
 
 Example:
 
@@ -12,8 +17,6 @@ Example:
 
     with AcuStim(channel="can0") as acu:
         acu.send_dc_bus_v(350)
-        acu.send_start_button(pressed=True)
-        acu.send_charger_detect()
 """
 
 from __future__ import annotations
@@ -32,8 +35,6 @@ class AcuStim:
 
     # Frame IDs — also exported here so callers don't have to import can_map
     DC_BUS_VOLTAGE_ID = 0x100         # ext, DLC 2, little-endian volts
-    START_BUTTON_ID   = 0x600         # std, DLC 1, byte 0 = 0/1
-    CHARGER_DETECT_ID = 0x18FF50E7    # ext (29-bit), any payload
 
     def __init__(self, channel: str = "can0"):
         self.channel = channel
@@ -65,16 +66,6 @@ class AcuStim:
         v = int(volts) & 0xFFFF
         payload = bytes([v & 0xFF, (v >> 8) & 0xFF])
         self._send(self.DC_BUS_VOLTAGE_ID, payload, is_extended_id=True)
-
-    def send_start_button(self, pressed: bool = True) -> None:
-        """Emit 0x600 std with byte 0 = 1 (pressed) or 0 (released)."""
-        self._send(self.START_BUTTON_ID, bytes([1 if pressed else 0]),
-                   is_extended_id=False)
-
-    def send_charger_detect(self, payload: bytes = b"\x00") -> None:
-        """Emit 0x18FF50E7 ext. Any payload sets the charger-detected flag in
-        the AMS firmware."""
-        self._send(self.CHARGER_DETECT_ID, payload, is_extended_id=True)
 
     def send_raw(self, can_id: int, data: bytes, *, is_extended_id: bool = False) -> None:
         """Escape hatch for ad-hoc frames."""
