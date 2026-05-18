@@ -125,10 +125,17 @@ class TestE050IdleSoakInStart:
 
 class TestE051RunSoak:
 
-    def test_e051(self, fresh_boot, acu_stim, acu_heartbeat, wait_for_state,
-                  observe_acu, ams_profile, soak_scale):
-        # Drive into Run first.
-        acu_stim.send_start_button(pressed=True)
+    def test_e051(self, fresh_boot, tsms, dash_chg, acu_heartbeat,
+                  wait_for_state, observe_acu, ams_profile, soak_scale):
+        # Drive into Run via the TSMS + DASH_CHG GPIOs (replaces the
+        # retired 0x600 start_button stim per isc-fs/IFS08-CE-AMS#187).
+        if tsms is None or dash_chg is None:
+            pytest.skip("tsms/dash_chg fixture unavailable -- fill "
+                        "tsms_tca_* / dash_chg_tca_* keys in "
+                        "ams_profile.yaml once PF9/PF10 are wired "
+                        "through the TCA9555.")
+        tsms.assert_()
+        dash_chg.assert_()
         wait_for_state(M.FsmState.PRECHARGE,
                        timeout_ms=int(ams_profile["state_transition_window_ms"]) + 50)
 

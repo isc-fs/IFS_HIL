@@ -21,8 +21,18 @@ Fixtures provided here, layered on top of `tests/hil/conftest.py`'s
                       `current_heartbeat_dac_channel` are absent from
                       ams_profile.yaml; relies on AMS PR #182's
                       HIL_STUB gate in that case)
-  - `acu_stim`        one-shot ACU stim helper (start button, charger,
-                      DC bus voltage one-off)
+  - `acu_stim`        one-shot ACU stim helper (DC bus voltage one-off);
+                      start_button / charger frames retired upstream in
+                      isc-fs/IFS08-CE-AMS#187
+  - `tsms`            TSMS pin driver (side-of-car external master
+                      switch, PF9). Opt-in: requires `tsms_tca_addr`,
+                      `tsms_tca_port`, `tsms_tca_pin` in
+                      ams_profile.yaml. Yields None when any key is
+                      absent and tests that need it skip.
+  - `dash_chg`        DASH_CHG pin driver (cockpit dashboard / charger
+                      button, PF10). Opt-in: requires
+                      `dash_chg_tca_addr/_port/_pin`. Same skip
+                      behaviour.
   - `fresh_boot`      power-cycle MLC, wait for app to come up; returns
                       the first decoded `0x4A0` (state byte, etc.)
   - `wait_for_state`  poll `0x4A0` until state == expected
@@ -310,6 +320,86 @@ def current_heartbeat(ams_profile, mlc_powered):
         stop_evt.set()
         if t is not None:
             t.join(timeout=1.0)
+
+
+# ---------------------------------------------------------------------------
+# TSMS + DASH_CHG GPIO stimulus -- two independent fixtures, one per pin.
+#
+# TSMS lives on the SIDE of the car (external operator master switch);
+# DASH_CHG is the cockpit dashboard / charger button. Both replaced the
+# retired 0x600 / 0x18FF50E7 CAN triggers in isc-fs/IFS08-CE-AMS#187.
+# ---------------------------------------------------------------------------
+
+def _combined_output_mask(ams_profile: dict, addr: int, port: int) -> int:
+    """Mask for `tca.set_direction` covering BOTH TSMS and DASH_CHG when
+    they share an (addr, port). Bit=0 -> output, bit=1 -> input. We can't
+    write a single-bit direction change through `tca.set_direction`
+    (it's a full-port write), so each pin fixture writes the same
+    combined mask -- idempotent and race-free regardless of which
+    fixture runs first."""
+    out_pins: set[int] = set()
+    if (int(ams_profile.get("tsms_tca_addr", -1)) == addr and
+        int(ams_profile.get("tsms_tca_port", -1)) == port):
+        out_pins.add(int(ams_profile["tsms_tca_pin"]))
+    if (int(ams_profile.get("dash_chg_tca_addr", -1)) == addr and
+        int(ams_profile.get("dash_chg_tca_port", -1)) == port):
+        out_pins.add(int(ams_profile["dash_chg_tca_pin"]))
+    mask = 0xFF
+    for p in out_pins:
+        mask &= ~(1 << p) & 0xFF
+    return mask
+
+
+def _tca_pin_fixture(ams_profile, key_prefix: str, label: str):
+    """Shared body for the tsms / dash_chg fixtures. Opt-in via three
+    keys; yields a `TcaPin` (or None if any key absent)."""
+    keys = (f"{key_prefix}_tca_addr", f"{key_prefix}_tca_port",
+            f"{key_prefix}_tca_pin")
+    missing = [k for k in keys if k not in ams_profile]
+    if missing:
+        log.info("%s: DISABLED (missing ams_profile keys: %s). "
+                 "Tests needing it will skip. Fill in once the TCA9555 "
+                 "channel is wired to the AMS pin.",
+                 label, ", ".join(missing))
+        yield None
+        return
+
+    from broker.server import BrokerClient
+    from tools.firmware_test.tca_pin import TcaPin
+
+    addr = int(ams_profile[f"{key_prefix}_tca_addr"])
+    port = int(ams_profile[f"{key_prefix}_tca_port"])
+    pin  = int(ams_profile[f"{key_prefix}_tca_pin"])
+
+    client = BrokerClient(
+        os.environ.get("HIL_BROKER_SOCKET", "/run/hil-broker/broker.sock"))
+    try:
+        # Configure direction for THIS port covering both TSMS and
+        # DASH_CHG (when they share a port). Idempotent.
+        mask = _combined_output_mask(ams_profile, addr, port)
+        client.call("tca.set_direction", addr=addr, port=port, mask=mask)
+        helper = TcaPin(client, addr, port, pin, label=label)
+        helper.deassert()
+        log.info("%s ready: tca0x%02x p%d.b%d", label, addr, port, pin)
+        yield helper
+        helper.deassert()
+    finally:
+        client.close()
+
+
+@pytest.fixture
+def tsms(ams_profile, mlc_powered):
+    """TSMS (Tractive System Master Switch, PF9) pin driver -- the
+    side-of-car external master switch operated by a non-driver per
+    FS rules. Driven HIGH = TS enabled."""
+    yield from _tca_pin_fixture(ams_profile, "tsms", "TSMS")
+
+
+@pytest.fixture
+def dash_chg(ams_profile, mlc_powered):
+    """DASH_CHG (PF10) pin driver -- the cockpit dashboard / charger
+    button operated by the driver. Driven HIGH = request."""
+    yield from _tca_pin_fixture(ams_profile, "dash_chg", "DASH_CHG")
 
 
 # ---------------------------------------------------------------------------
