@@ -59,30 +59,20 @@ acu_rx_dc_bus_id:         0x100      # extended, DLC 2, LE uint16 volts
 
 # -- TSMS routing (side-of-car external master switch) ----------------
 # Drives AMS PF9. Active-high; both this AND dash_chg must be asserted
-# to trigger Start -> Precharge.
-#
-# TODO(bench): pick the actual TCA9555 + port + pin once PF9 is wired.
-# Default suggestion below: 0x21 (U6) expander, port 0, pin 0 (0x20
-# port 0 bits 0-3 are MLC power relays K1-K4, per tools/hw_config.py).
-# Verify with `i2cdetect` + the schematic before trusting. While keys
-# are absent the `tsms` fixture yields None and tests needing it skip.
-#
-# tsms_tca_addr: 0x21
-# tsms_tca_port: 0
-# tsms_tca_pin:  0
+# to trigger Start -> Precharge. Bench jumper: IOEXP2_P10 -> SLOT1_AN0
+# patch-header pin (MLC1 connector pin 14 -> AMS PF9).
+tsms_tca_addr:            0x21       # IOEXP2 (U7 on backplane silk)
+tsms_tca_port:            1          # port 1 (P10..P17)
+tsms_tca_pin:             0          # P10 -> PF9
 
 # -- DASH_CHG routing (cockpit dashboard / charger button) ------------
-# Drives AMS PF10. Active-high.
-#
-# TODO(bench): same as TSMS, fill in once PF10 is wired. Default
-# suggests 0x21 port 0 pin 1 -- the sibling channel to TSMS so they
-# share a TCA9555 port (the conftest fixture handles the shared
-# direction-register write correctly even when they're on different
-# ports or addresses).
-#
-# dash_chg_tca_addr: 0x21
-# dash_chg_tca_port: 0
-# dash_chg_tca_pin:  1
+# Drives AMS PF10. Active-high. Bench jumper: IOEXP2_P11 -> SLOT1_AN1
+# patch-header pin (MLC1 connector pin 15 -> AMS PF10). Sibling channel
+# to TSMS so they share a TCA9555 port (conftest's _combined_output_mask
+# helper handles the shared direction-register write idempotently).
+dash_chg_tca_addr:        0x21
+dash_chg_tca_port:        1
+dash_chg_tca_pin:         1          # P11 -> PF10
 
 # -- Block E soak budgets --------------------------------------------
 soak_idle_minutes:        30         # E-050 idle in Start
