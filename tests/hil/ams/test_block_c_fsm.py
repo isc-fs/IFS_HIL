@@ -23,6 +23,19 @@ abstraction.
 | C-027 | Error sticky within a boot                                       | implemented |
 | C-028 | Error survives reset (flight semantics)                          | deferred    |
 
+New tests added in `isc-fs/IFS08-CE-AMS#193` (numbered against the
+v1.4.0 plan; old C-020..C-028 stay in place pending the renumber):
+
+| Test  | What it checks                                                   | Status      |
+|-------|------------------------------------------------------------------|-------------|
+| C-036 | Transition: voltage drop during hold -> Error                    | implemented |
+| C-039 | Run -> Error (sticky) on DASH_CHG drop (mirror of C-025)         | implemented |
+| C-040 | Charge -> Error (sticky) on TSMS or DASH_CHG drop                | implemented |
+| C-041 | `mode_locked` captured at Start->Precharge; killing heartbeat    | implemented |
+|       |  mid-Run keeps mode = Car until VCU-stale predicate trips Error  |             |
+| C-042 | `0x4A2[5]` cockpit byte encodes (sentinel, mode_locked, TSMS,    | implemented |
+|       |  DASH_CHG) correctly across all 6 FSM states                     |             |
+
 All TSMS/DASH_CHG-driven tests skip cleanly when either fixture is
 unavailable (`tsms_*` / `dash_chg_*` keys absent from
 `ams_profile.yaml` -- happens until the bench wires PF9/PF10 through
@@ -308,3 +321,282 @@ class TestC028ErrorSurvivesReset:
         "an LTC chain and we can run a flight build that boots clean."))
     def test_c028_error_survives_reset(self):
         pass
+
+
+# ===========================================================================
+# isc-fs/IFS08-CE-AMS#193 — new Block C tests for v1.4.0 acceptance.
+# ===========================================================================
+
+
+def _drive_to_charge(tsms, dash_chg, acu_heartbeat, acu_stim,
+                     wait_for_state, ams_profile):
+    """Start -> Precharge -> Transition -> Charge via paused-heartbeat
+    path. Mirror of `_drive_to_run` for the charger mode-lock. Returns
+    the Charge snapshot."""
+    acu_heartbeat["pause"]()
+    time.sleep(int(ams_profile.get("vcu_stale_ms", 1000)) / 1000.0 + 0.2)
+
+    tsms.assert_()
+    dash_chg.assert_()
+    wait_for_state(M.FsmState.PRECHARGE,
+                   timeout_ms=int(ams_profile["state_transition_window_ms"]) + 50)
+
+    # Mode is now locked to Charger; push DC bus up to clear precharge.
+    pack_V   = int(ams_profile["stub_expected_pack_mV"]) // 1000
+    target_V = int(pack_V * 0.96)
+    acu_stim.send_dc_bus_v(target_V)
+
+    wait_for_state(M.FsmState.TRANSITION,
+                   timeout_ms=int(ams_profile["state_transition_window_ms"]) + 100)
+
+    hold_ms = int(ams_profile["transition_hold_ms"])
+    return wait_for_state(M.FsmState.CHARGE,
+                          timeout_ms=hold_ms + int(ams_profile["state_transition_window_ms"]) + 100)
+
+
+# ---------------------------------------------------------------------------
+# C-036 -- Transition voltage drop mid-hold -> Error
+# ---------------------------------------------------------------------------
+# DC bus reaches target, FSM enters Transition. During the
+# `kTransitionHoldMs` hold window the heartbeat drops to 0 V; the
+# transition predicate re-evaluates and the FSM should latch Error
+# instead of advancing to Run.
+
+class TestC036TransitionVoltageDrop:
+
+    def test_c036(self, fresh_boot, tsms, dash_chg, acu_heartbeat,
+                  wait_for_state, ams_profile):
+        _require_inputs(tsms, dash_chg)
+        _drive_to_precharge(tsms, dash_chg, wait_for_state, ams_profile)
+
+        pack_V   = int(ams_profile["stub_expected_pack_mV"]) // 1000
+        target_V = int(pack_V * 0.96)
+        acu_heartbeat["set_volts"](target_V)
+        wait_for_state(M.FsmState.TRANSITION,
+                       timeout_ms=int(ams_profile["state_transition_window_ms"]) + 100)
+
+        # Mid-hold: drop the bus before kTransitionHoldMs elapses. The
+        # hold is short (default 100 ms) so we need to drop FAST.
+        acu_heartbeat["set_volts"](0)
+
+        # Expect Error, NOT Run. Generous slack: hold + transition
+        # window + a couple of telemetry cycles.
+        timeout_ms = (int(ams_profile["transition_hold_ms"]) +
+                      int(ams_profile["state_transition_window_ms"]) +
+                      2 * int(ams_profile["tx_telemetry_period_ms"]))
+        wait_for_state(M.FsmState.ERROR, timeout_ms=timeout_ms)
+
+
+# ---------------------------------------------------------------------------
+# C-039 -- Run -> Error (sticky) on DASH_CHG drop
+# ---------------------------------------------------------------------------
+# Mirror of C-025 for the other operator input. PR #187 made every
+# AIR-open event a sticky fault, so dropping DASH_CHG mid-Run must trip
+# Error and stay there.
+
+class TestC039RunToErrorOnDashChgDrop:
+
+    def test_c039_dash_chg_drop(self, fresh_boot, tsms, dash_chg,
+                                acu_heartbeat, wait_for_state, ams_profile):
+        _require_inputs(tsms, dash_chg)
+        _drive_to_run(tsms, dash_chg, acu_heartbeat, wait_for_state,
+                      ams_profile)
+
+        dash_chg.deassert()
+        wait_for_state(
+            M.FsmState.ERROR,
+            timeout_ms=int(ams_profile["state_transition_window_ms"]) + 50)
+
+
+# ---------------------------------------------------------------------------
+# C-040 -- Charge -> Error (sticky) on TSMS or DASH_CHG drop
+# ---------------------------------------------------------------------------
+# Same conservative semantics in Charge state: any AIR-open event
+# latches Error.
+
+class TestC040ChargeToErrorOnInputDrop:
+
+    def test_c040_tsms_drop(self, fresh_boot, tsms, dash_chg, acu_heartbeat,
+                            acu_stim, wait_for_state, ams_profile):
+        _require_inputs(tsms, dash_chg)
+        _drive_to_charge(tsms, dash_chg, acu_heartbeat, acu_stim,
+                         wait_for_state, ams_profile)
+        tsms.deassert()
+        wait_for_state(
+            M.FsmState.ERROR,
+            timeout_ms=int(ams_profile["state_transition_window_ms"]) + 50)
+
+    def test_c040_dash_chg_drop(self, fresh_boot, tsms, dash_chg, acu_heartbeat,
+                                acu_stim, wait_for_state, ams_profile):
+        _require_inputs(tsms, dash_chg)
+        _drive_to_charge(tsms, dash_chg, acu_heartbeat, acu_stim,
+                         wait_for_state, ams_profile)
+        dash_chg.deassert()
+        wait_for_state(
+            M.FsmState.ERROR,
+            timeout_ms=int(ams_profile["state_transition_window_ms"]) + 50)
+
+
+# ---------------------------------------------------------------------------
+# C-041 -- mode_locked captured exactly at Start -> Precharge
+# ---------------------------------------------------------------------------
+# Drive to Run via the car path (heartbeat fresh at Start->Precharge),
+# then kill the heartbeat. The cockpit-byte `mode_locked` field stays
+# at Car until the VCU-stale predicate eventually trips Error -- the
+# mode lock does NOT re-evaluate just because the heartbeat went stale.
+
+class TestC041ModeLockedCapturedAtPrecharge:
+
+    def test_c041(self, fresh_boot, tsms, dash_chg, acu_heartbeat,
+                  wait_for_state, observe_acu, ams_profile):
+        _require_inputs(tsms, dash_chg)
+        _drive_to_run(tsms, dash_chg, acu_heartbeat, wait_for_state,
+                      ams_profile)
+
+        # Read cockpit byte: expect mode_locked = Car at Run entry.
+        ft = observe_acu.last(M.ID_TELEM_TEMPS, extended=False)
+        assert ft is not None, "no 0x4A2 frame at Run entry"
+        cb = M.decode_telem_temps(ft.data)["cockpit"]
+        assert cb["valid"] and cb["mode_locked"] == M.ModeLocked.CAR, (
+            f"mode_locked != Car at Run entry: {cb}")
+
+        # Kill the heartbeat. Sample the cockpit byte for slightly less
+        # than `vcu_stale_ms`. mode_locked must stay = Car the whole
+        # time. (We're proving the lock is sticky, not the staleness
+        # predicate -- C-021 / B-021 already cover that.)
+        acu_heartbeat["pause"]()
+        vcu_stale_ms = int(ams_profile.get("vcu_stale_ms", 1000))
+        deadline = time.monotonic() + (vcu_stale_ms - 200) / 1000.0
+        samples = 0
+        while time.monotonic() < deadline:
+            ft = observe_acu.last(M.ID_TELEM_TEMPS, extended=False)
+            if ft is not None:
+                cb = M.decode_telem_temps(ft.data)["cockpit"]
+                assert cb["valid"] and cb["mode_locked"] == M.ModeLocked.CAR, (
+                    f"mode_locked re-evaluated mid-Run (heartbeat paused): "
+                    f"{cb}. Lock is supposed to survive heartbeat loss "
+                    f"until the staleness predicate trips Error.")
+                samples += 1
+            time.sleep(0.05)
+        assert samples > 0, "no 0x4A2 frames seen while sampling"
+
+        # After Error trips, mode_locked should still read Car (the
+        # field doesn't reset on Error).
+        post_grace_ms = vcu_stale_ms + int(ams_profile["tx_telemetry_period_ms"]) + 300
+        wait_for_state(M.FsmState.ERROR, timeout_ms=post_grace_ms)
+        ft = observe_acu.last(M.ID_TELEM_TEMPS, extended=False)
+        assert ft is not None
+        cb = M.decode_telem_temps(ft.data)["cockpit"]
+        assert cb["valid"] and cb["mode_locked"] == M.ModeLocked.CAR, (
+            f"mode_locked lost after Error trip: {cb}")
+
+
+# ---------------------------------------------------------------------------
+# C-042 -- Cockpit byte encoding across all 6 FSM states
+# ---------------------------------------------------------------------------
+# Walk every state and verify `0x4A2[5]` bit-packs (sentinel,
+# mode_locked, TSMS, DASH_CHG) per the encoder layout. Split into a
+# car-mode path (Start -> Precharge -> Transition -> Run -> Error) and
+# a charger-mode path (Start -> Precharge -> Transition -> Charge ->
+# Error) -- can't reach both Run and Charge within a single boot
+# because Error is sticky.
+
+class TestC042CockpitByteAcrossStates:
+
+    @staticmethod
+    def _cb(observe_acu):
+        ft = observe_acu.last(M.ID_TELEM_TEMPS, extended=False)
+        assert ft is not None, "no 0x4A2 frame"
+        return M.decode_telem_temps(ft.data)["cockpit"]
+
+    def test_c042_car_path(self, fresh_boot, tsms, dash_chg, acu_heartbeat,
+                           wait_for_state, observe_acu, ams_profile):
+        _require_inputs(tsms, dash_chg)
+
+        # Start (fresh boot, pins still low)
+        cb = self._cb(observe_acu)
+        assert cb == {"valid": True, "raw": 0x80,
+                      "mode_locked": M.ModeLocked.UNDECIDED,
+                      "tsms": False, "dash_chg": False}, f"Start: {cb}"
+
+        # Precharge (assert both inputs, heartbeat fresh -> mode = Car)
+        _drive_to_precharge(tsms, dash_chg, wait_for_state, ams_profile)
+        cb = self._cb(observe_acu)
+        assert (cb["valid"] and cb["mode_locked"] == M.ModeLocked.CAR
+                and cb["tsms"] and cb["dash_chg"]), f"Precharge: {cb}"
+
+        # Transition (drive DC bus up)
+        pack_V   = int(ams_profile["stub_expected_pack_mV"]) // 1000
+        acu_heartbeat["set_volts"](int(pack_V * 0.96))
+        wait_for_state(M.FsmState.TRANSITION,
+                       timeout_ms=int(ams_profile["state_transition_window_ms"]) + 100)
+        cb = self._cb(observe_acu)
+        assert (cb["valid"] and cb["mode_locked"] == M.ModeLocked.CAR
+                and cb["tsms"] and cb["dash_chg"]), f"Transition: {cb}"
+
+        # Run
+        hold_ms = int(ams_profile["transition_hold_ms"])
+        wait_for_state(M.FsmState.RUN,
+                       timeout_ms=hold_ms + int(ams_profile["state_transition_window_ms"]) + 100)
+        cb = self._cb(observe_acu)
+        assert (cb["valid"] and cb["mode_locked"] == M.ModeLocked.CAR
+                and cb["tsms"] and cb["dash_chg"]), f"Run: {cb}"
+
+        # Error (drop TSMS to latch)
+        tsms.deassert()
+        wait_for_state(M.FsmState.ERROR,
+                       timeout_ms=int(ams_profile["state_transition_window_ms"]) + 50)
+        cb = self._cb(observe_acu)
+        assert (cb["valid"] and cb["mode_locked"] == M.ModeLocked.CAR
+                and not cb["tsms"] and cb["dash_chg"]), f"Error: {cb}"
+
+    def test_c042_charger_path(self, fresh_boot, tsms, dash_chg, acu_heartbeat,
+                               acu_stim, wait_for_state, observe_acu,
+                               ams_profile):
+        _require_inputs(tsms, dash_chg)
+
+        # Start (same as car path; mode = Undecided)
+        cb = self._cb(observe_acu)
+        assert cb["raw"] == 0x80, f"Start: {cb}"
+
+        # Pause heartbeat for > kVcuFreshMs so the Start->Precharge
+        # transition locks Charger.
+        acu_heartbeat["pause"]()
+        vcu_stale_ms = int(ams_profile.get("vcu_stale_ms", 1000))
+        time.sleep(vcu_stale_ms / 1000.0 + 0.2)
+
+        # Precharge with mode = Charger
+        tsms.assert_()
+        dash_chg.assert_()
+        wait_for_state(M.FsmState.PRECHARGE,
+                       timeout_ms=int(ams_profile["state_transition_window_ms"]) + 50)
+        cb = self._cb(observe_acu)
+        assert (cb["valid"] and cb["mode_locked"] == M.ModeLocked.CHARGER
+                and cb["tsms"] and cb["dash_chg"]), f"Precharge (charger): {cb}"
+
+        # Push DC bus high via oneshot so precharge completes
+        pack_V = int(ams_profile["stub_expected_pack_mV"]) // 1000
+        acu_stim.send_dc_bus_v(int(pack_V * 0.96))
+
+        # Transition
+        wait_for_state(M.FsmState.TRANSITION,
+                       timeout_ms=int(ams_profile["state_transition_window_ms"]) + 100)
+        cb = self._cb(observe_acu)
+        assert (cb["valid"] and cb["mode_locked"] == M.ModeLocked.CHARGER
+                and cb["tsms"] and cb["dash_chg"]), f"Transition (charger): {cb}"
+
+        # Charge
+        hold_ms = int(ams_profile["transition_hold_ms"])
+        wait_for_state(M.FsmState.CHARGE,
+                       timeout_ms=hold_ms + int(ams_profile["state_transition_window_ms"]) + 100)
+        cb = self._cb(observe_acu)
+        assert (cb["valid"] and cb["mode_locked"] == M.ModeLocked.CHARGER
+                and cb["tsms"] and cb["dash_chg"]), f"Charge: {cb}"
+
+        # Error from Charge (drop DASH_CHG)
+        dash_chg.deassert()
+        wait_for_state(M.FsmState.ERROR,
+                       timeout_ms=int(ams_profile["state_transition_window_ms"]) + 50)
+        cb = self._cb(observe_acu)
+        assert (cb["valid"] and cb["mode_locked"] == M.ModeLocked.CHARGER
+                and cb["tsms"] and not cb["dash_chg"]), f"Error (charger): {cb}"
