@@ -17,7 +17,7 @@ bus_acu:                  can0       # FDCAN1 of the firmware (telemetry + ACU s
 bus_bms_bl:               can2       # FDCAN2 (BL only; the app no longer listens here)
 
 # -- Bootloader -------------------------------------------------------
-bl_node_id:               0x02       # kAmsNodeId in ams_config.hpp
+bl_node_id:               0x01       # kAmsNodeId in ams_config.hpp (option-1 per isc-fs/IFS08-CE-AMS#123)
 bl_discover_timeout_ms:   3000       # `--timeout-ms` on `can-flasher discover`
 bl_per_frame_timeout_ms:  30000      # `--timeout` (per ISO-TP transaction)
 bl_flash_timeout_s:       60         # overall subprocess timeout for `flash`
