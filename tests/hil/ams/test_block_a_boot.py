@@ -14,6 +14,8 @@ chain-less rig (firmware built with `-DAMS_BMS_HIL_STUB=1`).
 | A-006 | 0x4A1 pack frame decodes correctly                      | implemented   |
 | A-007 | 0x4A2 temps + heartbeat decodes correctly               | implemented   |
 | A-008 | Telemetry cadence 500 ms ± 20 ms over 60 s              | implemented   |
+| A-009 | firmware_info.reserved[0] == 0x01                       | deferred (needs read-fwinfo RPC) |
+| A-010 | 0x4A2[5] cockpit byte in Start = 0x80                   | implemented   |
 """
 
 from __future__ import annotations
@@ -301,4 +303,57 @@ class TestA008TelemetryCadence:
             f"{len(outliers)} of {len(deltas_ms)} inter-frame periods "
             f"out of {period_ms} ± {jitter_ms} ms window. First few "
             f"offenders: {outliers[:3]}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# A-009 -- firmware_info record sanity (reserved[0] == 0x01)
+# ---------------------------------------------------------------------------
+# Per `isc-fs/IFS08-CE-AMS#193`: the firmware_info record at
+# `0x08020400` carries `reserved[0] = 0x01` (build-time marker that the
+# BL/app handshake agreed on the new node ID). The bench has no
+# memory-read RPC yet (#193 "Test-infrastructure dependencies"); skip
+# until either a `can-flasher read-fwinfo` subcommand or an equivalent
+# broker RPC exists.
+
+class TestA009FirmwareInfoReserved:
+
+    @pytest.mark.skip(reason=(
+        "A-009 needs a memory-read path (can-flasher `read-fwinfo` or "
+        "an equivalent broker RPC) to fetch the `firmware_info` struct "
+        "at 0x08020400 without SWD. Defer until that RPC lands."
+    ))
+    def test_a009_firmware_info_reserved(self):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# A-010 -- Cockpit byte sentinel in Start = 0x80
+# ---------------------------------------------------------------------------
+# Per `isc-fs/IFS08-CE-AMS#193`: at boot, before TSMS or DASH_CHG are
+# driven, `0x4A2[5]` must be `0x80` -- sentinel bit set, mode = Undecided,
+# both inputs low. This is the simplest end-to-end check that the
+# encoder is on the HIL_STUB code path and the input GPIO reads are
+# wired through correctly.
+
+class TestA010CockpitByteSentinelInStart:
+
+    def test_a010_cockpit_byte_in_start(self, fresh_boot, observe_acu,
+                                        ams_profile):
+        # First 0x4A2 lands at the same time as 0x4A0 in fresh_boot's
+        # capture window. Settle one cycle so we're definitely looking at
+        # a post-boot-grace frame (not a Start->Error in-flight one).
+        time.sleep(int(ams_profile["tx_telemetry_period_ms"]) / 1000.0 + 0.2)
+        frame = observe_acu.last(M.ID_TELEM_TEMPS, extended=False)
+        assert frame is not None, "no 0x4A2 after settle"
+        decoded = M.decode_telem_temps(frame.data)
+        cb = decoded["cockpit"]
+        assert cb["valid"], (
+            f"cockpit byte sentinel (bit 7) missing: byte5=0x{cb['raw']:02X}. "
+            f"Build may not be HIL_STUB, or firmware predates "
+            f"isc-fs/IFS08-CE-AMS#190."
+        )
+        assert decoded["byte5"] == 0x80, (
+            f"byte5 = 0x{decoded['byte5']:02X}; expected 0x80 "
+            f"(sentinel, mode=Undecided, TSMS=0, DASH_CHG=0). Decoded: {cb}"
         )
