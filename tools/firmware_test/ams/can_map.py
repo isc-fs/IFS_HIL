@@ -187,25 +187,81 @@ def decode_telem_pack(data: bytes) -> dict:
     return {"pack_voltage_mV": pack_mV, "filtered_mA": mA}
 
 
+class ModeLocked:
+    """Charger-mode lock captured at Start->Precharge per
+    `isc-fs/IFS08-CE-AMS#187`. Lives in `0x4A2[5]` bits 3..2."""
+    UNDECIDED = 0
+    CAR       = 1
+    CHARGER   = 2
+
+    _NAMES = {0: "Undecided", 1: "Car", 2: "Charger"}
+
+    @classmethod
+    def name(cls, v: int) -> str:
+        return cls._NAMES.get(int(v), f"0x{int(v):02X}")
+
+
+def decode_cockpit_byte(b: int) -> dict:
+    """Decode `0x4A2[5]` per `isc-fs/IFS08-CE-AMS#190` (HIL_STUB build).
+    Layout:
+      bit 7      sentinel (always 1; if low the byte is the old `reserved=0`)
+      bits 3..2  mode_locked (see ModeLocked)
+      bit 1      TSMS (PF9 read-back)
+      bit 0      DASH_CHG (PF10 read-back)
+
+    Returns `valid=False` if the sentinel isn't set (flight build, where
+    `0x4A2[5]` is `0x00`)."""
+    if (b & 0x80) == 0:
+        return {"valid": False, "raw": b}
+    return {
+        "valid":       True,
+        "raw":         b,
+        "mode_locked": (b >> 2) & 0x03,
+        "tsms":        bool(b & 0x02),
+        "dash_chg":    bool(b & 0x01),
+    }
+
+
 def decode_telem_temps(data: bytes) -> dict:
     """Decode 0x4A2 payload.
-    Layout:
+
+    Flight layout (`-DAMS_BMS_HIL_STUB` not set):
       byte 0     min_tempC (int8)
       byte 1     max_tempC (int8)
       byte 2     avg_tempC (int8)
       bytes 3-4  dc_bus_V (little-endian uint16, volts)
-      bytes 5-6  reserved
+      byte 5     reserved (zero)
+      byte 6     tx_fail_count_lo
       byte 7     heartbeat counter (0..255, wraps)
+
+    HIL_STUB layout (`-DAMS_BMS_HIL_STUB=1`):
+      bytes 0-2  unchanged
+      byte 3     bms_poll_task_state (0xA0..0xA4 / 0xAF / 0xFF)
+      byte 4     acu_rx_total_lo
+      byte 5     cockpit byte (see `decode_cockpit_byte`)
+      byte 6     tx_fail_count_lo
+      byte 7     heartbeat counter
+
+    All raw bytes 3..6 are exposed as `byte3..byte6` so callers can pick
+    the right interpretation for their build. `cockpit` is the decoded
+    HIL byte; `dc_bus_V` is the decoded flight value -- check
+    `cockpit["valid"]` to know which build you're looking at.
     """
     if len(data) < 8:
         raise ValueError(f"0x4A2 needs 8 bytes, got {len(data)}")
     def i8(b): return b - 256 if b > 127 else b
     return {
-        "min_tempC": i8(data[0]),
-        "max_tempC": i8(data[1]),
-        "avg_tempC": i8(data[2]),
-        "dc_bus_V":  data[3] | (data[4] << 8),
-        "heartbeat": data[7],
+        "min_tempC":     i8(data[0]),
+        "max_tempC":     i8(data[1]),
+        "avg_tempC":     i8(data[2]),
+        "dc_bus_V":      data[3] | (data[4] << 8),
+        "byte3":         data[3],
+        "byte4":         data[4],
+        "byte5":         data[5],
+        "byte6":         data[6],
+        "tx_fail_count_lo": data[6],
+        "cockpit":       decode_cockpit_byte(data[5]),
+        "heartbeat":     data[7],
     }
 
 # ---------------------------------------------------------------------------
