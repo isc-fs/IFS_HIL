@@ -448,6 +448,27 @@ def fresh_boot(ams_profile, mlc_powered, observe_acu, acu_heartbeat,
     try:
         client.call("tca.write_pin", addr=0x20, port=0, pin=relay_bit, value=False)
         time.sleep(2.0)
+
+        # Pre-drive TSMS / DASH_CHG LOW BEFORE re-powering, so the chip
+        # never sees the lines floating high during boot. Bench MLC
+        # carriers don't have the AMS PCB's external pull-downs, so
+        # without this the TCA9555's weak input pull-up holds PF9/PF10
+        # high, which trips the FSM out of Start within boot-grace.
+        # Opt-in: only fires when tsms_tca_* / dash_chg_tca_* keys are
+        # present in ams_profile.
+        for prefix in ("tsms", "dash_chg"):
+            addr_k = f"{prefix}_tca_addr"
+            port_k = f"{prefix}_tca_port"
+            pin_k  = f"{prefix}_tca_pin"
+            if all(k in ams_profile for k in (addr_k, port_k, pin_k)):
+                addr = int(ams_profile[addr_k])
+                port = int(ams_profile[port_k])
+                pin  = int(ams_profile[pin_k])
+                mask = _combined_output_mask(ams_profile, addr, port)
+                client.call("tca.set_direction", addr=addr, port=port, mask=mask)
+                client.call("tca.write_pin", addr=addr, port=port,
+                            pin=pin, value=False)
+
         observe_acu.clear()
         client.call("tca.write_pin", addr=0x20, port=0, pin=relay_bit, value=True)
         t_power_on = time.monotonic()
