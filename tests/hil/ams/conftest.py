@@ -598,7 +598,20 @@ def wait_for_state(observe_acu, ams_profile):
 
     def _wait(expected_state: int, timeout_ms: int | None = None,
               poll_interval_s: float = 0.02) -> dict:
-        timeout_ms = timeout_ms or int(ams_profile["state_transition_window_ms"])
+        # Caller's deadline is for the FSM transition itself, but our
+        # only observability is telemetry at tx_telemetry_period_ms (500 ms
+        # by default). A 100 ms transition-window timeout is pointless
+        # when no fresh frame can arrive within it. Floor at one full
+        # cadence + 100 ms slack so at least one post-clear frame is
+        # guaranteed to land.
+        period_ms = int(ams_profile.get("tx_telemetry_period_ms", 500))
+        requested = timeout_ms or int(ams_profile["state_transition_window_ms"])
+        timeout_ms = max(requested, period_ms + 100)
+
+        # Drop stale frames captured before this wait started so we don't
+        # match an old state byte.
+        observe_acu.clear()
+
         deadline = time.monotonic() + timeout_ms / 1000.0
         last_decoded = None
         while time.monotonic() < deadline:
