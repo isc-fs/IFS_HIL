@@ -74,6 +74,17 @@ dash_chg_tca_addr:        0x21
 dash_chg_tca_port:        1
 dash_chg_tca_pin:         1          # P11 -> PF10
 
+# -- Current-sensor heartbeat (bench drives PF7 / S_CURRENT via DAC2) -
+# Per the user's bench wiring spec: DAC2 ch0 (broker idx 1, channel 0)
+# is jumpered to MLC2 SLOT2_AN0 -> AMS PF7 (current-sensor Hall input,
+# relocated from PF11 in isc-fs/IFS08-CE-AMS#189). The conftest
+# `current_heartbeat` fixture activates when these keys are present
+# and drives 2.5 V at default (Hall zero-current point) so the
+# current-overlimit predicate doesn't trip post-boot-grace.
+current_heartbeat_dac_idx:     1     # DAC2 (silk; broker idx = silk - 1)
+current_heartbeat_dac_channel: 0     # ch0
+current_heartbeat_period_ms:   50    # match acu_heartbeat cadence
+
 # -- Relay-readback (AMS GPIO outputs sampled by bench ADC3 / MCP3208) -
 # Per the bench wiring spec: SLOT2 connector taps PB4..PB7 to ADC3
 # (silk: ADC3, broker idx 2) channels 0..3. The conftest fixture
