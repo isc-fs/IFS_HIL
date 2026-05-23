@@ -35,20 +35,43 @@ from tools.firmware_test.ams import can_map as M
 
 class TestA001RelaysOpenOnPowerUp:
     """Per the test plan, PB5 (AIR+), PB6 (AIR-), PB7 (Precharge) must
-    read LOW within 50 ms of power-on. The bench rig has no logic-
-    analyser probes on the SLOT1_DIG* lines, so we can't time the
-    transition directly. As a proxy, this test would observe via a
-    TCA9555 input wired to the slot's relay-control pins — which the
-    BACKPLANE_HIL doesn't currently route."""
+    read LOW within 50 ms of power-on. The bench samples PB4..PB7 via
+    ADC3 (MCP3208, broker idx 2) channels 0..3, so we just sweep all
+    four relay GPIO readbacks for 50 ms post-power-on and assert
+    everything stayed LOW the entire window."""
 
-    @pytest.mark.skip(reason=(
-        "A-001 requires a logic analyser or TCA9555 input wired to "
-        "SLOT1_DIG0..2 to observe the 50 ms relay-open assertion. "
-        "Not present on this rig. The FSM=Start state read in A-004 "
-        "is the indirect bench-observable guarantee that relays are open."
-    ))
-    def test_a001_relays_open_within_50ms(self):
-        pass
+    def test_a001_relays_open_within_50ms(self, mlc_powered, relays_readback,
+                                          ams_profile):
+        if relays_readback is None:
+            pytest.skip("relays_readback fixture disabled (missing *_adc_* "
+                        "keys in ams_profile.yaml)")
+
+        from broker.server import BrokerClient
+        client = BrokerClient(os.environ.get("HIL_BROKER_SOCKET",
+                                             "/run/hil-broker/broker.sock"))
+        relay_bit = mlc_powered["relay_bit"]
+        try:
+            client.call("tca.write_pin", addr=0x20, port=0, pin=relay_bit, value=False)
+            time.sleep(2.0)
+            client.call("tca.write_pin", addr=0x20, port=0, pin=relay_bit, value=True)
+            t_power_on = time.monotonic()
+        finally:
+            client.close()
+
+        # Sample for 50 ms at ~5 ms cadence -- about 10 samples per pin.
+        samples = relays_readback.sample_for(duration_s=0.050, period_s=0.005)
+        assert samples, "no samples taken within 50 ms window"
+
+        # Every sample must show all relay-control lines LOW.
+        offenders = [(t, s) for (t, s) in samples
+                     if s["air_p"] or s["air_n"] or s["prech"]]
+        assert not offenders, (
+            f"{len(offenders)} of {len(samples)} samples saw a relay-control "
+            f"pin HIGH within 50 ms of power-on. First 3: "
+            f"{[(round(t*1000, 1), s) for t, s in offenders[:3]]}. "
+            f"Final voltages: {relays_readback.read_volts()}."
+        )
+        _ = t_power_on  # for future per-sample-vs-t_power_on diagnostics
 
 
 # ---------------------------------------------------------------------------

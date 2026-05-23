@@ -403,6 +403,92 @@ def dash_chg(ams_profile, mlc_powered):
 
 
 # ---------------------------------------------------------------------------
+# AMS-side relay-GPIO readback via MCP3208 ADC.
+#
+# AMS firmware drives PB4 (AMS_OK), PB5 (AIR+), PB6 (AIR-), PB7 (PRECH)
+# as outputs to control contactors on a real car. On the bench they're
+# sampled by ADC3 (MCP3208, broker idx 2) channels 0..3 so we can verify
+# the FSM is actually toggling them as expected. Per the user's bench
+# wiring spec.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def relays_readback(ams_profile, mlc_powered):
+    """Read AMS_OK / AIR+ / AIR- / PRECH GPIO state via MCP3208.
+    Opt-in: requires the 8 *_adc_idx / *_adc_channel keys + the
+    threshold to be present in ams_profile.yaml. Yields None and
+    tests using it skip if any key is absent."""
+    names = ("ams_ok", "air_p", "air_n", "prech")
+    missing = [k for n in names
+               for k in (f"{n}_adc_idx", f"{n}_adc_channel")
+               if k not in ams_profile]
+    if missing:
+        log.info("relays_readback: DISABLED (missing keys: %s)",
+                 ", ".join(missing))
+        yield None
+        return
+
+    channels = {
+        n: (int(ams_profile[f"{n}_adc_idx"]),
+            int(ams_profile[f"{n}_adc_channel"]))
+        for n in names
+    }
+    threshold_v = float(
+        ams_profile.get("relay_readback_digital_threshold_v", 1.65))
+
+    from broker.server import BrokerClient
+    client = BrokerClient(
+        os.environ.get("HIL_BROKER_SOCKET", "/run/hil-broker/broker.sock"))
+
+    class RelaysReadback:
+        threshold_v = threshold_v  # exposed for log messages
+
+        def _read_volts(self, name: str) -> float:
+            idx, ch = channels[name]
+            return float(client.call("adc.read_voltage", idx=idx, channel=ch))
+
+        def read(self) -> dict:
+            """Single-shot snapshot of all 4 lines as booleans (True = HIGH)."""
+            return {n: self._read_volts(n) > threshold_v for n in names}
+
+        def read_volts(self) -> dict:
+            """Snapshot of all 4 lines as raw voltages (for diagnostics)."""
+            return {n: self._read_volts(n) for n in names}
+
+        def poll_for(self, predicate, timeout_s: float,
+                     period_s: float = 0.005) -> dict | None:
+            """Poll read() until predicate(state) truthy; return matching
+            state on success, None on timeout."""
+            deadline = time.monotonic() + timeout_s
+            while time.monotonic() < deadline:
+                s = self.read()
+                if predicate(s):
+                    return s
+                time.sleep(period_s)
+            return None
+
+        def sample_for(self, duration_s: float,
+                       period_s: float = 0.005) -> list:
+            """Return list of (t_offset, state) samples for duration_s."""
+            t0 = time.monotonic()
+            deadline = t0 + duration_s
+            samples = []
+            while time.monotonic() < deadline:
+                samples.append((time.monotonic() - t0, self.read()))
+                time.sleep(period_s)
+            return samples
+
+    log.info("relays_readback ready: ams_ok=%s air_p=%s air_n=%s prech=%s "
+             "(threshold=%.2f V)",
+             channels["ams_ok"], channels["air_p"], channels["air_n"],
+             channels["prech"], threshold_v)
+    try:
+        yield RelaysReadback()
+    finally:
+        client.close()
+
+
+# ---------------------------------------------------------------------------
 # Flasher
 # ---------------------------------------------------------------------------
 
