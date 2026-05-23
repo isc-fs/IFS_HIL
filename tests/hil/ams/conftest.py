@@ -15,7 +15,7 @@ Fixtures provided here, layered on top of `tests/hil/conftest.py`'s
   - `observe_acu`     passive sniffer on FDCAN1 (telemetry)
   - `acu_heartbeat`   periodic `0x100` so the VCU staleness predicate
                       doesn't trip after grace
-  - `current_heartbeat` optional DAC stim on PF11 so the current-stale
+  - `current_heartbeat` optional DAC stim on PF7 so the current-stale
                       predicate doesn't trip in non-stub flight builds
                       (no-op when `current_heartbeat_dac_idx` /
                       `current_heartbeat_dac_channel` are absent from
@@ -38,7 +38,7 @@ Fixtures provided here, layered on top of `tests/hil/conftest.py`'s
   - `wait_for_state`  poll `0x4A0` until state == expected
   - `wait_for_heartbeat_advance` poll `0x4A2[7]` until counter advances
 
-Tests requiring real hardware that the rig doesn't have (PF11 analog
+Tests requiring real hardware that the rig doesn't have (PF7 analog
 stim, GDB attach, scope) call `pytest.skip` with a clear reason — the
 suite stays green off-bench.
 """
@@ -226,7 +226,7 @@ def acu_heartbeat(ams_profile, mlc_powered):
 
 @pytest.fixture
 def current_heartbeat(ams_profile, mlc_powered):
-    """Background thread that drives the MLC's PF11 (current-sensor Hall
+    """Background thread that drives the MLC's PF7 (current-sensor Hall
     input) via a backplane DAC channel so the firmware's current
     freshness + Imax predicates see a plausible "0 A" reading.
 
@@ -245,7 +245,7 @@ def current_heartbeat(ams_profile, mlc_powered):
     absent, the fixture is a no-op (background thread doesn't drive
     the DAC) — tests still get a state dict so they can call
     `set_mA / pause / resume` without conditionals. The DAC routing
-    from a specific channel to a specific MLC's PF11 is bench-
+    from a specific channel to a specific MLC's PF7 is bench-
     physical (J2 pinout dependent) and must be verified before
     enabling; see CLAUDE.md for the DAC80504 wiring.
 

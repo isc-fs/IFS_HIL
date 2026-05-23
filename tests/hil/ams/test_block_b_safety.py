@@ -11,7 +11,7 @@ Implements B-010..B-017 from `isc-fs/IFS08-CE-AMS#123`.
 | B-012 | Watchdog reset re-opens relays                            | needs GDB  |
 | B-013 | ErrorLatch clears on boot under HIL_STUB                  | needs GDB  |
 | B-014 | BMS predicates trip on cell UV/OV/OT                      | deferred (LTC chain) |
-| B-015 | Current overlimit predicate trips → Error                 | needs PF11 stim |
+| B-015 | Current overlimit predicate trips → Error                 | needs PF7 stim  |
 | B-016 | Current sensor stale → Error                              | needs GDB  |
 | B-017 | VCU heartbeat stale → Error                               | implemented|
 """
@@ -133,12 +133,14 @@ class TestB014BMSPredicates:
 class TestB015CurrentOverlimit:
 
     @pytest.mark.skip(reason=(
-        "B-015 needs an analog source driving PF11 (ADC1 ch2) past "
+        "B-015 needs an analog source driving PF7 (ADC3 ch3) past "
         "kImaxMa worth of voltage (≈ 4.6 V offset from kCurrentZeroMv "
-        "for 200 A, well over Vref). The bench's DAC80504 outputs are "
-        "not currently routed to SLOT1_AN0 (= GPIO7 = PF11). When the "
-        "bench respin wires DAC2_OUT0 → SLOT1_AN0, this test becomes "
-        "directly runnable."
+        "for 200 A, well over Vref). DAC2 ch0 is now wired to PF7 on "
+        "the bench (per isc-fs/IFS08-CE-AMS#189), so this is unblocked "
+        "as soon as current_heartbeat_dac_* keys land in "
+        "ams_profile.yaml and the test body is rewritten to use the "
+        "current_heartbeat fixture's set_mA(>= 200_000) helper. "
+        "Tracked as B-024 in isc-fs/IFS08-CE-AMS#193."
     ))
     def test_b015_current_overlimit_trips_error(self):
         pass
