@@ -441,8 +441,6 @@ def relays_readback(ams_profile, mlc_powered):
         os.environ.get("HIL_BROKER_SOCKET", "/run/hil-broker/broker.sock"))
 
     class RelaysReadback:
-        threshold_v = threshold_v  # exposed for log messages
-
         def _read_volts(self, name: str) -> float:
             idx, ch = channels[name]
             return float(client.call("adc.read_voltage", idx=idx, channel=ch))
