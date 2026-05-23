@@ -60,19 +60,17 @@ def _drive_to_precharge(tsms, dash_chg, wait_for_state, ams_profile):
         timeout_ms=int(ams_profile["state_transition_window_ms"]) + 50)
 
 
-def _drive_to_transition(tsms, dash_chg, acu_heartbeat, wait_for_state,
-                         ams_profile):
+def _drive_to_run(tsms, dash_chg, acu_heartbeat, wait_for_state, ams_profile):
+    """Precharge -> Run via a single wait. The intermediate Transition
+    state lives only for transition_hold_ms (100 ms) and is shorter
+    than tx_telemetry_period_ms (500 ms), so it's not reliably
+    observable via telemetry -- jump straight to the stable Run state.
+    Block F's end-state relay assertions are valid against Run (post-
+    Transition); intermediate Transition observation is intentionally
+    out of scope."""
     _drive_to_precharge(tsms, dash_chg, wait_for_state, ams_profile)
     pack_V = int(ams_profile["stub_expected_pack_mV"]) // 1000
     acu_heartbeat["set_volts"](int(pack_V * 0.96))
-    return wait_for_state(
-        M.FsmState.TRANSITION,
-        timeout_ms=int(ams_profile["state_transition_window_ms"]) + 100)
-
-
-def _drive_to_run(tsms, dash_chg, acu_heartbeat, wait_for_state, ams_profile):
-    _drive_to_transition(tsms, dash_chg, acu_heartbeat, wait_for_state,
-                         ams_profile)
     hold_ms = int(ams_profile["transition_hold_ms"])
     return wait_for_state(
         M.FsmState.RUN,
@@ -116,12 +114,13 @@ class TestF061AirPToggles:
         if tsms is None or dash_chg is None:
             pytest.skip("tsms/dash_chg fixture unavailable")
 
-        _drive_to_transition(tsms, dash_chg, acu_heartbeat, wait_for_state,
-                             ams_profile)
-        # AIR_P closes at Precharge->Transition
+        # AIR_P closes during Transition; verified via the stable Run
+        # state since Transition is too brief to observe via telemetry.
+        _drive_to_run(tsms, dash_chg, acu_heartbeat, wait_for_state,
+                      ams_profile)
         s = relays_readback.poll_for(lambda x: x["air_p"], timeout_s=0.1)
         assert s is not None, (
-            f"AIR_P did not go HIGH on Precharge->Transition. State: "
+            f"AIR_P did not go HIGH by Run. State: "
             f"{relays_readback.read()}, volts: {relays_readback.read_volts()}")
 
 
@@ -216,13 +215,16 @@ class TestF065PrechargeToTransitionSequence:
         if tsms is None or dash_chg is None:
             pytest.skip("tsms/dash_chg fixture unavailable")
 
-        _drive_to_transition(tsms, dash_chg, acu_heartbeat, wait_for_state,
-                             ams_profile)
+        # The post-Transition relay pattern (AIR_N=1, AIR_P=1, PRECH=0)
+        # carries through to Run, so we verify at Run state. Transient
+        # Transition state itself isn't observable via 500 ms telemetry.
+        _drive_to_run(tsms, dash_chg, acu_heartbeat, wait_for_state,
+                      ams_profile)
         s = relays_readback.poll_for(
             lambda x: x["air_n"] and x["air_p"] and not x["prech"],
             timeout_s=0.2)
         assert s is not None, (
-            f"Precharge->Transition relay pattern wrong. Expected "
+            f"Precharge->Transition relay pattern wrong at Run. Expected "
             f"AIR_N=1, AIR_P=1, PRECH=0; got {relays_readback.read()} "
             f"voltages={relays_readback.read_volts()}")
 
