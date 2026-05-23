@@ -7,7 +7,7 @@
 # moves with it.
 
 # -- Carrier slot -----------------------------------------------------
-mlc_slot:                 1          # which carrier slot the AMS is in
+mlc_slot:                 2          # which carrier slot the AMS is in (was 1; switched after MingoCAN-corrupted BL fix landed)
 mlc_boot_current_mA:      100        # min draw after K_n closes (bench: 118-128 mA)
 mlc_boot_settle_s:        0.5        # delay after relay close before discover
                                      # short enough to catch BL before auto-jump
