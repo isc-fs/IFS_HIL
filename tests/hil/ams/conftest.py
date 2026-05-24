@@ -272,15 +272,13 @@ def current_heartbeat(ams_profile, mlc_powered):
 
     def _ma_to_volts(mA: int) -> float:
         # Hall-effect transducer model from ams_config.hpp:
-        #   kCurrentZeroMv     = 1650   (1.65 V at 0 A)
-        #   kCurrentMvPerAmpe1 = 200    (firmware stores 10x mV/A, so 20 mV/A)
-        #
-        # Earlier this used 2.5 V / 5.7 mV/A which doesn't match the
-        # current firmware; result was that "0 A" stim drove 2.5 V, the
-        # firmware read it as ~42.5 A, and the Precharge predicate tripped
-        # to Error before tests could advance the FSM. Verified on bench
-        # 2026-05-24: with 1.65 V at mA=0, AMS reaches Precharge cleanly.
-        return 1.650 + (mA / 1000.0) * 0.020  # mA → A → V
+        #   kCurrentZeroMv     = 2500   (2.5 V at 0 A)
+        #   kCurrentMvPerAmpe1 = 57     (firmware stores 10x mV/A, so 5.7 mV/A)
+        # `inline constexpr std::int32_t kCurrentZeroMv = 2500;` /
+        # `inline constexpr std::int32_t kCurrentMvPerAmpe1 = 57;` in
+        # firmware/Core/Inc/app/ams_config.hpp. Re-verify here if firmware
+        # COMMISSIONING values change.
+        return 2.5 + (mA / 1000.0) * (0.057 / 10.0)  # mA → A → V
 
     if enabled:
         from broker.server import BrokerClient
