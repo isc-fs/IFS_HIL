@@ -23,10 +23,19 @@ import threading
 import time
 from datetime import datetime, timezone
 
-from flask import Flask, jsonify, request, send_from_directory
+import json
+import queue
+
+from flask import Flask, Response, jsonify, request, send_from_directory, stream_with_context
 
 # Make tools/ and broker/ importable from repo root
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# CAN trace tab backend -- standalone, doesn't touch the broker (AF_CAN sockets
+# are not /dev/* devices so the broker monopoly invariant doesn't apply).
+from dashboard.can_tracer import CanTracer  # noqa: E402
+
+_can_tracer: CanTracer | None = None
 
 from tools import hw_config as CFG
 from tools.hil_client import (
@@ -327,6 +336,62 @@ def can_set_mode(idx):
 
 
 # ---------------------------------------------------------------------------
+# CAN trace tab
+# ---------------------------------------------------------------------------
+
+@app.route("/api/can/recent")
+def can_recent():
+    """REST snapshot of the in-memory ring buffer."""
+    if _can_tracer is None:
+        return jsonify({"error": "CAN tracer not started"}), 503
+    bus = request.args.get("bus") or None
+    try:
+        n = max(1, min(int(request.args.get("n", 200)), 2000))
+    except ValueError:
+        n = 200
+    return jsonify({"frames": _can_tracer.recent(bus=bus, n=n)})
+
+
+@app.route("/api/can/stream")
+def can_stream():
+    """Server-Sent Events feed: every frame on any bus, as it arrives.
+
+    Browser side uses `new EventSource('/api/can/stream')`. Each event's
+    `data` is one JSON-encoded frame object."""
+    if _can_tracer is None:
+        return jsonify({"error": "CAN tracer not started"}), 503
+
+    sub = _can_tracer.subscribe(maxsize=512)
+
+    @stream_with_context
+    def gen():
+        # Send a comment line every 15 s so proxies / EventSource don't time out.
+        last_keepalive = time.monotonic()
+        try:
+            yield ": tracer-connected\n\n"
+            while True:
+                try:
+                    frame = sub.get(timeout=5.0)
+                    yield f"data: {json.dumps(frame)}\n\n"
+                except queue.Empty:
+                    pass
+                if time.monotonic() - last_keepalive > 15.0:
+                    yield ": keepalive\n\n"
+                    last_keepalive = time.monotonic()
+        except GeneratorExit:
+            pass
+        finally:
+            _can_tracer.unsubscribe(sub)
+
+    headers = {
+        "Content-Type":  "text/event-stream",
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",   # disable nginx buffering if proxied
+    }
+    return Response(gen(), headers=headers)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -344,6 +409,12 @@ if __name__ == "__main__":
         log.warning("could not read initial PSU state from broker: %s", exc)
 
     _init_relays()
+
+    # Bring the CAN tracer online -- skips interfaces it can't bind to (e.g.
+    # off-bench Mac dev) so the dashboard still starts cleanly.
+    _can_tracer = CanTracer()
+    _can_tracer.start()
+    globals()["_can_tracer"] = _can_tracer
 
     log.info("Running initial hardware poll...")
     _poll()
