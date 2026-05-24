@@ -90,6 +90,45 @@
   #psu-status.ok  { color: var(--green); }
   #psu-status.err { color: var(--red); }
 
+  /* ---- Tabs ---- */
+  #tabs { display: flex; gap: 6px; margin: 0 18px; }
+  .tab {
+    background: transparent; border: none; color: var(--muted);
+    font: inherit; padding: 8px 14px; cursor: pointer;
+    border-bottom: 2px solid transparent;
+  }
+  .tab.active { color: var(--fg); border-bottom-color: var(--green); }
+  .tab-pane { display: none; }
+  .tab-pane.active { display: block; }
+
+  /* ---- CAN trace tab ---- */
+  #can-controls { display: flex; flex-wrap: wrap; gap: 12px;
+                  align-items: center; margin-bottom: 10px; }
+  #can-controls button { padding: 4px 10px; cursor: pointer; }
+  .muted { color: var(--muted); font-size: 11px; }
+  #can-list {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px; line-height: 1.4;
+    background: #0f0f10; border: 1px solid #2a2a2c;
+    padding: 6px 8px; height: 65vh; overflow-y: auto;
+  }
+  .frame-row { display: grid;
+               grid-template-columns: 110px 50px 90px 26px 1fr 1fr;
+               gap: 8px; padding: 2px 0; }
+  .frame-row:hover { background: #1c1c1e; }
+  .f-ts { color: var(--muted); }
+  .f-bus { color: #6ab0f5; }
+  .f-id { color: #f0a868; font-weight: 600; }
+  .f-dlc { color: var(--muted); }
+  .f-data { color: var(--fg); }
+  .f-dec { color: var(--green); white-space: nowrap; overflow: hidden;
+           text-overflow: ellipsis; }
+  /* Highlights for known IDs */
+  .frame-row.kind-ams_telem_status  .f-id { color: #ffd166; }
+  .frame-row.kind-ams_telem_pack    .f-id { color: #ef476f; }
+  .frame-row.kind-ams_telem_temps   .f-id { color: #06d6a0; }
+  .frame-row.kind-vcu_dc_bus        .f-id { color: #c77dff; }
+
   /* ---- Table inside cards ---- */
   table { width: 100%; border-collapse: collapse; }
   td, th {
@@ -211,14 +250,49 @@
 
 <header>
   <h1>&#9632; BACKPLANE_HIL</h1>
+  <nav id="tabs">
+    <button class="tab active" data-tab="bench" onclick="switchTab('bench')">Bench</button>
+    <button class="tab"        data-tab="can"   onclick="switchTab('can')">CAN trace</button>
+  </nav>
   <div id="meta">
     <span id="conn-dot"></span><span id="conn-label">connecting…</span><br>
     <span id="ts">—</span>
   </div>
 </header>
 
-<main id="main">
-  <div class="card"><div class="card-body placeholder">Loading…</div></div>
+<main>
+  <div id="tab-bench" class="tab-pane active">
+    <div id="main">
+      <div class="card"><div class="card-body placeholder">Loading…</div></div>
+    </div>
+  </div>
+
+  <div id="tab-can" class="tab-pane">
+    <div class="card">
+      <div class="card-header">CAN trace
+        <span id="can-status" class="muted" style="margin-left:14px;">disconnected</span>
+      </div>
+      <div class="card-body">
+        <div id="can-controls">
+          <label>Bus:</label>
+          <label><input type="checkbox" class="can-bus" value="can0" checked> can0</label>
+          <label><input type="checkbox" class="can-bus" value="can1" checked> can1</label>
+          <label><input type="checkbox" class="can-bus" value="can2" checked> can2</label>
+          <label style="margin-left:18px;">ID filter:
+            <input type="text" id="can-idfilter" placeholder="e.g. 4A* or 100"
+                   style="width:90px;padding:2px 6px;">
+          </label>
+          <button id="can-pause" onclick="canTogglePause()">Pause</button>
+          <button onclick="canClear()">Clear</button>
+          <label style="margin-left:14px;">
+            <input type="checkbox" id="can-autoscroll" checked> auto-scroll
+          </label>
+          <span id="can-count" class="muted" style="margin-left:14px;">0 frames</span>
+        </div>
+        <div id="can-list"></div>
+      </div>
+    </div>
+  </div>
 </main>
 
 <script>
@@ -529,6 +603,140 @@ function poll() {
 
 poll();
 setInterval(poll, POLL_MS);
+
+
+// =====================================================================
+// CAN trace tab
+// =====================================================================
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(b =>
+      b.classList.toggle('active', b.dataset.tab === name));
+  document.querySelectorAll('.tab-pane').forEach(p =>
+      p.classList.toggle('active', p.id === 'tab-' + name));
+  if (name === 'can') canEnsureStream();
+}
+
+let canES = null;
+let canPaused = false;
+let canBuffer = [];          // pending frames if paused
+let canTotalSeen = 0;
+const CAN_MAX_ROWS = 1500;   // cap DOM size
+
+function canEnsureStream() {
+  if (canES) return;
+  const status = document.getElementById('can-status');
+  status.textContent = 'connecting…';
+  // Backfill last ~200 frames before going live
+  fetch('/api/can/recent?n=200').then(r => r.json()).then(j => {
+    (j.frames || []).forEach(f => canAppend(f));
+  }).catch(() => {});
+  canES = new EventSource('/api/can/stream');
+  canES.onopen  = () => { status.textContent = 'live'; status.className = 'ok-val'; };
+  canES.onerror = () => { status.textContent = 'reconnecting…'; status.className = 'err-val'; };
+  canES.onmessage = ev => {
+    try {
+      const f = JSON.parse(ev.data);
+      canAppend(f);
+    } catch (e) { /* ignore */ }
+  };
+}
+
+function canTogglePause() {
+  canPaused = !canPaused;
+  document.getElementById('can-pause').textContent = canPaused ? 'Resume' : 'Pause';
+  document.getElementById('can-status').textContent =
+      canPaused ? 'paused (buffering…)' : 'live';
+  if (!canPaused) {
+    // Drain whatever accumulated
+    canBuffer.forEach(canRenderRow);
+    canBuffer = [];
+    canTrim();
+    canMaybeScroll();
+  }
+}
+
+function canClear() {
+  document.getElementById('can-list').innerHTML = '';
+  canBuffer = [];
+  canTotalSeen = 0;
+  document.getElementById('can-count').textContent = '0 frames';
+}
+
+function canAppend(f) {
+  canTotalSeen++;
+  document.getElementById('can-count').textContent =
+      canTotalSeen.toLocaleString() + ' frames';
+  if (canPaused) { canBuffer.push(f); return; }
+  if (!canPassesFilter(f)) return;
+  canRenderRow(f);
+  canTrim();
+  canMaybeScroll();
+}
+
+function canPassesFilter(f) {
+  // Bus checkboxes
+  const buses = Array.from(document.querySelectorAll('.can-bus:checked'))
+                     .map(b => b.value);
+  if (!buses.includes(f.bus)) return false;
+  // ID glob: supports prefix match with '*'
+  const flt = document.getElementById('can-idfilter').value.trim().toUpperCase();
+  if (!flt) return true;
+  const idHex = f.id.replace(/^0X/, '');
+  if (flt.endsWith('*')) return idHex.startsWith(flt.slice(0, -1));
+  return idHex === flt;
+}
+
+function canRenderRow(f) {
+  const list = document.getElementById('can-list');
+  const row = document.createElement('div');
+  row.className = 'frame-row' + (f.decoded ? ' kind-' + f.decoded.kind : '');
+  const tsSec = (f.ts_ms / 1000).toFixed(3);
+  const dec = f.decoded ? canFmtDecoded(f.decoded) : '';
+  row.innerHTML =
+      `<span class="f-ts">${tsSec}</span>` +
+      `<span class="f-bus">${f.bus}</span>` +
+      `<span class="f-id">${f.id}</span>` +
+      `<span class="f-dlc">[${f.dlc}]</span>` +
+      `<span class="f-data">${f.data}</span>` +
+      `<span class="f-dec">${dec}</span>`;
+  list.appendChild(row);
+}
+
+function canFmtDecoded(d) {
+  if (d.kind === 'ams_telem_status') {
+    return `state=${d.state} ams_ok=${d.ams_ok ? '1' : '0'} ` +
+           `mask=0x${d.module_online_mask.toString(16).toUpperCase().padStart(2,'0')} ` +
+           `cell=${d.min_cell_mV}-${d.max_cell_mV} mV`;
+  }
+  if (d.kind === 'ams_telem_pack') {
+    return `pack=${(d.pack_voltage_mV/1000).toFixed(2)} V ` +
+           `I=${(d.filtered_mA/1000).toFixed(1)} A`;
+  }
+  if (d.kind === 'ams_telem_temps') {
+    const cb = d.cockpit;
+    const ck = cb && cb.valid
+        ? `cockpit{${cb.mode_locked} TSMS=${cb.tsms?'1':'0'} DASH=${cb.dash_chg?'1':'0'}}`
+        : `byte5=0x${(cb?cb.raw:0).toString(16)}`;
+    return `temps ${d.min_tempC}/${d.avg_tempC}/${d.max_tempC} °C ` +
+           `hb=${d.heartbeat} ${ck}`;
+  }
+  if (d.kind === 'vcu_dc_bus') {
+    return `dc_bus=${d.dc_bus_V} V`;
+  }
+  return '';
+}
+
+function canTrim() {
+  const list = document.getElementById('can-list');
+  while (list.childElementCount > CAN_MAX_ROWS) list.removeChild(list.firstChild);
+}
+
+function canMaybeScroll() {
+  if (!document.getElementById('can-autoscroll').checked) return;
+  const list = document.getElementById('can-list');
+  list.scrollTop = list.scrollHeight;
+}
 </script>
 </body>
 </html>
