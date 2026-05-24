@@ -95,6 +95,62 @@ pinctrl get 7    # must show "op .. lo"
 pinctrl get 8    # must show "ip .. hi"
 ```
 
+### `mcp251x spiN: hard_xmit called while tx busy` flood — CAN silent
+
+Symptom: `dmesg` shows dozens or hundreds of `mcp251x spiX: hard_xmit
+called while tx busy` lines (all timestamped tightly together), and one
+of the kernel CAN interfaces silently drops every `cansend`. TX packet
+counter does not increment, error counter does not increment, no
+candump output — the kernel queue swallows frames without trying. The
+bus itself stays in `ERROR-ACTIVE` state because no traffic is reaching
+the wire at all.
+
+What's happening: the MCP2515 chip's TX completion IRQ got lost (e.g.
+during heavy concurrent SPI traffic that's also touching other CS pins
+on the same shared bus, or while the broker is rapidly switching modes
+between DAC and ADC ops). The mcp251x driver's internal "tx in flight"
+flag never clears, so every new TX request is rejected at the driver
+layer before the chip ever sees it. The chip is still electrically
+fine but the kernel state machine is out of sync with it.
+
+Recovery escalation, cheapest first:
+
+1. `sudo systemctl restart hil-can-up` — re-runs the per-interface
+   bring-up. Usually does **not** fix it, because that path doesn't
+   reset the chip itself, just the kernel link config.
+
+2. `sudo modprobe -r mcp251x && sudo modprobe mcp251x && sudo
+   systemctl restart hil-can-up` — driver unload + reload + bring-up.
+   Re-runs probe (`MCP2515 successfully initialized` in dmesg). The
+   freshly-probed driver is in clean state. **Sometimes** enough.
+
+3. **Pi reboot** (`sudo reboot`). Wait for SSH to come back (~30 s).
+   This works because (a) the kernel state is fully fresh, and (b) the
+   ATX PSU stays on across the reboot, so the MCP2515 chips retain
+   their power but get re-probed cleanly. Confirmed recovery path.
+
+4. If a reboot doesn't clear it, the chip itself may have latched a
+   bad state — do a real PSU power-cycle:
+   ```sh
+   sudo pinctrl set 7 op dh    # PSU off
+   sleep 2
+   sudo pinctrl set 7 op dl    # PSU on
+   sudo modprobe -r mcp251x && sudo modprobe mcp251x
+   sudo systemctl restart hil-can-up
+   ```
+
+To verify TX works after recovery, watch the counters:
+```sh
+ip -s link show can2 | tail -2    # note TX packets value
+cansend can2 100#0000
+ip -s link show can2 | tail -2    # packets value should now be N+1
+```
+
+Prevention: don't run long-duration concurrent SPI scripts (raw DAC
+sweeps, ADC polls) while the broker is also serving dashboard or test
+traffic. The mcp251x driver's IRQ handling on this shared SPI bus
+isn't bulletproof under contention.
+
 ### `can-flasher discover` returns "No bootloaders replied"
 
 Three things in order:
