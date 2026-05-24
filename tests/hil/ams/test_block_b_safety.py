@@ -135,10 +135,9 @@ class TestB015CurrentOverlimit:
     @pytest.mark.skip(reason=(
         "B-015 needs an analog source driving PF7 (ADC3 ch3) past "
         "kImaxMa worth of voltage (≈ 4.6 V offset from kCurrentZeroMv "
-        "for 200 A, well over Vref). DAC2 ch0 is now wired to PF7 on "
+        "for 200 A, well over Vref). DAC4 ch0 is now wired to PF7 on "
         "the bench (per isc-fs/IFS08-CE-AMS#189), so this is unblocked "
-        "as soon as current_heartbeat_dac_* keys land in "
-        "ams_profile.yaml and the test body is rewritten to use the "
+        "as soon as the test body is rewritten to use the "
         "current_heartbeat fixture's set_mA(>= 200_000) helper. "
         "Tracked as B-024 in isc-fs/IFS08-CE-AMS#193."
     ))

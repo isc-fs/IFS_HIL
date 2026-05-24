@@ -133,7 +133,7 @@ class TestK101PackAndCurrentSweep:
         "K-101 needs `current_heartbeat` rewired to PF7 / ADC3_INP3 per "
         "isc-fs/IFS08-CE-AMS#189. The current fixture targets PF11 and "
         "yields None when keys are absent. Re-enable after the bench "
-        "DAC2 ch0 -> PF7 jumper is in and the profile is updated."
+        "DAC4 ch0 -> PF7 jumper is in and the profile is updated."
     ))
     def test_k101(self):
         pass

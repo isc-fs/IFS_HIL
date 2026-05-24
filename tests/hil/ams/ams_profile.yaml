@@ -74,16 +74,36 @@ dash_chg_tca_addr:        0x21
 dash_chg_tca_port:        1
 dash_chg_tca_pin:         1          # P11 -> PF10
 
-# -- Current-sensor heartbeat (bench drives PF7 / S_CURRENT via DAC2) -
-# Per the user's bench wiring spec: DAC2 ch0 (broker idx 1, channel 0)
-# is jumpered to MLC2 SLOT2_AN0 -> AMS PF7 (current-sensor Hall input,
+# -- Current-sensor heartbeat (bench drives PF7 / S_CURRENT via DAC4) -
+# Bench wiring (2026-05-24): DAC4 ch0 (silk; broker idx 3, channel 0) is
+# jumpered to MLC2 SLOT2_AN0 -> AMS PF7 (current-sensor Hall input,
 # relocated from PF11 in isc-fs/IFS08-CE-AMS#189). The conftest
-# `current_heartbeat` fixture activates when these keys are present
-# and drives 2.5 V at default (Hall zero-current point) so the
+# `current_heartbeat` fixture activates when these keys are present and
+# drives 2.5 V at default (Hall zero-current point) so the
 # current-overlimit predicate doesn't trip post-boot-grace.
-current_heartbeat_dac_idx:     1     # DAC2 (silk; broker idx = silk - 1)
-current_heartbeat_dac_channel: 0     # ch0
+#
+# Was DAC2 ch0; moved to DAC4 because DAC2 ch0 / PF7 jumper kept giving
+# inconsistent readings on the loopback bench check (probably a flaky
+# header contact). DAC4 is a clean spare chip with no other consumers.
+current_heartbeat_dac_idx:     3     # DAC4 (silk; broker idx = silk - 1)
+current_heartbeat_dac_channel: 0     # ch0 = DAC4 OUT_A = J16 pin 14
 current_heartbeat_period_ms:   50    # match acu_heartbeat cadence
+
+# -- DCDC current-sensor stim (PF8 / S_CURRENT_DCDC via DAC4 ch1) -----
+# Bench jumper: DAC4 ch1 (J16 pin 16) -> MLC2 -> AMS PF8. Documents the
+# physical wiring; a dedicated fixture isn't plumbed yet (current tests
+# don't read this signal). When a Block B/C predicate that exercises the
+# DCDC current path lands, mirror `current_heartbeat` and pull these
+# keys.
+s_current_dcdc_dac_idx:        3
+s_current_dcdc_dac_channel:    1     # ch1 = DAC4 OUT_B = J16 pin 16
+
+# -- DCDC temperature stim (PC0 / S_TEMP_DCDC via DAC4 ch2) ----------
+# Bench jumper: DAC4 ch2 (J16 pin 18) -> MLC2 -> AMS PC0 (NTC analog
+# input). Same status as s_current_dcdc above: wiring authority, no
+# active fixture yet.
+s_temp_dcdc_dac_idx:           3
+s_temp_dcdc_dac_channel:       2     # ch2 = DAC4 OUT_C = J16 pin 18
 
 # -- Relay-readback (AMS GPIO outputs sampled by bench ADC3 / MCP3208) -
 # Per the bench wiring spec: SLOT2 connector taps PB4..PB7 to ADC3
