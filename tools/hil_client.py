@@ -72,7 +72,49 @@ _CAN_CS_TO_IDX = {CFG.CS_CAN1: 0, CFG.CS_CAN2: 1, CFG.CS_CAN3: 2}
 
 
 def _call(method: str, **params: Any) -> Any:
-    return get_client().call(method, **params)
+    """RPC into the broker, with auto-recovery after a broker restart.
+
+    Long-running clients (e.g. the dashboard's hardware-poll thread) cache
+    a BrokerClient per thread for performance. When the broker is restarted
+    out from under them (e.g. `systemctl restart hil-broker`), the cached
+    socket becomes a poisoned FD: every subsequent call raises and the
+    cache never heals on its own.
+
+    Strategy:
+      1. Try the call. On ANY disconnect-like error, clear the cached
+         client unconditionally (even if .close() itself raises) and
+         re-raise immediately. The next caller's `get_client()` will
+         build a fresh connection.
+      2. The retry happens naturally at the caller's polling cadence
+         (the dashboard polls every 2 s; by the time the second poll
+         after broker bounce fires, the broker is back up).
+
+    We don't retry inside _call because:
+      - The broker isn't always ready in the millisecond after the
+        socket is reopened. Tight in-call retries hit BrokenPipeError
+        AGAIN and leave another half-dead client in cache (the
+        original bug we're fixing).
+      - One failed poll per thread per broker bounce is acceptable;
+        permanent silence is not.
+    """
+    DISCONNECT_ERRORS = (
+        ConnectionError,     # BrokerClient.call() when broker closed cleanly
+        BrokenPipeError,     # write into a half-closed FD
+        OSError,             # generic socket errors (covers ConnectionResetError)
+        ValueError,          # "I/O operation on closed file" from makefile()
+    )
+    try:
+        return get_client().call(method, **params)
+    except DISCONNECT_ERRORS:
+        # Unconditionally drop the cached client. close_client() may
+        # itself raise if the underlying socket is already torn down --
+        # we don't care, just null the cache slot directly.
+        try:
+            close_client()
+        except Exception:
+            pass
+        _tls.client = None
+        raise
 
 
 # ---------------------------------------------------------------------------
