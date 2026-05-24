@@ -45,12 +45,15 @@
   #conn-dot.ok  { background: var(--green); }
   #conn-dot.err { background: var(--red); }
 
-  /* ---- Main grid ---- */
-  main {
+  /* ---- Main layout ---- */
+  main { padding: 20px 24px; }
+
+  /* The original card grid only applies inside the Bench tab so it
+     doesn't clamp other tabs (e.g. CAN trace) to a 320 px column. */
+  #main {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
     gap: 16px;
-    padding: 20px 24px;
   }
 
   /* ---- Card ---- */
