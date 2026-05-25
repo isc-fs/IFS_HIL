@@ -1,4 +1,4 @@
-// LTC6811 chain emulator. First-cut skeleton.
+// LTC6811 chain emulator.
 //
 // What it handles:
 //   WRCFGA (0x001)   accept 6*N config bytes, no-op (we don't honour
@@ -14,22 +14,43 @@
 // Unknown commands return all-0xFF with a PEC trailer; the firmware
 // PEC15 check fails per-chip and the IC is treated as offline. That
 // surfaces as a clean fault rather than corrupted data.
+//
+// SPI plumbing: PIO instead of PL022. Two state machines on PIO0:
+//   - sm_tx (spi_slave_tx program): shifts MISO out on every SCK
+//     falling edge while CSn is LOW. Autopulls from TX FIFO at byte
+//     boundaries. Re-arms on CS rising via `jmp pin restart`.
+//   - sm_rx (spi_slave_rx program): samples MOSI on every SCK rising
+//     edge while CSn is LOW. Autopushes RX FIFO at byte boundaries.
+//     Re-arms on CS rising.
+//
+// PIO replaces PL022 because the polled-loop and per-byte FIFO
+// management of PL022 had enough latency to occasionally underrun
+// the TX FIFO at 781 kHz SCK (each underrun → master gets 0xFF in
+// place of a real data byte → that chunk's PEC fails on master →
+// IC never marked online). PIO bit timing is deterministic and
+// peripheral-driven; the CPU just keeps the byte-level FIFOs fed.
 
 #include <string.h>
 
 #include "ltc6811_emu.h"
 #include "cell_state.h"
 #include "pec15.h"
+#include "spi_slave_pio.pio.h"
 
-#include "hardware/spi.h"
+#include "hardware/pio.h"
 #include "hardware/gpio.h"
 #include "pico/stdlib.h"
 
-#define PICO_SPI            spi0
-#define PIN_SPI_RX          16   // MOSI from master
-#define PIN_SPI_CSN         17   // CS from master
-#define PIN_SPI_SCK         18
-#define PIN_SPI_TX          19   // MISO to master
+#define PIO_INST            pio0
+#define PIN_SPI_RX          16   // MOSI from master (in pin 0 of PIO IN scope)
+#define PIN_SPI_CSN         17   // CSn from master  (in pin 1, also jmp_pin)
+#define PIN_SPI_SCK         18   // SCK from master  (in pin 2)
+#define PIN_SPI_TX          19   // MISO to master   (out pin 0 of TX SM)
+
+static uint sm_tx;
+static uint sm_rx;
+static uint pio_offset_tx;
+static uint pio_offset_rx;
 
 // LTC6811 cell voltage encoding: each cell is uint16_t in units of
 // 100 microvolts (0.1 mV). cell_mV * 10 gives the on-wire value.
@@ -57,49 +78,98 @@ void ltc6811_emu_reset_stats(void) {
     g_ltc_stats.last_cmd   = 0;
 }
 
+// ----- PIO byte-level FIFO helpers ------------------------------------
+static inline bool pio_tx_writable(void) {
+    return !pio_sm_is_tx_fifo_full(PIO_INST, sm_tx);
+}
+static inline bool pio_rx_readable(void) {
+    return !pio_sm_is_rx_fifo_empty(PIO_INST, sm_rx);
+}
+static inline void pio_tx_put_raw(uint8_t b) {
+    // 32-bit FIFO; PIO program autopulls 8 bits from the OSR's MSB
+    // end (shift_left, threshold 8). The byte we want shifted out
+    // first goes in the MSB position of the 32-bit word.
+    pio_sm_put(PIO_INST, sm_tx, ((uint32_t)b) << 24);
+}
+static inline uint8_t pio_rx_get_raw(void) {
+    // RX FIFO entries are 32-bit but the byte ends up in the LOW 8
+    // bits (shift_left, threshold 8 → ISR bits 0..7 hold the byte).
+    return (uint8_t)(pio_sm_get(PIO_INST, sm_rx) & 0xFFu);
+}
+
 // ltc6811_emu_response_for() is defined further down, after the
 // response_pool[] static is in scope.
 
 void ltc6811_emu_init(void) {
-    spi_init(PICO_SPI, 1000 * 1000);          // 1 MHz to match LTC6820 typical
-    spi_set_slave(PICO_SPI, true);
-    // SPI mode 3 (CPOL=1, CPHA=1) -- this is what the AMS firmware
-    // configures SPI1 with (CLKPolarity=HIGH, CLKPhase=2EDGE in
-    // main.c:573-574). Mode 3 is also the LTC6820 native protocol.
-    // Mode 0 (which we had initially) leaves the Pico's slave
-    // expecting SCK idle low + rising-edge sample, while the master
-    // is driving SCK idle high + falling-edge transition + rising-edge
-    // sample. Pico ends up sampling garbage and n_spi_xact stays at 0.
-    spi_set_format(PICO_SPI, 8, SPI_CPOL_1, SPI_CPHA_1, SPI_MSB_FIRST);
+    // Claim two state machines on PIO0.
+    sm_tx = (uint)pio_claim_unused_sm(PIO_INST, true);
+    sm_rx = (uint)pio_claim_unused_sm(PIO_INST, true);
 
-    // Set alternate function FIRST, then force pulls. (pico-sdk's
-    // gpio_set_function doesn't touch the PADS pull bits, so order
-    // shouldn't matter -- but the previous order had pulls _before_
-    // function-set with no re-apply, and we observed first-bit-after-
-    // long-idle RX corruption (master MOSI floating between xacts
-    // → Pico samples stray HIGH as bit 7 of byte 0). Force the
-    // pull-down explicitly here so it definitely sticks.
-    gpio_set_function(PIN_SPI_RX,  GPIO_FUNC_SPI);
-    gpio_set_function(PIN_SPI_TX,  GPIO_FUNC_SPI);
-    gpio_set_function(PIN_SPI_SCK, GPIO_FUNC_SPI);
-    gpio_set_function(PIN_SPI_CSN, GPIO_FUNC_SPI);
+    // Load both PIO programs into instruction memory.
+    pio_offset_tx = pio_add_program(PIO_INST, &spi_slave_tx_program);
+    pio_offset_rx = pio_add_program(PIO_INST, &spi_slave_rx_program);
 
-    // Internal pull-downs on SCK + MOSI: while AMS master is idle
-    // between xacts, MOSI may be released (HiZ). Without a pull-down
-    // the long wire from MLC2 J8 can float HIGH, and the very first
-    // bit Pico samples on the next CS-fall captures the stray HIGH
-    // instead of master's actual first bit (which arrives a few-ns
-    // later). Internal ~50 kOhm pull is plenty to overcome wire
-    // capacitance in <1 us; the master easily overrides during a
-    // real drive cycle (push-pull is single-digit ohms).
-    // CS pin gets pulled UP (idle = deasserted) since master only
-    // pulses it LOW briefly.
+    // Hand the four SPI pins over to PIO. Pin numbers 16/17/18/19 are
+    // contiguous so a single in_base = 16 lets both SMs reference
+    // MOSI / CSn / SCK by relative offset 0 / 1 / 2.
+    pio_gpio_init(PIO_INST, PIN_SPI_RX);
+    pio_gpio_init(PIO_INST, PIN_SPI_CSN);
+    pio_gpio_init(PIO_INST, PIN_SPI_SCK);
+    pio_gpio_init(PIO_INST, PIN_SPI_TX);
+
+    // MISO direction = output (only the TX SM drives it; RX SM
+    // doesn't touch out pins). Other three pins are inputs (default
+    // after pio_gpio_init).
+    pio_sm_set_consecutive_pindirs(PIO_INST, sm_tx, PIN_SPI_TX, 1, true);
+
+    // Pulls: MOSI + SCK weakly DOWN (master MOSI is HiZ between
+    // xacts; a long patch cable would otherwise float HIGH and the
+    // PIO's `wait 1 pin SCK` would falsely fire on bus noise). CSn
+    // pulled UP because master only pulses it LOW.
     gpio_disable_pulls(PIN_SPI_SCK);
     gpio_disable_pulls(PIN_SPI_RX);
     gpio_disable_pulls(PIN_SPI_CSN);
     gpio_pull_down(PIN_SPI_SCK);
     gpio_pull_down(PIN_SPI_RX);
     gpio_pull_up(PIN_SPI_CSN);
+
+    // ---- TX state-machine config ----------------------------------
+    pio_sm_config c_tx = spi_slave_tx_program_get_default_config(pio_offset_tx);
+    // IN scope: contiguous block starting at MOSI (16). `wait 0 pin 1`
+    // = CSn LOW; `wait 0 pin 2` / `wait 1 pin 2` = SCK falling/rising.
+    sm_config_set_in_pins(&c_tx, PIN_SPI_RX);
+    // OUT scope: MISO at 19, 1 pin wide. `out pins, 1` writes a single
+    // bit to MISO.
+    sm_config_set_out_pins(&c_tx, PIN_SPI_TX, 1);
+    // JMP pin: CSn. `jmp pin restart` re-arms when CSn goes HIGH.
+    sm_config_set_jmp_pin(&c_tx, PIN_SPI_CSN);
+    // Autopull at 8 bits; shift_right=false → MSB shifts out first
+    // (matches LTC6811 wire-order MSB-first).
+    sm_config_set_out_shift(&c_tx, false /* shift_right */, true /* autopull */, 8);
+    // Give the TX half of the FIFO 8 entries (4 default + 4 from
+    // joining the unused RX half). Buys headroom against bursty CPU.
+    sm_config_set_fifo_join(&c_tx, PIO_FIFO_JOIN_TX);
+    pio_sm_init(PIO_INST, sm_tx, pio_offset_tx, &c_tx);
+
+    // ---- RX state-machine config ----------------------------------
+    pio_sm_config c_rx = spi_slave_rx_program_get_default_config(pio_offset_rx);
+    sm_config_set_in_pins(&c_rx, PIN_SPI_RX);
+    sm_config_set_jmp_pin(&c_rx, PIN_SPI_CSN);
+    // Autopush at 8 bits, shift_left so first sampled bit ends up at
+    // ISR bit 7 (MSB-first reception).
+    sm_config_set_in_shift(&c_rx, false /* shift_right */, true /* autopush */, 8);
+    sm_config_set_fifo_join(&c_rx, PIO_FIFO_JOIN_RX);
+    pio_sm_init(PIO_INST, sm_rx, pio_offset_rx, &c_rx);
+
+    // Pre-load the TX FIFO with a few 0xFF pad bytes so the very
+    // first CS-fall after init finds MISO ready to drive HIGH (idle
+    // MISO state). Subsequent CS-rising handlers re-prime in the
+    // service loop.
+    for (int i = 0; i < 4; i++) pio_tx_put_raw(0xFFu);
+
+    // Bring both SMs out of reset and let them run.
+    pio_sm_set_enabled(PIO_INST, sm_tx, true);
+    pio_sm_set_enabled(PIO_INST, sm_rx, true);
 
     ltc6811_emu_reset_stats();
 }
@@ -140,26 +210,6 @@ static void build_rdaux_chunk(uint8_t ltc_idx, uint8_t group, uint8_t out[8]) {
     pec15_append(out, 6);
 }
 
-// Continuous TX streaming + RX command parsing.
-//
-// Why streaming: the AMS firmware uses HAL_SPI_TransmitReceive per
-// ltc6820.cpp:113 -- one CS pulse wraps a 4-byte cmd + N data bytes
-// clocked back-to-back. The slave must drive MISO with response bytes
-// concurrently with the master clocking them. A polled "wait for cmd,
-// then write response" strategy is always 80 bytes too late.
-//
-// Strategy: keep TX FIFO always full with bytes from a 80-byte
-// "current response" buffer (10 chips * 8 bytes for RDCVx / RDAUXx).
-// The master gets valid data immediately, regardless of the cmd-parse
-// latency. When we DO parse a new cmd, swap the response buffer
-// contents -- the next time master clocks, it gets the right group.
-//
-// First-byte fidelity: at init, we pre-build the RDCVA group 0 response
-// (cells 1..3). Most LTC chain init sequences start with WRCFGA + ADCV
-// + RDCVA, so the first read the firmware does will already have the
-// right data in TX FIFO. Subsequent RDCVB/C/D get the correct response
-// on the NEXT poll cycle after cmd parsing catches up.
-
 // Each "response" is 4 bytes of pad (master ignores during its cmd
 // phase) + 80 bytes of LTC chain data (10 chips * 8 bytes). The pad
 // realigns our streamed buffer to where the master expects the slave
@@ -169,18 +219,14 @@ static void build_rdaux_chunk(uint8_t ltc_idx, uint8_t group, uint8_t out[8]) {
 
 // 6 pre-built response buffers indexed by cmd: RDCVA/B/C/D + RDAUXA/B.
 // Computed at init (and on every cell/temp change via the USB cmds).
-// On cmd parse we just swap which buffer the streamer reads from --
-// fast enough to fit in the ~8 us between master-byte-4 and byte-5.
+// On cmd parse we just swap which buffer the streamer reads from.
 enum { RSP_RDCVA, RSP_RDCVB, RSP_RDCVC, RSP_RDCVD, RSP_RDAUXA, RSP_RDAUXB, RSP_COUNT };
 static uint8_t response_pool[RSP_COUNT][RESPONSE_LEN];
 static const uint8_t *current_response = response_pool[RSP_RDCVA];  // default
 
 // TX-snapshot diagnostic. Records every byte we push to TX FIFO during
 // a single transaction so the host can verify the streamer's output
-// matches the intended response_pool. Captured into `tx_snap` until
-// either the buffer fills (LTC_RESPONSE_LEN) or CS rises. On CS-rising
-// the working snapshot is frozen into `tx_snap_published` and the next
-// xact starts capturing fresh into `tx_snap` again.
+// matches the intended response_pool.
 static uint8_t  tx_snap[RESPONSE_LEN];
 static uint16_t tx_snap_idx          = 0;
 static uint16_t tx_snap_cmd_recorded = 0xFFFFu;
@@ -189,11 +235,7 @@ static uint16_t tx_snap_published_len = 0;
 static uint16_t tx_snap_published_cmd = 0xFFFFu;
 
 // RX-snapshot diagnostic, mirror of tx_snap: records the first
-// LTC_RESPONSE_LEN bytes the master clocked into us on MOSI during a
-// transaction. Lets the host compare what bits actually arrived on the
-// wire vs what AMS pack_command(...) was supposed to emit. The first 4
-// entries are the cmd frame [cmd_hi, cmd_lo, pec_hi, pec_lo]; everything
-// after is the write data (or 0xFF scratch on reads).
+// LTC_RESPONSE_LEN bytes the master clocked into us on MOSI.
 static uint8_t  rx_snap[RESPONSE_LEN];
 static uint16_t rx_snap_idx          = 0;
 static uint8_t  rx_snap_published[RESPONSE_LEN];
@@ -253,49 +295,36 @@ const uint8_t *ltc6811_emu_last_rx_snapshot(uint16_t *out_len) {
     return rx_snap_published;
 }
 
-// Push one byte to TX FIFO and record it in the per-xact snapshot
-// buffer (truncating once full). Re-verifies writability immediately
-// before writing -- the PL022 TNF flag can lag the actual FIFO state
-// by a cycle or two after a previous write, so a caller-side check
-// followed by a second push can silently drop. Returns 1 if the byte
-// went in, 0 if FIFO was full.
+// Push one byte to PIO TX FIFO and record it in the per-xact
+// snapshot. Returns 1 if the byte went in, 0 if FIFO is full.
 static inline int tx_push(uint8_t b) {
-    if (!spi_is_writable(PICO_SPI)) return 0;
-    spi_get_hw(PICO_SPI)->dr = b;
+    if (!pio_tx_writable()) return 0;
+    pio_tx_put_raw(b);
     if (tx_snap_idx < RESPONSE_LEN) {
         tx_snap[tx_snap_idx++] = b;
     }
     return 1;
 }
 
-// Streamer design (v0.1.5):
+// Service loop:
+//   - On CS rising (xact ended): drain any RX tail bytes into the
+//     current snapshot, freeze TX+RX snapshots, clear PIO FIFOs,
+//     restart PIO SMs to a clean state, pre-load 4 pad bytes for the
+//     next CS-fall, reset framing state.
+//   - On CS low (active xact): pump data bytes from current_response
+//     into TX FIFO after cmd is parsed. The PIO TX SM autopulls
+//     bytes at its own pace; CPU just has to keep the FIFO non-empty.
+//   - Always: drain RX FIFO, parse cmd at first 4-byte chunk.
 //
-// The PL022 TX FIFO is 8 bytes deep. The master's cmd phase is exactly
-// 4 bytes (a daisy-chain command frame). If we pre-load more than 4
-// bytes at CS-fall, the extras spill into the data phase and the
-// master receives them in place of real cell data -- so the first
-// chip's PEC check fails.
-//
-// The fix: at CS-fall pre-load EXACTLY RESPONSE_PAD (=4) pad bytes
-// into the TX FIFO. While those are clocking out (master's cmd phase),
-// we have time to parse the inbound cmd and pick the right response
-// buffer. After cmd parse we start streaming data bytes from
-// current_response[RESPONSE_PAD..] into the FIFO. The master sees:
-//   bytes 0..3  = pad (ignored, cmd phase)
-//   bytes 4..83 = data from the buffer matching the parsed cmd
-//
-// Timing budget: at 1 MHz SCK, one master byte takes 8 µs. The cmd
-// phase is 32 µs. STM32H7 also inserts a small CPU gap between
-// HAL_SPI_Transmit (the 4-byte cmd send) and HAL_SPI_TransmitReceive
-// (the 80-byte read), giving us extra headroom. Our service loop
-// runs every ~1 µs (no blocking calls in main.c) so cmd parse easily
-// completes before the master starts byte 4.
+// With PIO, the bit-level timing is hardware-driven (deterministic
+// 1-2 PIO cycles per SCK edge) so CPU service-loop latency only
+// affects how full the FIFOs stay -- not bit alignment. As long as
+// we keep TX FIFO non-empty during the data phase, MISO is correct.
 void ltc6811_emu_service(void) {
     static uint8_t  rx_buf[4];
     static uint8_t  rx_idx              = 0;
     static int      tx_data_idx         = 0;   // index into current_response[RESPONSE_PAD..]
     static int      cmd_parsed_this_xact = 0;
-    static int      cs_fall_setup_done   = 0;
     static int      cs_was_low           = 0;
     static int      response_init_done   = 0;
 
@@ -308,16 +337,11 @@ void ltc6811_emu_service(void) {
     int cs_now = gpio_get(PIN_SPI_CSN);
 
     if (cs_was_low && cs_now) {
-        // CS rising edge: transaction ended. Drain any RX bytes that
-        // landed between the last service iteration and now (these are
-        // the tail end of the just-finished xact, e.g. the last 1-2
-        // scratch 0xFF bytes the master clocked before deasserting CS)
-        // INTO the snapshot, then freeze the snapshot, then SSE-cycle
-        // to clear both FIFOs. Without this, the FIFO-resident tail
-        // bytes get drained on the *next* service iteration and
-        // pollute the NEW xact's snapshot as a stray-FF prefix.
-        while (spi_is_readable(PICO_SPI)) {
-            uint8_t tail = (uint8_t)spi_get_hw(PICO_SPI)->dr;
+        // CS rising edge: drain any RX bytes still in PIO FIFO from
+        // the just-finished xact INTO the outgoing snapshot, then
+        // freeze, then clear FIFOs + restart SMs to a clean state.
+        while (pio_rx_readable()) {
+            uint8_t tail = pio_rx_get_raw();
             g_ltc_stats.last_rx[g_ltc_stats.rx_byte_count % 8u] = tail;
             g_ltc_stats.rx_byte_count++;
             if (rx_snap_idx < RESPONSE_LEN) {
@@ -335,64 +359,52 @@ void ltc6811_emu_service(void) {
         for (uint16_t i = 0; i < rx_snap_idx; i++) rx_snap_published[i] = rx_snap[i];
         rx_snap_idx          = 0;
 
-        // SSE cycle to guarantee FIFOs are empty. Re-drain afterward
-        // as belt-and-braces in case the cycle has a 1-cycle update
-        // lag on the RNE flag.
-        spi_get_hw(PICO_SPI)->cr1 &= ~SPI_SSPCR1_SSE_BITS;
-        spi_get_hw(PICO_SPI)->cr1 |=  SPI_SSPCR1_SSE_BITS;
-        while (spi_is_readable(PICO_SPI)) {
-            (void)spi_get_hw(PICO_SPI)->dr;
-        }
+        // Clear PIO FIFOs and force SMs back to the program's start
+        // address. Without this, a stale byte left in TX FIFO from
+        // the previous xact would be the first byte master clocks on
+        // the next CS-fall.
+        pio_sm_clear_fifos(PIO_INST, sm_tx);
+        pio_sm_clear_fifos(PIO_INST, sm_rx);
+        pio_sm_restart(PIO_INST, sm_tx);
+        pio_sm_restart(PIO_INST, sm_rx);
+        // Force PC back to each program's entry point.
+        pio_sm_exec(PIO_INST, sm_tx,
+                    pio_encode_jmp(pio_offset_tx + spi_slave_tx_offset_restart));
+        pio_sm_exec(PIO_INST, sm_rx,
+                    pio_encode_jmp(pio_offset_rx + spi_slave_rx_offset_restart));
+
+        // Pre-load 4 pad bytes for the NEXT xact's cmd phase. With
+        // these in TX FIFO before CS falls again, the TX SM autopulls
+        // and drives MISO immediately on the first SCK edge -- no
+        // dependency on CPU latency for the cmd-phase MISO state.
+        for (int i = 0; i < RESPONSE_PAD; i++) pio_tx_put_raw(0xFFu);
 
         rx_idx               = 0;
         tx_data_idx          = 0;
         cmd_parsed_this_xact = 0;
-        cs_fall_setup_done   = 0;
         g_ltc_stats.n_cs_cycles++;
     }
     cs_was_low = !cs_now;
 
-    if (!cs_now) {
-        // Active transaction.
-        if (!cs_fall_setup_done) {
-            // First service call after CS-fall: push EXACTLY 4 pad
-            // bytes into the TX FIFO (covers master bytes 0..3 = cmd
-            // phase). Do NOT push more -- the rest of the FIFO must
-            // stay free for the post-cmd-parse data stream so the
-            // first data byte actually comes from current_response,
-            // not from a stale pad.
-            for (int i = 0; i < RESPONSE_PAD; i++) {
-                while (!spi_is_writable(PICO_SPI)) { /* spin */ }
-                tx_push(0xFFu);
-            }
-            cs_fall_setup_done = 1;
-        }
-
-        if (cmd_parsed_this_xact) {
-            // Cmd parsed: pump bytes into the TX FIFO. One loop, one
-            // gate -- branch inside picks data vs pad. Two separate
-            // loops would race the PL022 TNF flag (lazy update after
-            // a write) and let a stray pad byte slip into the data
-            // stream every few FIFO refills, corrupting the response.
-            while (spi_is_writable(PICO_SPI)) {
-                uint8_t b = (tx_data_idx < (RESPONSE_LEN - RESPONSE_PAD))
-                                ? current_response[RESPONSE_PAD + tx_data_idx]
-                                : 0xFFu;
-                if (!tx_push(b)) break;          // FIFO truly full
-                if (tx_data_idx < (RESPONSE_LEN - RESPONSE_PAD)) tx_data_idx++;
-            }
+    if (!cs_now && cmd_parsed_this_xact) {
+        // Cmd parsed mid-xact: pump data bytes from current_response
+        // into TX FIFO until either FIFO is full or buffer exhausted.
+        // PIO SM autopulls at its own pace; we just keep the FIFO fed.
+        while (pio_tx_writable()) {
+            uint8_t b = (tx_data_idx < (RESPONSE_LEN - RESPONSE_PAD))
+                            ? current_response[RESPONSE_PAD + tx_data_idx]
+                            : 0xFFu;
+            if (!tx_push(b)) break;
+            if (tx_data_idx < (RESPONSE_LEN - RESPONSE_PAD)) tx_data_idx++;
         }
     }
 
-    // RX side: drain bytes, parse cmd every 4 bytes, update response
-    // buffer pointer.
-    while (spi_is_readable(PICO_SPI)) {
-        uint8_t b = (uint8_t)spi_get_hw(PICO_SPI)->dr;
-        // Debug: keep a sliding window of the last 8 raw bytes
+    // RX side: drain bytes, parse cmd at first 4-byte chunk, update
+    // response buffer pointer.
+    while (pio_rx_readable()) {
+        uint8_t b = pio_rx_get_raw();
         g_ltc_stats.last_rx[g_ltc_stats.rx_byte_count % 8u] = b;
         g_ltc_stats.rx_byte_count++;
-        // Per-xact RX snapshot (capped). Use to compare actual MOSI
-        // bytes against AMS pack_command(...) ground truth.
         if (rx_snap_idx < RESPONSE_LEN) {
             rx_snap[rx_snap_idx++] = b;
         }
@@ -405,13 +417,6 @@ void ltc6811_emu_service(void) {
         g_ltc_stats.n_spi_xact++;
         g_ltc_stats.last_cmd = cmd;
 
-        // Whitelist of LTC6811 opcodes we care about. Anything outside
-        // this set is most likely a data-byte chunk the master clocks
-        // during a read or write phase (e.g. all 0xFF -> cmd=0x7FF).
-        // Tracking these separately tells us if real LTC commands are
-        // reaching the slave. We only swap current_response on the
-        // FIRST parsed cmd of each xact -- subsequent 4-byte "chunks"
-        // are data, not cmds, and must not retarget the streamer.
         if (!cmd_parsed_this_xact) {
             int is_known = 0;
             switch (cmd) {
@@ -442,9 +447,7 @@ void ltc6811_emu_service(void) {
                 case 0x00E:  // RDAUXB
                     is_known = 1; current_response = response_pool[RSP_RDAUXB]; break;
                 default:
-                    // ADCV variants: 0x260..0x27F, 0x340..0x37F
                     if ((cmd & 0x7C0u) == 0x260u || (cmd & 0x7C0u) == 0x340u) is_known = 1;
-                    // ADAX variants: 0x460..0x47F, 0x540..0x57F
                     if ((cmd & 0x7C0u) == 0x460u || (cmd & 0x7C0u) == 0x540u) is_known = 1;
                     break;
             }

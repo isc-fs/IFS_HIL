@@ -22,11 +22,21 @@ target_include_directories(pico_ltc_emulator PRIVATE
     src
 )
 
+# Compile the PIO assembly that implements the SPI mode-3 slave with
+# deterministic bit timing (replaces PL022's polled-loop). pioasm
+# emits spi_slave_pio.pio.h into the build dir; the include path is
+# added automatically by pico_generate_pio_header.
+pico_generate_pio_header(pico_ltc_emulator
+    ${CMAKE_CURRENT_LIST_DIR}/src/spi_slave_pio.pio
+)
+
 target_link_libraries(pico_ltc_emulator
     pico_stdlib
     pico_unique_id
     pico_bootrom        # reset_usb_boot()
-    hardware_spi
+    hardware_pio        # PIO state machines for SPI slave
+    hardware_spi        # no longer used in the hot path; left in for
+                        # convenience pio_sm_unclaim/etc. helpers
     hardware_dma
     hardware_irq
     # TinyUSB is pulled in transitively by pico_stdio_usb (via
