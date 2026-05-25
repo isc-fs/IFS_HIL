@@ -60,7 +60,27 @@ void ltc6811_emu_reset_stats(void) {
 void ltc6811_emu_init(void) {
     spi_init(PICO_SPI, 1000 * 1000);          // 1 MHz to match LTC6820 typical
     spi_set_slave(PICO_SPI, true);
-    spi_set_format(PICO_SPI, 8, SPI_CPOL_0, SPI_CPHA_0, SPI_MSB_FIRST);
+    // SPI mode 3 (CPOL=1, CPHA=1) -- this is what the AMS firmware
+    // configures SPI1 with (CLKPolarity=HIGH, CLKPhase=2EDGE in
+    // main.c:573-574). Mode 3 is also the LTC6820 native protocol.
+    // Mode 0 (which we had initially) leaves the Pico's slave
+    // expecting SCK idle low + rising-edge sample, while the master
+    // is driving SCK idle high + falling-edge transition + rising-edge
+    // sample. Pico ends up sampling garbage and n_spi_xact stays at 0.
+    spi_set_format(PICO_SPI, 8, SPI_CPOL_1, SPI_CPHA_1, SPI_MSB_FIRST);
+
+    // Enable internal pull-downs on SCK + MOSI BEFORE switching to SPI
+    // alternate function. While the MLC STM32 is in BL mode, its SPI1
+    // pins (PA5/6/7) sit in HiZ reset state -- a long wire between J8
+    // and the Pico will float and pick up enough noise to clock the
+    // Pico's SPI slave, which then drives MISO with garbage and
+    // disrupts the BL's CAN-flash timing. Pulling these down at the
+    // Pico end forces a clean low when nothing is driving the wire.
+    // The MLC's SPI peripheral easily overrides the ~50 kOhm internal
+    // pull-down during real transfers (typical SPI drive strength
+    // is single-digit ohms).
+    gpio_pull_down(PIN_SPI_SCK);
+    gpio_pull_down(PIN_SPI_RX);
 
     gpio_set_function(PIN_SPI_RX,  GPIO_FUNC_SPI);
     gpio_set_function(PIN_SPI_TX,  GPIO_FUNC_SPI);
