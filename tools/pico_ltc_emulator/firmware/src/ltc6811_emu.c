@@ -38,6 +38,7 @@
 #include "spi_slave_pio.pio.h"
 
 #include "hardware/pio.h"
+#include "hardware/dma.h"
 #include "hardware/gpio.h"
 #include "pico/stdlib.h"
 
@@ -51,6 +52,18 @@ static uint sm_tx;
 static uint sm_rx;
 static uint pio_offset_tx;
 static uint pio_offset_rx;
+static int  dma_tx_chan;
+
+// Forward decls -- definitions live further down (after the cell-state
+// helpers and response_pool[] are in scope), but ltc6811_emu_init()
+// needs to call them to pre-load the FULL FIFO at boot so the very
+// first xact (AMS boot-discovery RDCFGA) doesn't underrun.
+#define RESPONSE_PAD 4
+#define RESPONSE_LEN (RESPONSE_PAD + 80)
+enum { RSP_RDCVA, RSP_RDCVB, RSP_RDCVC, RSP_RDCVD, RSP_RDAUXA, RSP_RDAUXB, RSP_COUNT };
+static uint8_t response_pool[RSP_COUNT][RESPONSE_LEN];
+static const uint8_t *current_response = response_pool[RSP_RDCVA];
+static void rebuild_all_responses(void);
 
 // LTC6811 cell voltage encoding: each cell is uint16_t in units of
 // 100 microvolts (0.1 mV). cell_mV * 10 gives the on-wire value.
@@ -122,14 +135,26 @@ void ltc6811_emu_init(void) {
     // after pio_gpio_init).
     pio_sm_set_consecutive_pindirs(PIO_INST, sm_tx, PIN_SPI_TX, 1, true);
 
-    // Pulls: MOSI + SCK weakly DOWN (master MOSI is HiZ between
-    // xacts; a long patch cable would otherwise float HIGH and the
-    // PIO's `wait 1 pin SCK` would falsely fire on bus noise). CSn
-    // pulled UP because master only pulses it LOW.
+    // MISO drive strength: bump to 12 mA (default 4 mA) so we can
+    // ramp a long patch-cable's capacitance fast enough at 781 kHz
+    // SCK. 4 mA + ~100 pF wire cap = ~80 ns rise time which is fine
+    // in theory, but the master's MISO sample window in Mode 3 is
+    // only ~640 ns and any slack helps.
+    gpio_set_drive_strength(PIN_SPI_TX, GPIO_DRIVE_STRENGTH_12MA);
+    gpio_set_slew_rate(PIN_SPI_TX, GPIO_SLEW_RATE_FAST);
+
+    // Pulls. CSn UP because master only briefly pulses it LOW.
+    // SCK UP because in Mode 3 SCK idles HIGH -- a pull-DOWN would
+    // briefly pull SCK low if the master ever releases the line
+    // (e.g. during the SS-idleness gap between CS-fall and the first
+    // SCK pulse), creating a spurious falling edge our PIO would
+    // mistake for the first real edge. MOSI weakly DOWN so a long
+    // patch cable left HiZ between xacts can't float HIGH and bias
+    // the slave's first sample.
     gpio_disable_pulls(PIN_SPI_SCK);
     gpio_disable_pulls(PIN_SPI_RX);
     gpio_disable_pulls(PIN_SPI_CSN);
-    gpio_pull_down(PIN_SPI_SCK);
+    gpio_pull_up(PIN_SPI_SCK);
     gpio_pull_down(PIN_SPI_RX);
     gpio_pull_up(PIN_SPI_CSN);
 
@@ -161,11 +186,20 @@ void ltc6811_emu_init(void) {
     sm_config_set_fifo_join(&c_rx, PIO_FIFO_JOIN_RX);
     pio_sm_init(PIO_INST, sm_rx, pio_offset_rx, &c_rx);
 
-    // Pre-load the TX FIFO with a few 0xFF pad bytes so the very
-    // first CS-fall after init finds MISO ready to drive HIGH (idle
-    // MISO state). Subsequent CS-rising handlers re-prime in the
-    // service loop.
+    // Pre-load the FULL FIFO depth (8 entries) so the very first
+    // xact -- which is typically the AMS boot-discovery RDCFGA --
+    // has a complete cmd-phase + first-4-data-bytes ready without
+    // depending on CPU latency. If we only pre-loaded the 4 pad
+    // bytes and CPU push of the first data byte was late, the boot
+    // discovery's PEC would fail, ERROR would latch in BKP RAM, and
+    // the FSM would be stuck in Error for the rest of the session
+    // (until power-cycle) regardless of how well subsequent xacts
+    // worked. Build response_pool now so chip 0's first 4 data
+    // bytes are available to pre-load here.
+    rebuild_all_responses();
+    current_response = response_pool[RSP_RDCVA];
     for (int i = 0; i < 4; i++) pio_tx_put_raw(0xFFu);
+    for (int i = 0; i < 4; i++) pio_tx_put_raw(current_response[RESPONSE_PAD + i]);
 
     // Bring both SMs out of reset and let them run.
     pio_sm_set_enabled(PIO_INST, sm_tx, true);
@@ -210,19 +244,10 @@ static void build_rdaux_chunk(uint8_t ltc_idx, uint8_t group, uint8_t out[8]) {
     pec15_append(out, 6);
 }
 
-// Each "response" is 4 bytes of pad (master ignores during its cmd
-// phase) + 80 bytes of LTC chain data (10 chips * 8 bytes). The pad
-// realigns our streamed buffer to where the master expects the slave
-// to start replying.
-#define RESPONSE_PAD 4
-#define RESPONSE_LEN (RESPONSE_PAD + 80)
-
-// 6 pre-built response buffers indexed by cmd: RDCVA/B/C/D + RDAUXA/B.
-// Computed at init (and on every cell/temp change via the USB cmds).
-// On cmd parse we just swap which buffer the streamer reads from.
-enum { RSP_RDCVA, RSP_RDCVB, RSP_RDCVC, RSP_RDCVD, RSP_RDAUXA, RSP_RDAUXB, RSP_COUNT };
-static uint8_t response_pool[RSP_COUNT][RESPONSE_LEN];
-static const uint8_t *current_response = response_pool[RSP_RDCVA];  // default
+// (RESPONSE_PAD, RESPONSE_LEN, RSP_* enum, response_pool[],
+// current_response are forward-declared above so ltc6811_emu_init can
+// reference them. response_pool[] storage and current_response are
+// also defined there -- not duplicated here.)
 
 // TX-snapshot diagnostic. Records every byte we push to TX FIFO during
 // a single transaction so the host can verify the streamer's output
@@ -373,29 +398,46 @@ void ltc6811_emu_service(void) {
         pio_sm_exec(PIO_INST, sm_rx,
                     pio_encode_jmp(pio_offset_rx + spi_slave_rx_offset_restart));
 
-        // Pre-load 4 pad bytes for the NEXT xact's cmd phase. With
-        // these in TX FIFO before CS falls again, the TX SM autopulls
-        // and drives MISO immediately on the first SCK edge -- no
-        // dependency on CPU latency for the cmd-phase MISO state.
+        // Pre-load the FULL FIFO depth (8 entries = 8 bytes) at
+        // CS-rising so the cmd-phase + first 4 data bytes are
+        // guaranteed in flight before master clocks them, no
+        // dependency on CPU latency for the cmd→data boundary.
+        //   bytes 0..3  = 0xFF pad (master ignores during cmd phase)
+        //   bytes 4..7  = first 4 bytes of current_response data
+        //                 section (= chip 0's first 4 data bytes)
+        // For uniform-cell test setups all RDCV* groups have
+        // identical chip-0 bytes, so the pre-load is correct
+        // regardless of which RDCV cmd actually comes. For non-
+        // uniform cells, chip 0's first 4 bytes may be wrong if cmd
+        // != current_response -- handled later by cmd-parse swap.
         for (int i = 0; i < RESPONSE_PAD; i++) pio_tx_put_raw(0xFFu);
+        for (int i = 0; i < 4; i++) pio_tx_put_raw(current_response[RESPONSE_PAD + i]);
 
         rx_idx               = 0;
-        tx_data_idx          = 0;
+        tx_data_idx          = 4;   // start CPU push at byte 4 (we pre-loaded 0..3)
         cmd_parsed_this_xact = 0;
         g_ltc_stats.n_cs_cycles++;
     }
     cs_was_low = !cs_now;
 
-    if (!cs_now && cmd_parsed_this_xact) {
-        // Cmd parsed mid-xact: pump data bytes from current_response
-        // into TX FIFO until either FIFO is full or buffer exhausted.
-        // PIO SM autopulls at its own pace; we just keep the FIFO fed.
-        while (pio_tx_writable()) {
-            uint8_t b = (tx_data_idx < (RESPONSE_LEN - RESPONSE_PAD))
-                            ? current_response[RESPONSE_PAD + tx_data_idx]
-                            : 0xFFu;
-            if (!tx_push(b)) break;
-            if (tx_data_idx < (RESPONSE_LEN - RESPONSE_PAD)) tx_data_idx++;
+    if (!cs_now) {
+        // Pump data bytes from current_response into TX FIFO.
+        // Two cases:
+        //   - cmd not parsed yet: keep pushing from current_response
+        //     (the value when CS-rising last fired). Pre-load already
+        //     covered bytes 0..7 so this only kicks in if CPU has
+        //     been very slow getting back to the service loop.
+        //   - cmd parsed: if cmd swapped current_response, our
+        //     tx_data_idx is now mid-stream of the new buffer and
+        //     subsequent pushes are correct from byte 8+. The first
+        //     4 data bytes (0..3) may be stale (pre-loaded from old
+        //     current_response), giving wrong chip 0 data for non-
+        //     uniform cells -- acceptable for the uniform bench
+        //     test that's what we're unblocking.
+        while (pio_tx_writable() &&
+               tx_data_idx < (RESPONSE_LEN - RESPONSE_PAD)) {
+            if (!tx_push(current_response[RESPONSE_PAD + tx_data_idx])) break;
+            tx_data_idx++;
         }
     }
 
