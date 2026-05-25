@@ -12,7 +12,7 @@
 
 #define LINE_MAX 96
 
-#define FW_VERSION_STR "0.1.9"
+#define FW_VERSION_STR "0.1.10"
 
 usb_cmd_stats_t g_cmd_stats;
 
