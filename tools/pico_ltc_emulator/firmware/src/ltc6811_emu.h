@@ -62,6 +62,15 @@ const uint8_t *ltc6811_emu_response_for(uint16_t cmd);
 // never reflects host-side state changes.
 void ltc6811_emu_refresh_responses(void);
 
+// Get a snapshot of the bytes the SPI slave actually pushed to its TX
+// FIFO during the most recent transaction (truncated to LTC_RESPONSE_LEN).
+// `*out_len` returns how many bytes were captured before CS rose (could
+// be < LTC_RESPONSE_LEN for short xacts like ADCV-only). `*out_cmd`
+// returns the cmd that was parsed for that xact (0xFFFF if none).
+// Use to verify the streamer is actually clocking out the bytes you
+// think it is -- compares against ltc6811_emu_response_for(cmd).
+const uint8_t *ltc6811_emu_last_tx_snapshot(uint16_t *out_cmd, uint16_t *out_len);
+
 #ifdef __cplusplus
 }
 #endif

@@ -164,6 +164,19 @@ enum { RSP_RDCVA, RSP_RDCVB, RSP_RDCVC, RSP_RDCVD, RSP_RDAUXA, RSP_RDAUXB, RSP_C
 static uint8_t response_pool[RSP_COUNT][RESPONSE_LEN];
 static const uint8_t *current_response = response_pool[RSP_RDCVA];  // default
 
+// TX-snapshot diagnostic. Records every byte we push to TX FIFO during
+// a single transaction so the host can verify the streamer's output
+// matches the intended response_pool. Captured into `tx_snap` until
+// either the buffer fills (LTC_RESPONSE_LEN) or CS rises. On CS-rising
+// the working snapshot is frozen into `tx_snap_published` and the next
+// xact starts capturing fresh into `tx_snap` again.
+static uint8_t  tx_snap[RESPONSE_LEN];
+static uint16_t tx_snap_idx          = 0;
+static uint16_t tx_snap_cmd_recorded = 0xFFFFu;
+static uint8_t  tx_snap_published[RESPONSE_LEN];
+static uint16_t tx_snap_published_len = 0;
+static uint16_t tx_snap_published_cmd = 0xFFFFu;
+
 static void build_one_response(int slot, int is_rdcv, int is_rdaux, uint8_t group) {
     uint8_t *buf = response_pool[slot];
     // 4 bytes of pad first (don't-care during master's cmd phase)
@@ -207,6 +220,27 @@ const uint8_t *ltc6811_emu_response_for(uint16_t cmd) {
     }
 }
 
+const uint8_t *ltc6811_emu_last_tx_snapshot(uint16_t *out_cmd, uint16_t *out_len) {
+    if (out_cmd) *out_cmd = tx_snap_published_cmd;
+    if (out_len) *out_len = tx_snap_published_len;
+    return tx_snap_published;
+}
+
+// Push one byte to TX FIFO and record it in the per-xact snapshot
+// buffer (truncating once full). Re-verifies writability immediately
+// before writing -- the PL022 TNF flag can lag the actual FIFO state
+// by a cycle or two after a previous write, so a caller-side check
+// followed by a second push can silently drop. Returns 1 if the byte
+// went in, 0 if FIFO was full.
+static inline int tx_push(uint8_t b) {
+    if (!spi_is_writable(PICO_SPI)) return 0;
+    spi_get_hw(PICO_SPI)->dr = b;
+    if (tx_snap_idx < RESPONSE_LEN) {
+        tx_snap[tx_snap_idx++] = b;
+    }
+    return 1;
+}
+
 // Streamer design (v0.1.5):
 //
 // The PL022 TX FIFO is 8 bytes deep. The master's cmd phase is exactly
@@ -247,10 +281,17 @@ void ltc6811_emu_service(void) {
     int cs_now = gpio_get(PIN_SPI_CSN);
 
     if (cs_was_low && cs_now) {
-        // CS rising edge: transaction ended. Cycle SSE to flush both
-        // FIFOs so the NEXT xact starts from a clean slate. SCK is
-        // idle right now (master deasserted CS), so the brief PL022
-        // disable is harmless.
+        // CS rising edge: transaction ended. Freeze the per-xact TX
+        // snapshot first (host reads via DUMP_TX), then cycle SSE to
+        // flush both FIFOs so the NEXT xact starts from a clean
+        // slate. SCK is idle right now (master deasserted CS), so the
+        // brief PL022 disable is harmless.
+        tx_snap_published_len = tx_snap_idx;
+        tx_snap_published_cmd = tx_snap_cmd_recorded;
+        for (uint16_t i = 0; i < tx_snap_idx; i++) tx_snap_published[i] = tx_snap[i];
+        tx_snap_idx          = 0;
+        tx_snap_cmd_recorded = 0xFFFFu;
+
         spi_get_hw(PICO_SPI)->cr1 &= ~SPI_SSPCR1_SSE_BITS;
         spi_get_hw(PICO_SPI)->cr1 |=  SPI_SSPCR1_SSE_BITS;
         rx_idx               = 0;
@@ -272,24 +313,23 @@ void ltc6811_emu_service(void) {
             // not from a stale pad.
             for (int i = 0; i < RESPONSE_PAD; i++) {
                 while (!spi_is_writable(PICO_SPI)) { /* spin */ }
-                spi_get_hw(PICO_SPI)->dr = 0xFFu;
+                tx_push(0xFFu);
             }
             cs_fall_setup_done = 1;
         }
 
         if (cmd_parsed_this_xact) {
-            // Cmd parsed: pump data bytes from current_response into
-            // the TX FIFO until full or buffer exhausted.
-            while (spi_is_writable(PICO_SPI) &&
-                   tx_data_idx < (RESPONSE_LEN - RESPONSE_PAD)) {
-                spi_get_hw(PICO_SPI)->dr =
-                    current_response[RESPONSE_PAD + tx_data_idx++];
-            }
-            // Buffer exhausted but master still clocking -- send pad
-            // to avoid underrun-garbage. Master should be done by now
-            // (80 data bytes consumed); any extra is benign.
+            // Cmd parsed: pump bytes into the TX FIFO. One loop, one
+            // gate -- branch inside picks data vs pad. Two separate
+            // loops would race the PL022 TNF flag (lazy update after
+            // a write) and let a stray pad byte slip into the data
+            // stream every few FIFO refills, corrupting the response.
             while (spi_is_writable(PICO_SPI)) {
-                spi_get_hw(PICO_SPI)->dr = 0xFFu;
+                uint8_t b = (tx_data_idx < (RESPONSE_LEN - RESPONSE_PAD))
+                                ? current_response[RESPONSE_PAD + tx_data_idx]
+                                : 0xFFu;
+                if (!tx_push(b)) break;          // FIFO truly full
+                if (tx_data_idx < (RESPONSE_LEN - RESPONSE_PAD)) tx_data_idx++;
             }
         }
     }
@@ -357,6 +397,7 @@ void ltc6811_emu_service(void) {
                 g_ltc_stats.last_ltc_cmd = cmd;
                 g_ltc_stats.n_valid_cmds++;
             }
+            tx_snap_cmd_recorded = cmd;
             cmd_parsed_this_xact = 1;
         }
     }

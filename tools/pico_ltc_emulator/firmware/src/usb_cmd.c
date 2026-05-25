@@ -12,7 +12,7 @@
 
 #define LINE_MAX 96
 
-#define FW_VERSION_STR "0.1.5"
+#define FW_VERSION_STR "0.1.6"
 
 usb_cmd_stats_t g_cmd_stats;
 
@@ -153,6 +153,24 @@ static void cmd_dump_response(int argc, char *argv[]) {
     emit_line(line);
 }
 
+// Print bytes the SPI slave actually pushed to its TX FIFO during the
+// last completed transaction. Compare against DUMP <cmd> to see if the
+// streamer's wire-side output matches the intended response buffer.
+// Output: "OK cmd=0xNNN len=N bytes=BB BB BB ...".
+static void cmd_dump_tx(void) {
+    uint16_t cmd = 0xFFFFu, len = 0;
+    const uint8_t *buf = ltc6811_emu_last_tx_snapshot(&cmd, &len);
+    char line[400];
+    int n = snprintf(line, sizeof(line), "OK cmd=0x%03X len=%u bytes=",
+                     (unsigned)cmd, (unsigned)len);
+    for (int i = 0; i < len; i++) {
+        n += snprintf(line + n, sizeof(line) - n, "%02X%s",
+                      buf[i], (i == len - 1) ? "" : " ");
+        if (n >= (int)sizeof(line) - 4) break;
+    }
+    emit_line(line);
+}
+
 static void cmd_bsl(void) {
     emit_line("OK -- bye");
     // Flush stdio_usb then jump to bootloader. The first arg is
@@ -187,6 +205,7 @@ static void dispatch(char *line) {
     else if (eq(argv[0], "SET_ALL_TEMPS"))  cmd_set_all_temps(argc, argv);
     else if (eq(argv[0], "RESET_STATE"))    cmd_reset_state();
     else if (eq(argv[0], "DUMP"))           cmd_dump_response(argc, argv);
+    else if (eq(argv[0], "DUMP_TX"))        cmd_dump_tx();
     else if (eq(argv[0], "BSL"))            cmd_bsl();
     else                                    emit_line("ERR unknown cmd");
 }
