@@ -57,6 +57,9 @@ void ltc6811_emu_reset_stats(void) {
     g_ltc_stats.last_cmd   = 0;
 }
 
+// ltc6811_emu_response_for() is defined further down, after the
+// response_pool[] static is in scope.
+
 void ltc6811_emu_init(void) {
     spi_init(PICO_SPI, 1000 * 1000);          // 1 MHz to match LTC6820 typical
     spi_set_slave(PICO_SPI, true);
@@ -146,10 +149,26 @@ static void build_rdaux_chunk(uint8_t ltc_idx, uint8_t group, uint8_t out[8]) {
 // right data in TX FIFO. Subsequent RDCVB/C/D get the correct response
 // on the NEXT poll cycle after cmd parsing catches up.
 
-#define RESPONSE_LEN 80   // 10 chips * 8 bytes
-static uint8_t current_response[RESPONSE_LEN];
+// Each "response" is 4 bytes of pad (master ignores during its cmd
+// phase) + 80 bytes of LTC chain data (10 chips * 8 bytes). The pad
+// realigns our streamed buffer to where the master expects the slave
+// to start replying.
+#define RESPONSE_PAD 4
+#define RESPONSE_LEN (RESPONSE_PAD + 80)
 
-static void build_response(int is_rdcv, int is_rdaux, uint8_t group) {
+// 6 pre-built response buffers indexed by cmd: RDCVA/B/C/D + RDAUXA/B.
+// Computed at init (and on every cell/temp change via the USB cmds).
+// On cmd parse we just swap which buffer the streamer reads from --
+// fast enough to fit in the ~8 us between master-byte-4 and byte-5.
+enum { RSP_RDCVA, RSP_RDCVB, RSP_RDCVC, RSP_RDCVD, RSP_RDAUXA, RSP_RDAUXB, RSP_COUNT };
+static uint8_t response_pool[RSP_COUNT][RESPONSE_LEN];
+static const uint8_t *current_response = response_pool[RSP_RDCVA];  // default
+
+static void build_one_response(int slot, int is_rdcv, int is_rdaux, uint8_t group) {
+    uint8_t *buf = response_pool[slot];
+    // 4 bytes of pad first (don't-care during master's cmd phase)
+    for (int i = 0; i < RESPONSE_PAD; i++) buf[i] = 0xFFu;
+    // Then 10 * 8 bytes of chain data + PEC15 per chip
     uint8_t chunk[8];
     for (uint8_t ltc = 0; ltc < LTC_CHAIN_LEN; ltc++) {
         if (is_rdcv) {
@@ -157,42 +176,126 @@ static void build_response(int is_rdcv, int is_rdaux, uint8_t group) {
         } else if (is_rdaux) {
             build_rdaux_chunk(ltc, group, chunk);
         } else {
-            // Idle filler: all 0xFF (LTC chain dormant)
             for (int i = 0; i < 8; i++) chunk[i] = 0xFFu;
         }
-        for (int i = 0; i < 8; i++) {
-            current_response[ltc * 8 + i] = chunk[i];
-        }
+        for (int i = 0; i < 8; i++) buf[RESPONSE_PAD + ltc * 8 + i] = chunk[i];
     }
 }
 
+static void rebuild_all_responses(void) {
+    build_one_response(RSP_RDCVA,  1, 0, 0);
+    build_one_response(RSP_RDCVB,  1, 0, 1);
+    build_one_response(RSP_RDCVC,  1, 0, 2);
+    build_one_response(RSP_RDCVD,  1, 0, 3);
+    build_one_response(RSP_RDAUXA, 0, 1, 0);
+    build_one_response(RSP_RDAUXB, 0, 1, 1);
+}
+
+void ltc6811_emu_refresh_responses(void) {
+    rebuild_all_responses();
+}
+
+const uint8_t *ltc6811_emu_response_for(uint16_t cmd) {
+    switch (cmd) {
+        case 0x004: return response_pool[RSP_RDCVA];
+        case 0x006: return response_pool[RSP_RDCVB];
+        case 0x008: return response_pool[RSP_RDCVC];
+        case 0x00A: return response_pool[RSP_RDCVD];
+        case 0x00C: return response_pool[RSP_RDAUXA];
+        case 0x00E: return response_pool[RSP_RDAUXB];
+        default:    return NULL;
+    }
+}
+
+// Streamer design (v0.1.5):
+//
+// The PL022 TX FIFO is 8 bytes deep. The master's cmd phase is exactly
+// 4 bytes (a daisy-chain command frame). If we pre-load more than 4
+// bytes at CS-fall, the extras spill into the data phase and the
+// master receives them in place of real cell data -- so the first
+// chip's PEC check fails.
+//
+// The fix: at CS-fall pre-load EXACTLY RESPONSE_PAD (=4) pad bytes
+// into the TX FIFO. While those are clocking out (master's cmd phase),
+// we have time to parse the inbound cmd and pick the right response
+// buffer. After cmd parse we start streaming data bytes from
+// current_response[RESPONSE_PAD..] into the FIFO. The master sees:
+//   bytes 0..3  = pad (ignored, cmd phase)
+//   bytes 4..83 = data from the buffer matching the parsed cmd
+//
+// Timing budget: at 1 MHz SCK, one master byte takes 8 µs. The cmd
+// phase is 32 µs. STM32H7 also inserts a small CPU gap between
+// HAL_SPI_Transmit (the 4-byte cmd send) and HAL_SPI_TransmitReceive
+// (the 80-byte read), giving us extra headroom. Our service loop
+// runs every ~1 µs (no blocking calls in main.c) so cmd parse easily
+// completes before the master starts byte 4.
 void ltc6811_emu_service(void) {
     static uint8_t  rx_buf[4];
-    static uint8_t  rx_idx     = 0;
-    static int      tx_idx     = 0;
-    static int      response_init_done = 0;
+    static uint8_t  rx_idx              = 0;
+    static int      tx_data_idx         = 0;   // index into current_response[RESPONSE_PAD..]
+    static int      cmd_parsed_this_xact = 0;
+    static int      cs_fall_setup_done   = 0;
+    static int      cs_was_low           = 0;
+    static int      response_init_done   = 0;
 
     if (!response_init_done) {
-        // Pre-build RDCVA group 0 as the default streamed response.
-        build_response(1, 0, 0);
-        // Pre-fill TX FIFO so the very first byte master clocks is
-        // valid (not stale 0x00 from peripheral reset).
-        while (spi_is_writable(PICO_SPI) && tx_idx < RESPONSE_LEN) {
-            spi_get_hw(PICO_SPI)->dr = current_response[tx_idx++];
-        }
-        tx_idx %= RESPONSE_LEN;
+        rebuild_all_responses();
+        current_response = response_pool[RSP_RDCVA];
         response_init_done = 1;
     }
 
-    // TX side: keep TX FIFO full, cycling through current_response.
-    // The master might be in the middle of a read; we want bytes
-    // available now, not after we parse the next cmd.
-    while (spi_is_writable(PICO_SPI)) {
-        spi_get_hw(PICO_SPI)->dr = current_response[tx_idx];
-        tx_idx = (tx_idx + 1) % RESPONSE_LEN;
+    int cs_now = gpio_get(PIN_SPI_CSN);
+
+    if (cs_was_low && cs_now) {
+        // CS rising edge: transaction ended. Cycle SSE to flush both
+        // FIFOs so the NEXT xact starts from a clean slate. SCK is
+        // idle right now (master deasserted CS), so the brief PL022
+        // disable is harmless.
+        spi_get_hw(PICO_SPI)->cr1 &= ~SPI_SSPCR1_SSE_BITS;
+        spi_get_hw(PICO_SPI)->cr1 |=  SPI_SSPCR1_SSE_BITS;
+        rx_idx               = 0;
+        tx_data_idx          = 0;
+        cmd_parsed_this_xact = 0;
+        cs_fall_setup_done   = 0;
+        g_ltc_stats.n_cs_cycles++;
+    }
+    cs_was_low = !cs_now;
+
+    if (!cs_now) {
+        // Active transaction.
+        if (!cs_fall_setup_done) {
+            // First service call after CS-fall: push EXACTLY 4 pad
+            // bytes into the TX FIFO (covers master bytes 0..3 = cmd
+            // phase). Do NOT push more -- the rest of the FIFO must
+            // stay free for the post-cmd-parse data stream so the
+            // first data byte actually comes from current_response,
+            // not from a stale pad.
+            for (int i = 0; i < RESPONSE_PAD; i++) {
+                while (!spi_is_writable(PICO_SPI)) { /* spin */ }
+                spi_get_hw(PICO_SPI)->dr = 0xFFu;
+            }
+            cs_fall_setup_done = 1;
+        }
+
+        if (cmd_parsed_this_xact) {
+            // Cmd parsed: pump data bytes from current_response into
+            // the TX FIFO until full or buffer exhausted.
+            while (spi_is_writable(PICO_SPI) &&
+                   tx_data_idx < (RESPONSE_LEN - RESPONSE_PAD)) {
+                spi_get_hw(PICO_SPI)->dr =
+                    current_response[RESPONSE_PAD + tx_data_idx++];
+            }
+            // Buffer exhausted but master still clocking -- send pad
+            // to avoid underrun-garbage. Master should be done by now
+            // (80 data bytes consumed); any extra is benign.
+            while (spi_is_writable(PICO_SPI)) {
+                spi_get_hw(PICO_SPI)->dr = 0xFFu;
+            }
+        }
     }
 
-    // RX side: drain bytes, parse cmd every 4 bytes, update response.
+    // RX side: drain bytes, parse cmd every 4 bytes, update response
+    // buffer pointer.
     while (spi_is_readable(PICO_SPI)) {
         uint8_t b = (uint8_t)spi_get_hw(PICO_SPI)->dr;
         // Debug: keep a sliding window of the last 8 raw bytes
@@ -209,59 +312,52 @@ void ltc6811_emu_service(void) {
 
         // Whitelist of LTC6811 opcodes we care about. Anything outside
         // this set is most likely a data-byte chunk the master clocks
-        // during a read phase (typically all 0x00 -> cmd=0x000, or all
-        // 0xFF -> cmd=0x7FF, or random for write payloads). Tracking
-        // these separately tells us if real LTC commands are reaching
-        // the slave.
-        int is_known = 0;
-        switch (cmd) {
-            case 0x001:  // WRCFGA
-            case 0x002:  // WRCFGB / RDCFGA
-            case 0x004:  // RDCVA
-            case 0x006:  // RDCVB
-            case 0x008:  // RDCVC
-            case 0x00A:  // RDCVD
-            case 0x00C:  // RDAUXA
-            case 0x00E:  // RDAUXB
-            case 0x010:  // RDSTATA
-            case 0x012:  // RDSTATB
-            case 0x014:  // WRSCTRL
-            case 0x016:  // WRPWM
-                is_known = 1; break;
-            default:
-                // ADCV variants: 0x260, 0x261, ..., 0x37F  (mode + DCP + cell bits)
-                if ((cmd & 0x7C0u) == 0x260u || (cmd & 0x7C0u) == 0x340u) is_known = 1;
-                break;
+        // during a read or write phase (e.g. all 0xFF -> cmd=0x7FF).
+        // Tracking these separately tells us if real LTC commands are
+        // reaching the slave. We only swap current_response on the
+        // FIRST parsed cmd of each xact -- subsequent 4-byte "chunks"
+        // are data, not cmds, and must not retarget the streamer.
+        if (!cmd_parsed_this_xact) {
+            int is_known = 0;
+            switch (cmd) {
+                case 0x001:  // WRCFGA
+                case 0x002:  // RDCFGA
+                case 0x010:  // RDSTATA
+                case 0x012:  // RDSTATB
+                case 0x014:  // WRSCTRL
+                case 0x016:  // WRPWM
+                case 0x024:  // WRCFGB
+                case 0x026:  // RDCFGB
+                case 0x02C:  // RDSID
+                case 0x714:  // PLADC
+                case 0x721:  // WRCOMM
+                case 0x722:  // RDCOMM
+                case 0x723:  // STCOMM
+                    is_known = 1; break;
+                case 0x004:  // RDCVA
+                    is_known = 1; current_response = response_pool[RSP_RDCVA];  break;
+                case 0x006:  // RDCVB
+                    is_known = 1; current_response = response_pool[RSP_RDCVB];  break;
+                case 0x008:  // RDCVC
+                    is_known = 1; current_response = response_pool[RSP_RDCVC];  break;
+                case 0x00A:  // RDCVD
+                    is_known = 1; current_response = response_pool[RSP_RDCVD];  break;
+                case 0x00C:  // RDAUXA
+                    is_known = 1; current_response = response_pool[RSP_RDAUXA]; break;
+                case 0x00E:  // RDAUXB
+                    is_known = 1; current_response = response_pool[RSP_RDAUXB]; break;
+                default:
+                    // ADCV variants: 0x260..0x27F, 0x340..0x37F
+                    if ((cmd & 0x7C0u) == 0x260u || (cmd & 0x7C0u) == 0x340u) is_known = 1;
+                    // ADAX variants: 0x460..0x47F, 0x540..0x57F
+                    if ((cmd & 0x7C0u) == 0x460u || (cmd & 0x7C0u) == 0x540u) is_known = 1;
+                    break;
+            }
+            if (is_known) {
+                g_ltc_stats.last_ltc_cmd = cmd;
+                g_ltc_stats.n_valid_cmds++;
+            }
+            cmd_parsed_this_xact = 1;
         }
-        if (is_known) {
-            g_ltc_stats.last_ltc_cmd = cmd;
-            g_ltc_stats.n_valid_cmds++;
-        }
-
-        uint8_t group = 0xFFu;
-        int     is_rdcv = 0;
-        int     is_rdaux = 0;
-
-        switch (cmd) {
-            case 0x004: is_rdcv = 1; group = 0; break;     // RDCVA
-            case 0x006: is_rdcv = 1; group = 1; break;     // RDCVB
-            case 0x008: is_rdcv = 1; group = 2; break;     // RDCVC
-            case 0x00A: is_rdcv = 1; group = 3; break;     // RDCVD
-            case 0x00C: is_rdaux = 1; group = 0; break;    // RDAUXA
-            case 0x00E: is_rdaux = 1; group = 1; break;    // RDAUXB
-            default:
-                // WRCFGA / ADCV / etc. -- nothing for us to drive,
-                // but keep streaming current_response so TX FIFO
-                // doesn't underflow during the master's clocking.
-                continue;
-        }
-
-        // Build the response for the requested group. The master is
-        // probably already clocking bytes out of the buffer right now;
-        // they'll get the OLD response for this poll, then the NEW
-        // response from the next poll cycle. Acceptable for a
-        // constant-cell-V emulation where successive polls of the same
-        // group return identical bytes anyway.
-        build_response(is_rdcv, is_rdaux, group);
     }
 }

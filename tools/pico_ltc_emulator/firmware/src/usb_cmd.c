@@ -12,7 +12,7 @@
 
 #define LINE_MAX 96
 
-#define FW_VERSION_STR "0.1.3"
+#define FW_VERSION_STR "0.1.5"
 
 usb_cmd_stats_t g_cmd_stats;
 
@@ -58,16 +58,17 @@ static void cmd_ping(void) {
 }
 
 static void cmd_status(void) {
-    char buf[200];
+    char buf[224];
     snprintf(buf, sizeof(buf),
              "OK n_cmds_rx=%lu n_spi_xact=%lu last_cmd=0x%03X "
-             "n_valid_cmds=%lu last_ltc_cmd=0x%03X "
+             "n_valid_cmds=%lu last_ltc_cmd=0x%03X n_cs_cycles=%lu "
              "rx_bytes=%lu last_rx=%02X %02X %02X %02X %02X %02X %02X %02X",
              (unsigned long)g_cmd_stats.n_cmds_rx,
              (unsigned long)g_ltc_stats.n_spi_xact,
              (unsigned)g_ltc_stats.last_cmd,
              (unsigned long)g_ltc_stats.n_valid_cmds,
              (unsigned)g_ltc_stats.last_ltc_cmd,
+             (unsigned long)g_ltc_stats.n_cs_cycles,
              (unsigned long)g_ltc_stats.rx_byte_count,
              g_ltc_stats.last_rx[0], g_ltc_stats.last_rx[1],
              g_ltc_stats.last_rx[2], g_ltc_stats.last_rx[3],
@@ -88,6 +89,7 @@ static void cmd_set_cell(int argc, char *argv[]) {
     }
     if (mV < 0 || mV > 0xFFFF) { emit_line("ERR mV in 0..65535"); return; }
     cell_state_set_cell((uint8_t)m, (uint8_t)c, (uint16_t)mV);
+    ltc6811_emu_refresh_responses();
     emit_line("OK");
 }
 
@@ -103,6 +105,7 @@ static void cmd_set_temp(int argc, char *argv[]) {
     }
     if (dC < INT16_MIN || dC > INT16_MAX) { emit_line("ERR dC i16"); return; }
     cell_state_set_temp((uint8_t)m, (uint8_t)s, (int16_t)dC);
+    ltc6811_emu_refresh_responses();
     emit_line("OK");
 }
 
@@ -112,6 +115,7 @@ static void cmd_set_all_cells(int argc, char *argv[]) {
     long mV = parse_int(argv[1], &ok);
     if (!ok || mV < 0 || mV > 0xFFFF) { emit_line("ERR mV in 0..65535"); return; }
     cell_state_set_all_cells((uint16_t)mV);
+    ltc6811_emu_refresh_responses();
     emit_line("OK");
 }
 
@@ -121,13 +125,32 @@ static void cmd_set_all_temps(int argc, char *argv[]) {
     long dC = parse_int(argv[1], &ok);
     if (!ok || dC < INT16_MIN || dC > INT16_MAX) { emit_line("ERR dC i16"); return; }
     cell_state_set_all_temps((int16_t)dC);
+    ltc6811_emu_refresh_responses();
     emit_line("OK");
 }
 
 static void cmd_reset_state(void) {
     cell_state_reset();
     ltc6811_emu_reset_stats();
+    ltc6811_emu_refresh_responses();
     emit_line("OK");
+}
+
+static void cmd_dump_response(int argc, char *argv[]) {
+    if (argc != 2) { emit_line("ERR usage: DUMP <cmd_hex>  (e.g. DUMP 0x004)"); return; }
+    int ok = 1;
+    long c = parse_int(argv[1], &ok);
+    if (!ok) { emit_line("ERR bad int"); return; }
+    const uint8_t *buf = ltc6811_emu_response_for((uint16_t)c);
+    if (!buf) { emit_line("ERR unknown read cmd"); return; }
+    char line[256];
+    int n = snprintf(line, sizeof(line), "OK cmd=0x%03X len=%d bytes=", (unsigned)c, LTC_RESPONSE_LEN);
+    for (int i = 0; i < LTC_RESPONSE_LEN; i++) {
+        n += snprintf(line + n, sizeof(line) - n, "%02X%s",
+                      buf[i], (i == LTC_RESPONSE_LEN - 1) ? "" : " ");
+        if (n >= (int)sizeof(line) - 4) break;
+    }
+    emit_line(line);
 }
 
 static void cmd_bsl(void) {
@@ -163,6 +186,7 @@ static void dispatch(char *line) {
     else if (eq(argv[0], "SET_ALL_CELLS"))  cmd_set_all_cells(argc, argv);
     else if (eq(argv[0], "SET_ALL_TEMPS"))  cmd_set_all_temps(argc, argv);
     else if (eq(argv[0], "RESET_STATE"))    cmd_reset_state();
+    else if (eq(argv[0], "DUMP"))           cmd_dump_response(argc, argv);
     else if (eq(argv[0], "BSL"))            cmd_bsl();
     else                                    emit_line("ERR unknown cmd");
 }
