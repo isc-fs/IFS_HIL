@@ -19,7 +19,6 @@ add_executable(pico_ltc_emulator
 )
 
 target_include_directories(pico_ltc_emulator PRIVATE
-    include
     src
 )
 
@@ -30,8 +29,9 @@ target_link_libraries(pico_ltc_emulator
     hardware_spi
     hardware_dma
     hardware_irq
-    tinyusb_device
-    tinyusb_board
+    # TinyUSB is pulled in transitively by pico_stdio_usb (via
+    # pico_enable_stdio_usb below) with the SDK's default CDC
+    # descriptors. We don't need to link tinyusb_device directly.
 )
 
 # stdio_usb is what gives us the CDC printf channel; stdio_uart off
