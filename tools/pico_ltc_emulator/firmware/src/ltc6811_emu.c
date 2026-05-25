@@ -31,6 +31,7 @@
 // peripheral-driven; the CPU just keeps the byte-level FIFOs fed.
 
 #include <string.h>
+#include <math.h>
 
 #include "ltc6811_emu.h"
 #include "cell_state.h"
@@ -73,15 +74,39 @@ static inline uint16_t mV_to_ltc(uint16_t mV) {
     return (v > 0xFFFFu) ? 0xFFFFu : (uint16_t)v;
 }
 
-// Temperature-to-NTC-divider voltage: stand-in scaling for the first
-// cut. AMS firmware reads aux as Volt-scaled u16 (units 100 µV like
-// cells) and applies its own NTC table. We pick a placeholder linear
-// mapping: 25 °C -> 1.5 V (15000 in u16 100µV units). Tune later.
+// Temperature-to-NTC-divider voltage. AMS firmware decodes AUX as a
+// resistor divider with a Beta-model NTC:
+//   V_aux_mV  = NtcVrefMv * R_ntc / (NtcSeriesR + R_ntc)
+//   R_ntc(T)  = NtcR25 * exp(Beta * (1/T_K - 1/T0))
+// per Core/Inc/app/ams_config.hpp:
+//   NtcVrefMv    = 3000     (LTC6811 VREF2)
+//   NtcSeriesR   = 10000 Ω  (divider pull-up)
+//   NtcR25       = 10000 Ω
+//   NtcBeta      = 3380 K
+//   NtcT0Kelvin  = 298.15 K (25 °C)
+//
+// For target temp dC (deci-°C, 250 = 25 °C):
+//   T_K   = dC/10 + 273.15
+//   R     = 10000 * exp(3380 * (1/T_K - 1/298.15))
+//   V_aux = 3000 * R / (10000 + R)
+//   aux_u16 = V_aux * 10   (u16 100 µV units the LTC chip emits)
+//
+// Earlier stand-in was off by 10× and the firmware's Steinhart
+// decoder mapped my "25 °C" output (150 mV) to ~113 °C, tripping the
+// CellOverTempC = 60 °C predicate and forcing the FSM to Error.
 static inline uint16_t dC_to_ltc(int16_t dC) {
-    int32_t centred = 1500 - (dC - 250);  // 25 °C -> 1500, -5 mV per °C
-    if (centred < 0)       centred = 0;
-    if (centred > 0xFFFF)  centred = 0xFFFF;
-    return (uint16_t)centred;
+    const float t_K  = (float)dC / 10.0f + 273.15f;
+    const float beta = 3380.0f;
+    const float t0   = 298.15f;
+    const float r25  = 10000.0f;
+    const float rs   = 10000.0f;
+    const float vref = 3000.0f;            // mV
+    const float r    = r25 * expf(beta * (1.0f / t_K - 1.0f / t0));
+    const float v_aux_mV = vref * r / (rs + r);
+    const float aux_100uV = v_aux_mV * 10.0f;
+    if (aux_100uV < 0.0f)        return 0u;
+    if (aux_100uV > 65535.0f)    return 65535u;
+    return (uint16_t)(aux_100uV + 0.5f);
 }
 
 ltc_stats_t g_ltc_stats;
