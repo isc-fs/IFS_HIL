@@ -111,24 +111,23 @@ Defaults match `seed_for_hil_stub`: 3750 mV per cell, 25.0 °C
 
 ## Wiring
 
-The MLC1 carrier's STM32 SPI1 bus (PA5/6/7) is already exposed on the
-**U22 nRF24 footprint** on the BACKPLANE_HIL PCB. Pop out the nRF24
-module (if installed) and drop the Pico into U22's footprint via a
-breakout board / female header — no soldering to the carrier
+MLC2's STM32 SPI1 bus is broken out on the **J8 patch header** on the
+BACKPLANE_HIL PCB (a 2x02 2.54 mm pin header with SCK/MISO/MOSI/GND).
+4 wires from Pico SPI0 pins to J8 — no soldering to the carrier
 connector required.
 
 The LTC6820 chip-select (`STM32 PA4`, see firmware
-`Core/Inc/main.h:68`) is **NOT** broken out on U22 — U22 pad 4 is the
-nRF24 CS GPIO, a different STM32 pin. Two paths:
+`Core/Inc/main.h:68`) is **NOT** broken out on J8. Two paths:
 
-- **CS-tied-low**: skip CS gating, rely on PEC15 + idle-gap framing.
-  Works as long as SPI1 carries only LTC traffic (true today since
-  the firmware doesn't initialise an nRF24 driver).
-- **Tap PA4**: magnet-wire from the MLC1 daughterboard `LTC6820_CS`
+- **CS-tied-low**: Pico's CSn → Pico GND. Skip CS gating, rely on
+  PEC15 + idle-gap framing. Works as long as SPI1 carries only LTC
+  traffic (true today since the firmware doesn't initialise an nRF24
+  driver).
+- **Tap PA4**: magnet-wire from the MLC2 daughterboard `LTC6820_CS`
   net to a Pico GPIO. Proper semantics; required if nRF24 is ever
   enabled alongside LTC.
 
-Detailed wiring table: [`tools/pico_ltc_emulator/README.md`](../tools/pico_ltc_emulator/README.md#wiring-target-mlc1-slot).
+Detailed wiring table: [`tools/pico_ltc_emulator/README.md`](../tools/pico_ltc_emulator/README.md#wiring-target-mlc2-slot).
 
 ## First flash vs subsequent flashes
 
