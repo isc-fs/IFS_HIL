@@ -71,6 +71,15 @@ void ltc6811_emu_refresh_responses(void);
 // think it is -- compares against ltc6811_emu_response_for(cmd).
 const uint8_t *ltc6811_emu_last_tx_snapshot(uint16_t *out_cmd, uint16_t *out_len);
 
+// Get a snapshot of the bytes the SPI slave actually RECEIVED on MOSI
+// during the most recent transaction. First 4 bytes are the cmd frame
+// (cmd_hi, cmd_lo, pec_hi, pec_lo); subsequent bytes are write payload
+// (for write cmds) or 0xFF scratch (for reads). Use to verify what the
+// master actually sent on the wire, independent of our parse logic --
+// e.g. to confirm whether a mis-parsed cmd is a wire-level bit error
+// or a parse-side bug in the slave.
+const uint8_t *ltc6811_emu_last_rx_snapshot(uint16_t *out_len);
+
 #ifdef __cplusplus
 }
 #endif

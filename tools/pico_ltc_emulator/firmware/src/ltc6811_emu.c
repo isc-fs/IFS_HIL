@@ -72,23 +72,34 @@ void ltc6811_emu_init(void) {
     // sample. Pico ends up sampling garbage and n_spi_xact stays at 0.
     spi_set_format(PICO_SPI, 8, SPI_CPOL_1, SPI_CPHA_1, SPI_MSB_FIRST);
 
-    // Enable internal pull-downs on SCK + MOSI BEFORE switching to SPI
-    // alternate function. While the MLC STM32 is in BL mode, its SPI1
-    // pins (PA5/6/7) sit in HiZ reset state -- a long wire between J8
-    // and the Pico will float and pick up enough noise to clock the
-    // Pico's SPI slave, which then drives MISO with garbage and
-    // disrupts the BL's CAN-flash timing. Pulling these down at the
-    // Pico end forces a clean low when nothing is driving the wire.
-    // The MLC's SPI peripheral easily overrides the ~50 kOhm internal
-    // pull-down during real transfers (typical SPI drive strength
-    // is single-digit ohms).
-    gpio_pull_down(PIN_SPI_SCK);
-    gpio_pull_down(PIN_SPI_RX);
-
+    // Set alternate function FIRST, then force pulls. (pico-sdk's
+    // gpio_set_function doesn't touch the PADS pull bits, so order
+    // shouldn't matter -- but the previous order had pulls _before_
+    // function-set with no re-apply, and we observed first-bit-after-
+    // long-idle RX corruption (master MOSI floating between xacts
+    // → Pico samples stray HIGH as bit 7 of byte 0). Force the
+    // pull-down explicitly here so it definitely sticks.
     gpio_set_function(PIN_SPI_RX,  GPIO_FUNC_SPI);
     gpio_set_function(PIN_SPI_TX,  GPIO_FUNC_SPI);
     gpio_set_function(PIN_SPI_SCK, GPIO_FUNC_SPI);
     gpio_set_function(PIN_SPI_CSN, GPIO_FUNC_SPI);
+
+    // Internal pull-downs on SCK + MOSI: while AMS master is idle
+    // between xacts, MOSI may be released (HiZ). Without a pull-down
+    // the long wire from MLC2 J8 can float HIGH, and the very first
+    // bit Pico samples on the next CS-fall captures the stray HIGH
+    // instead of master's actual first bit (which arrives a few-ns
+    // later). Internal ~50 kOhm pull is plenty to overcome wire
+    // capacitance in <1 us; the master easily overrides during a
+    // real drive cycle (push-pull is single-digit ohms).
+    // CS pin gets pulled UP (idle = deasserted) since master only
+    // pulses it LOW briefly.
+    gpio_disable_pulls(PIN_SPI_SCK);
+    gpio_disable_pulls(PIN_SPI_RX);
+    gpio_disable_pulls(PIN_SPI_CSN);
+    gpio_pull_down(PIN_SPI_SCK);
+    gpio_pull_down(PIN_SPI_RX);
+    gpio_pull_up(PIN_SPI_CSN);
 
     ltc6811_emu_reset_stats();
 }
@@ -177,6 +188,17 @@ static uint8_t  tx_snap_published[RESPONSE_LEN];
 static uint16_t tx_snap_published_len = 0;
 static uint16_t tx_snap_published_cmd = 0xFFFFu;
 
+// RX-snapshot diagnostic, mirror of tx_snap: records the first
+// LTC_RESPONSE_LEN bytes the master clocked into us on MOSI during a
+// transaction. Lets the host compare what bits actually arrived on the
+// wire vs what AMS pack_command(...) was supposed to emit. The first 4
+// entries are the cmd frame [cmd_hi, cmd_lo, pec_hi, pec_lo]; everything
+// after is the write data (or 0xFF scratch on reads).
+static uint8_t  rx_snap[RESPONSE_LEN];
+static uint16_t rx_snap_idx          = 0;
+static uint8_t  rx_snap_published[RESPONSE_LEN];
+static uint16_t rx_snap_published_len = 0;
+
 static void build_one_response(int slot, int is_rdcv, int is_rdaux, uint8_t group) {
     uint8_t *buf = response_pool[slot];
     // 4 bytes of pad first (don't-care during master's cmd phase)
@@ -224,6 +246,11 @@ const uint8_t *ltc6811_emu_last_tx_snapshot(uint16_t *out_cmd, uint16_t *out_len
     if (out_cmd) *out_cmd = tx_snap_published_cmd;
     if (out_len) *out_len = tx_snap_published_len;
     return tx_snap_published;
+}
+
+const uint8_t *ltc6811_emu_last_rx_snapshot(uint16_t *out_len) {
+    if (out_len) *out_len = rx_snap_published_len;
+    return rx_snap_published;
 }
 
 // Push one byte to TX FIFO and record it in the per-xact snapshot
@@ -281,9 +308,9 @@ void ltc6811_emu_service(void) {
     int cs_now = gpio_get(PIN_SPI_CSN);
 
     if (cs_was_low && cs_now) {
-        // CS rising edge: transaction ended. Freeze the per-xact TX
-        // snapshot first (host reads via DUMP_TX), then cycle SSE to
-        // flush both FIFOs so the NEXT xact starts from a clean
+        // CS rising edge: transaction ended. Freeze per-xact TX + RX
+        // snapshots (host reads via DUMP_TX / DUMP_RX), then cycle SSE
+        // to flush both FIFOs so the NEXT xact starts from a clean
         // slate. SCK is idle right now (master deasserted CS), so the
         // brief PL022 disable is harmless.
         tx_snap_published_len = tx_snap_idx;
@@ -291,6 +318,10 @@ void ltc6811_emu_service(void) {
         for (uint16_t i = 0; i < tx_snap_idx; i++) tx_snap_published[i] = tx_snap[i];
         tx_snap_idx          = 0;
         tx_snap_cmd_recorded = 0xFFFFu;
+
+        rx_snap_published_len = rx_snap_idx;
+        for (uint16_t i = 0; i < rx_snap_idx; i++) rx_snap_published[i] = rx_snap[i];
+        rx_snap_idx          = 0;
 
         spi_get_hw(PICO_SPI)->cr1 &= ~SPI_SSPCR1_SSE_BITS;
         spi_get_hw(PICO_SPI)->cr1 |=  SPI_SSPCR1_SSE_BITS;
@@ -341,6 +372,11 @@ void ltc6811_emu_service(void) {
         // Debug: keep a sliding window of the last 8 raw bytes
         g_ltc_stats.last_rx[g_ltc_stats.rx_byte_count % 8u] = b;
         g_ltc_stats.rx_byte_count++;
+        // Per-xact RX snapshot (capped). Use to compare actual MOSI
+        // bytes against AMS pack_command(...) ground truth.
+        if (rx_snap_idx < RESPONSE_LEN) {
+            rx_snap[rx_snap_idx++] = b;
+        }
         rx_buf[rx_idx++] = b;
         if (rx_idx < 4) continue;
         rx_idx = 0;
