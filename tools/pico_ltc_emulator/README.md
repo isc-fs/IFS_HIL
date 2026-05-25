@@ -22,27 +22,39 @@ host/            Pi-side helpers
 tests/           off-target unit tests (PEC15, command parser)
 ```
 
-## Wiring (target: MLC2 slot)
+## Wiring (target: MLC1 slot)
 
-| Signal | Pico GPIO | MLC2 patch header |
+The MLC1 carrier already exposes its STM32 SPI1 bus on the **U22 nRF24
+footprint** — same pins the firmware would talk to an LTC6820 on. Pop
+the nRF24 module out of U22 (if installed) and wire the Pico into the
+freed footprint:
+
+| Pico GPIO | U22 pad | Net | Notes |
+|---|---|---|---|
+| GP18 (SPI0 SCK)  | pad 5 (SCK)  | `/SLOT1_SPI_SCK`  | clock from MLC1 master |
+| GP19 (SPI0 TX)   | pad 7 (MISO) | `/SLOT1_SPI_MISO` | **slave drives MISO** (Pico→MLC) |
+| GP16 (SPI0 RX)   | pad 6 (MOSI) | `/SLOT1_SPI_MOSI` | MLC→Pico, master output |
+| any Pico GND     | pad 1 (GND)  | GND               |  |
+| any Pico VBUS/3V3| pad 2 (VCC)  | `3V3_ECU`         | optional — Pico is also USB-powered, don't double-feed |
+
+**CS line — open question, two paths:**
+
+| Option | Wiring | Trade-off |
 |---|---|---|
-| SPI SCK  | GP18 (SPI0 SCK) | J8 pin 1 (SLOT2_SPI_SCK)  |
-| SPI MOSI | GP19 (SPI0 TX)  | J8 pin 3 (SLOT2_SPI_MOSI) |
-| SPI MISO | GP16 (SPI0 RX)  | J8 pin 2 (SLOT2_SPI_MISO) |
-| SPI CS   | GP17 (SPI0 CSn) | (see "CS routing" below)  |
-| GND      | any Pico GND    | J8 pin 5 (GND) or backplane GND |
+| A. **Tie Pico GP17 LOW** | Pico SPI0 CSn → GND | Slave is always selected. Works because the AMS firmware initialises SPI1 only for LTC (no nRF24 driver in the build), so all SPI1 traffic IS LTC traffic. Frame boundaries are inferred from `kSafetyPeriodMs` idle gaps + PEC15 validity. |
+| B. **Wire MLC1 PA4 → Pico GP17** | Tap `LTC6820_CS` (STM32 PA4) → Pico CSn | Proper protocol semantics. Requires identifying which BACKPLANE pad carries MLC1's PA4 — it's NOT on U22, NOT on the carrier connector under a named net, likely needs a magnet-wire tap on the daughterboard. |
 
-**CS routing — open question.** The MLC's STM32 drives a GPIO as the
-LTC6820 chip-select, but the BACKPLANE doesn't currently break that
-signal out as a named pad. Two short-term options:
-1. Solder a magnet wire from the MLC daughterboard CS net to one of
-   the DIG patch pins, then jumper DIG→Pico GP17.
-2. Detect SCK activity from the SPI slave RX FIFO directly and skip
-   CS gating. Works for a single chain (no contention with other SPI
-   peripherals on the MLC), which is the bench case.
+Default firmware assumes option A. Option B becomes mandatory if a
+future firmware build also enables nRF24 on SPI1 (then we need CS to
+disambiguate LTC frames from nRF24 frames).
 
-Option 2 is what the firmware does by default. Option 1 is the
-"correct" fix and is pre-requisite for multi-slot expansion later.
+### Why MLC1 specifically
+
+The nRF24 footprint exposing the SPI bus only exists on **MLC1**
+(`U22`); MLC2/3/4 have the SPI on the carrier connector pads 34/35/36
+but no on-backplane breakout. For MLC1, U22 is the cleanest hookup.
+For the other slots you'd fall back to soldering to the carrier
+connector or to the J7/J8 patch headers (J7 for SLOT1, J8 for SLOT2).
 
 ## Power
 
