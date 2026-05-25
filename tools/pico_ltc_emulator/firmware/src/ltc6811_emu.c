@@ -308,11 +308,23 @@ void ltc6811_emu_service(void) {
     int cs_now = gpio_get(PIN_SPI_CSN);
 
     if (cs_was_low && cs_now) {
-        // CS rising edge: transaction ended. Freeze per-xact TX + RX
-        // snapshots (host reads via DUMP_TX / DUMP_RX), then cycle SSE
-        // to flush both FIFOs so the NEXT xact starts from a clean
-        // slate. SCK is idle right now (master deasserted CS), so the
-        // brief PL022 disable is harmless.
+        // CS rising edge: transaction ended. Drain any RX bytes that
+        // landed between the last service iteration and now (these are
+        // the tail end of the just-finished xact, e.g. the last 1-2
+        // scratch 0xFF bytes the master clocked before deasserting CS)
+        // INTO the snapshot, then freeze the snapshot, then SSE-cycle
+        // to clear both FIFOs. Without this, the FIFO-resident tail
+        // bytes get drained on the *next* service iteration and
+        // pollute the NEW xact's snapshot as a stray-FF prefix.
+        while (spi_is_readable(PICO_SPI)) {
+            uint8_t tail = (uint8_t)spi_get_hw(PICO_SPI)->dr;
+            g_ltc_stats.last_rx[g_ltc_stats.rx_byte_count % 8u] = tail;
+            g_ltc_stats.rx_byte_count++;
+            if (rx_snap_idx < RESPONSE_LEN) {
+                rx_snap[rx_snap_idx++] = tail;
+            }
+        }
+
         tx_snap_published_len = tx_snap_idx;
         tx_snap_published_cmd = tx_snap_cmd_recorded;
         for (uint16_t i = 0; i < tx_snap_idx; i++) tx_snap_published[i] = tx_snap[i];
@@ -323,8 +335,15 @@ void ltc6811_emu_service(void) {
         for (uint16_t i = 0; i < rx_snap_idx; i++) rx_snap_published[i] = rx_snap[i];
         rx_snap_idx          = 0;
 
+        // SSE cycle to guarantee FIFOs are empty. Re-drain afterward
+        // as belt-and-braces in case the cycle has a 1-cycle update
+        // lag on the RNE flag.
         spi_get_hw(PICO_SPI)->cr1 &= ~SPI_SSPCR1_SSE_BITS;
         spi_get_hw(PICO_SPI)->cr1 |=  SPI_SSPCR1_SSE_BITS;
+        while (spi_is_readable(PICO_SPI)) {
+            (void)spi_get_hw(PICO_SPI)->dr;
+        }
+
         rx_idx               = 0;
         tx_data_idx          = 0;
         cmd_parsed_this_xact = 0;
