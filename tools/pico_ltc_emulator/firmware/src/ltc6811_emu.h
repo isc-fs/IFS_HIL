@@ -27,6 +27,10 @@ extern "C" {
 typedef struct {
     uint32_t n_spi_xact;
     uint16_t last_cmd;
+    // Last 8 received RX bytes (debug: prove MOSI wire is conducting).
+    // Surfaced in STATUS as "last_rx=XX XX XX XX XX XX XX XX".
+    uint8_t  last_rx[8];
+    uint32_t rx_byte_count;
 } ltc_stats_t;
 
 extern ltc_stats_t g_ltc_stats;

@@ -126,30 +126,89 @@ static void build_rdaux_chunk(uint8_t ltc_idx, uint8_t group, uint8_t out[8]) {
     pec15_append(out, 6);
 }
 
-// One-shot service: drain any pending RX bytes, decode if we have a
-// full 4-byte command frame, push the response into TX. Called from
-// the main loop -- no IRQs in this skeleton, polling is fine for
-// the bench's 1 MHz clock vs the Pico's 125 MHz core.
+// Continuous TX streaming + RX command parsing.
 //
-// Limitation: assumes one full command-then-response per CS pulse.
-// Multi-byte commands within a single CS assertion (broadcast
-// write) need a small state machine -- TODO before real bench
-// integration.
+// Why streaming: the AMS firmware uses HAL_SPI_TransmitReceive per
+// ltc6820.cpp:113 -- one CS pulse wraps a 4-byte cmd + N data bytes
+// clocked back-to-back. The slave must drive MISO with response bytes
+// concurrently with the master clocking them. A polled "wait for cmd,
+// then write response" strategy is always 80 bytes too late.
+//
+// Strategy: keep TX FIFO always full with bytes from a 80-byte
+// "current response" buffer (10 chips * 8 bytes for RDCVx / RDAUXx).
+// The master gets valid data immediately, regardless of the cmd-parse
+// latency. When we DO parse a new cmd, swap the response buffer
+// contents -- the next time master clocks, it gets the right group.
+//
+// First-byte fidelity: at init, we pre-build the RDCVA group 0 response
+// (cells 1..3). Most LTC chain init sequences start with WRCFGA + ADCV
+// + RDCVA, so the first read the firmware does will already have the
+// right data in TX FIFO. Subsequent RDCVB/C/D get the correct response
+// on the NEXT poll cycle after cmd parsing catches up.
+
+#define RESPONSE_LEN 80   // 10 chips * 8 bytes
+static uint8_t current_response[RESPONSE_LEN];
+
+static void build_response(int is_rdcv, int is_rdaux, uint8_t group) {
+    uint8_t chunk[8];
+    for (uint8_t ltc = 0; ltc < LTC_CHAIN_LEN; ltc++) {
+        if (is_rdcv) {
+            build_rdcv_chunk(ltc, group, chunk);
+        } else if (is_rdaux) {
+            build_rdaux_chunk(ltc, group, chunk);
+        } else {
+            // Idle filler: all 0xFF (LTC chain dormant)
+            for (int i = 0; i < 8; i++) chunk[i] = 0xFFu;
+        }
+        for (int i = 0; i < 8; i++) {
+            current_response[ltc * 8 + i] = chunk[i];
+        }
+    }
+}
+
 void ltc6811_emu_service(void) {
     static uint8_t  rx_buf[4];
-    static uint8_t  rx_idx = 0;
+    static uint8_t  rx_idx     = 0;
+    static int      tx_idx     = 0;
+    static int      response_init_done = 0;
 
+    if (!response_init_done) {
+        // Pre-build RDCVA group 0 as the default streamed response.
+        build_response(1, 0, 0);
+        // Pre-fill TX FIFO so the very first byte master clocks is
+        // valid (not stale 0x00 from peripheral reset).
+        while (spi_is_writable(PICO_SPI) && tx_idx < RESPONSE_LEN) {
+            spi_get_hw(PICO_SPI)->dr = current_response[tx_idx++];
+        }
+        tx_idx %= RESPONSE_LEN;
+        response_init_done = 1;
+    }
+
+    // TX side: keep TX FIFO full, cycling through current_response.
+    // The master might be in the middle of a read; we want bytes
+    // available now, not after we parse the next cmd.
+    while (spi_is_writable(PICO_SPI)) {
+        spi_get_hw(PICO_SPI)->dr = current_response[tx_idx];
+        tx_idx = (tx_idx + 1) % RESPONSE_LEN;
+    }
+
+    // RX side: drain bytes, parse cmd every 4 bytes, update response.
     while (spi_is_readable(PICO_SPI)) {
-        uint8_t b;
-        spi_read_blocking(PICO_SPI, 0, &b, 1);
+        uint8_t b = (uint8_t)spi_get_hw(PICO_SPI)->dr;
+        // Debug: keep a sliding window of the last 8 raw bytes
+        g_ltc_stats.last_rx[g_ltc_stats.rx_byte_count % 8u] = b;
+        g_ltc_stats.rx_byte_count++;
         rx_buf[rx_idx++] = b;
         if (rx_idx < 4) continue;
         rx_idx = 0;
 
         // 11-bit command in rx_buf[0..1].
         uint16_t cmd = (uint16_t)(((rx_buf[0] & 0x07u) << 8) | rx_buf[1]);
-        g_ltc_stats.last_cmd = cmd;
         g_ltc_stats.n_spi_xact++;
+        // Only record non-zero cmds in last_cmd -- the "data" bytes
+        // the master clocks out during a read phase are typically 0x00
+        // and would otherwise immediately overwrite the real cmd.
+        if (cmd != 0) g_ltc_stats.last_cmd = cmd;
 
         uint8_t group = 0xFFu;
         int     is_rdcv = 0;
@@ -163,20 +222,18 @@ void ltc6811_emu_service(void) {
             case 0x00C: is_rdaux = 1; group = 0; break;    // RDAUXA
             case 0x00E: is_rdaux = 1; group = 1; break;    // RDAUXB
             default:
-                // WRCFGA (0x001), ADCV variants, etc. -- swallow and
-                // continue without producing a read response.
+                // WRCFGA / ADCV / etc. -- nothing for us to drive,
+                // but keep streaming current_response so TX FIFO
+                // doesn't underflow during the master's clocking.
                 continue;
         }
 
-        // Produce 10 × 8 bytes of response.
-        uint8_t chunk[8];
-        for (uint8_t ltc = 0; ltc < LTC_CHAIN_LEN; ltc++) {
-            if (is_rdcv) {
-                build_rdcv_chunk(ltc, group, chunk);
-            } else if (is_rdaux) {
-                build_rdaux_chunk(ltc, group, chunk);
-            }
-            spi_write_blocking(PICO_SPI, chunk, 8);
-        }
+        // Build the response for the requested group. The master is
+        // probably already clocking bytes out of the buffer right now;
+        // they'll get the OLD response for this poll, then the NEW
+        // response from the next poll cycle. Acceptable for a
+        // constant-cell-V emulation where successive polls of the same
+        // group return identical bytes anyway.
+        build_response(is_rdcv, is_rdaux, group);
     }
 }
