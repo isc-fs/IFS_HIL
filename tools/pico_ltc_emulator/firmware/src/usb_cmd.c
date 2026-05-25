@@ -58,13 +58,16 @@ static void cmd_ping(void) {
 }
 
 static void cmd_status(void) {
-    char buf[160];
+    char buf[200];
     snprintf(buf, sizeof(buf),
              "OK n_cmds_rx=%lu n_spi_xact=%lu last_cmd=0x%03X "
+             "n_valid_cmds=%lu last_ltc_cmd=0x%03X "
              "rx_bytes=%lu last_rx=%02X %02X %02X %02X %02X %02X %02X %02X",
              (unsigned long)g_cmd_stats.n_cmds_rx,
              (unsigned long)g_ltc_stats.n_spi_xact,
              (unsigned)g_ltc_stats.last_cmd,
+             (unsigned long)g_ltc_stats.n_valid_cmds,
+             (unsigned)g_ltc_stats.last_ltc_cmd,
              (unsigned long)g_ltc_stats.rx_byte_count,
              g_ltc_stats.last_rx[0], g_ltc_stats.last_rx[1],
              g_ltc_stats.last_rx[2], g_ltc_stats.last_rx[3],

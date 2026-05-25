@@ -205,10 +205,38 @@ void ltc6811_emu_service(void) {
         // 11-bit command in rx_buf[0..1].
         uint16_t cmd = (uint16_t)(((rx_buf[0] & 0x07u) << 8) | rx_buf[1]);
         g_ltc_stats.n_spi_xact++;
-        // Only record non-zero cmds in last_cmd -- the "data" bytes
-        // the master clocks out during a read phase are typically 0x00
-        // and would otherwise immediately overwrite the real cmd.
-        if (cmd != 0) g_ltc_stats.last_cmd = cmd;
+        g_ltc_stats.last_cmd = cmd;
+
+        // Whitelist of LTC6811 opcodes we care about. Anything outside
+        // this set is most likely a data-byte chunk the master clocks
+        // during a read phase (typically all 0x00 -> cmd=0x000, or all
+        // 0xFF -> cmd=0x7FF, or random for write payloads). Tracking
+        // these separately tells us if real LTC commands are reaching
+        // the slave.
+        int is_known = 0;
+        switch (cmd) {
+            case 0x001:  // WRCFGA
+            case 0x002:  // WRCFGB / RDCFGA
+            case 0x004:  // RDCVA
+            case 0x006:  // RDCVB
+            case 0x008:  // RDCVC
+            case 0x00A:  // RDCVD
+            case 0x00C:  // RDAUXA
+            case 0x00E:  // RDAUXB
+            case 0x010:  // RDSTATA
+            case 0x012:  // RDSTATB
+            case 0x014:  // WRSCTRL
+            case 0x016:  // WRPWM
+                is_known = 1; break;
+            default:
+                // ADCV variants: 0x260, 0x261, ..., 0x37F  (mode + DCP + cell bits)
+                if ((cmd & 0x7C0u) == 0x260u || (cmd & 0x7C0u) == 0x340u) is_known = 1;
+                break;
+        }
+        if (is_known) {
+            g_ltc_stats.last_ltc_cmd = cmd;
+            g_ltc_stats.n_valid_cmds++;
+        }
 
         uint8_t group = 0xFFu;
         int     is_rdcv = 0;

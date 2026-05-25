@@ -25,12 +25,12 @@ extern "C" {
 #endif
 
 typedef struct {
-    uint32_t n_spi_xact;
-    uint16_t last_cmd;
-    // Last 8 received RX bytes (debug: prove MOSI wire is conducting).
-    // Surfaced in STATUS as "last_rx=XX XX XX XX XX XX XX XX".
-    uint8_t  last_rx[8];
-    uint32_t rx_byte_count;
+    uint32_t n_spi_xact;        // every 4-byte window parsed
+    uint16_t last_cmd;          // most recent ANY-value cmd parse
+    uint16_t last_ltc_cmd;      // most recent KNOWN-LTC cmd (filter: only the small whitelist)
+    uint32_t n_valid_cmds;      // counter of whitelisted LTC cmds recognised
+    uint8_t  last_rx[8];        // sliding window of last 8 raw RX bytes
+    uint32_t rx_byte_count;     // monotonic byte counter (NOT reset by RESET_STATE)
 } ltc_stats_t;
 
 extern ltc_stats_t g_ltc_stats;
