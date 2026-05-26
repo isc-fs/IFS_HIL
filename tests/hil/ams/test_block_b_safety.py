@@ -59,6 +59,43 @@ class TestB010MainTaskCadence:
 
 
 # ---------------------------------------------------------------------------
+# B-022 — BMS module stale via Pico STOP_REPLY (AMS #272 row)
+# ---------------------------------------------------------------------------
+
+class TestB022BMSStale:
+    """Per AMS #272 B-022: with the Pico LTC emulator on MLC2 J8,
+    issuing STOP_REPLY 0x1F (silence all 5 modules' 2 chain positions)
+    starves the AMS BMS poll — last_rx_tick for every module goes stale
+    past BmsStaleMs, module_online_mask collapses to 0x00 (#250
+    freshness semantics), and the safety predicate trips FSM to Error.
+
+    Symmetric with E-065 but viewed from the Block B safety predicate
+    perspective rather than the Block E chain-integrity perspective.
+    """
+
+    def test_b022_bms_stale_trips_error(self, fresh_boot, pico_emu,
+                                         wait_for_state, ams_profile):
+        # Sanity: chip is alive in Start before we silence the chain.
+        assert fresh_boot["first_frame"]["state"] == M.FsmState.START
+
+        try:
+            # Silence every chain position. Bytes for the silenced
+            # positions read 0xFF on the wire → PEC fails for those ICs
+            # → mask collapses to 0x00 within BmsStaleMs.
+            pico_emu.stop_reply(0x1F)
+
+            # Budget: kBmsStaleMs (1500 ms) + the kSafetyPeriodMs check
+            # cycle + one telemetry cycle for the new state to surface.
+            window_ms = (int(ams_profile.get("bms_stale_ms", 1500))
+                         + int(ams_profile["tx_telemetry_period_ms"])
+                         + 500)
+            wait_for_state(M.FsmState.ERROR, timeout_ms=window_ms)
+        finally:
+            # Always resume so the next test in the session starts clean.
+            pico_emu.resume_all()
+
+
+# ---------------------------------------------------------------------------
 # B-021 — VCU heartbeat stale trips (AMS #272 row)
 # ---------------------------------------------------------------------------
 

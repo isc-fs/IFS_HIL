@@ -221,3 +221,91 @@ class TestE052PowerCycleResilience:
 # VDD control (3.3 V → 1.5 V → 3.3 V dip), and the bench K-relay is
 # on/off only. Requires lab PSU or programmable load on slot VDD; not
 # in the production bench architecture.
+
+
+# ---------------------------------------------------------------------------
+# G-097 — Boot diag via pit-diag 0x6C4  (NEW per AMS #272)
+# ---------------------------------------------------------------------------
+
+class TestG097BootDiag:
+    """Per AMS #272 G-097: after a cold boot, pit-diag `0x6C4` reports:
+      bytes [0..3]  jump_reason (LE u32) = 0 (cold boot, no magic in BKP2R)
+      byte  [4]     g_app_init_progress = 7 (App_InitTask reached self-exit)
+      bytes [5..7]  g_fdcan1_start_result = 0 (HAL_OK)
+
+    A non-zero g_fdcan1_start_result or app_init_progress < 7 means
+    boot didn't complete cleanly and any further test on this chip is
+    suspect — useful as a per-test boot-health smoke check.
+    """
+
+    def test_g097_boot_diag(self, fresh_boot, pit_diag):
+        boot = pit_diag.wait_for(M.ID_PIT_DIAG_BOOT)
+        assert len(boot) == 8, f"0x6C4 dlc != 8 (got {len(boot)})"
+
+        jump_reason = int.from_bytes(boot[0:4], "little")
+        app_progress = boot[4]
+        fdcan_start = int.from_bytes(boot[5:8], "little")
+
+        assert jump_reason == 0, (
+            f"0x6C4[0..3] jump_reason = 0x{jump_reason:08X} on cold boot; "
+            "expected 0 (no JumpReason magic in BKP2R). "
+            "If non-zero, prior reboot wasn't a clean cold cycle.")
+        assert app_progress == 7, (
+            f"0x6C4[4] g_app_init_progress = {app_progress}; "
+            "expected 7 (App_InitTask reached self-exit). Lower values "
+            "indicate where init stalled (see app_init_task.cpp).")
+        assert fdcan_start == 0, (
+            f"0x6C4[5..7] g_fdcan1_start_result = 0x{fdcan_start:06X}; "
+            "expected 0 (HAL_OK). Non-zero means HAL_FDCAN_Start failed.")
+
+
+# ---------------------------------------------------------------------------
+# G-102 — Per-IC PEC localisation  (NEW per AMS #272)
+# ---------------------------------------------------------------------------
+
+class TestG102PerIcPecLocalisation:
+    """Per AMS #272 G-102: Pico fails PEC on chain index N → only the
+    `0x6C7[N]` (or `0x6C8[N-8]`) byte climbs while others stay at 0.
+
+    Identical assertion to Block E's E-067, but framed under Block G
+    (pit-diag stream) so the test reads as "verify the pit-diag stream
+    correctly localises a per-IC fault" rather than "verify the chain
+    integrity check". Same Pico STOP_REPLY mechanism.
+
+    See `tests/hil/ams/test_block_e_ltc.py::TestE067PerIcPecLocalisation`
+    for the Block E twin. Same caveat re: IFS08_HIL#44 saturating the
+    baseline.
+    """
+
+    def test_g102_pec_localisation(self, fresh_boot, pico_emu, pit_diag):
+        # Baseline.
+        pit_diag.wait_for_scan()
+        a0 = pit_diag.wait_for(M.ID_PIT_DIAG_PEC_PER_IC_A)
+        b0 = pit_diag.wait_for(M.ID_PIT_DIAG_PEC_PER_IC_B)
+        baseline = list(a0[0:8]) + list(b0[0:2])
+
+        try:
+            # Silence module 1 (chain index 2 + 3) this time — distinct
+            # from the E-067 module-2 case so the two tests exercise
+            # different chain slots in the same suite.
+            pico_emu.stop_reply(0x02)
+            time.sleep(2.0)
+
+            a1 = pit_diag.wait_for(M.ID_PIT_DIAG_PEC_PER_IC_A)
+            b1 = pit_diag.wait_for(M.ID_PIT_DIAG_PEC_PER_IC_B)
+            current = list(a1[0:8]) + list(b1[0:2])
+            delta = [(c - b) & 0xFF for c, b in zip(current, baseline)]
+
+            assert delta[2] > 0, f"chain index 2 PEC count did not climb (Δ={delta[2]})"
+            assert delta[3] > 0, f"chain index 3 PEC count did not climb (Δ={delta[3]})"
+
+            silenced = {2, 3}
+            collateral = [(i, d) for i, d in enumerate(delta)
+                          if i not in silenced and d > 5]
+            assert not collateral, (
+                "Per-IC PEC count climbed for chain indices outside the "
+                f"silenced module-1 pair (2, 3): {collateral}. "
+                "If IFS08_HIL#44 is open the baseline is saturated and "
+                "this assertion can't fire cleanly; fix the bench first.")
+        finally:
+            pico_emu.resume_all()

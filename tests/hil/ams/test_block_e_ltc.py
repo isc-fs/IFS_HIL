@@ -193,70 +193,111 @@ class TestE065StopPicoModulesGoStale:
                        + 300)
 
 
-# ---------------------------------------------------------------------------
-# E-066 — Inject out-of-range cell V → cell-range predicate trips
-# ---------------------------------------------------------------------------
-
-class TestE066InjectCellOverVoltage:
-    """`CellOverVoltageMv` = 4200, `CellUnderVoltageMv` = 2800 per
-    `ams_config.hpp`. Injecting outside those bounds should trip the
-    cell-range safety predicate within a couple of FSM ticks; FSM
-    enters Error. Use addressing per the (module 0..4, cell 0..18)
-    AMS view; the Pico client translates to chain position
-    internally (see `PicoLtcClient._module_cell_to_chain`)."""
-
-    def test_e066_over(self, fresh_boot, pico_emu, wait_for_state,
-                       ams_profile):
-        assert fresh_boot["first_frame"]["state"] == M.FsmState.START
-        # Inject 4400 mV (> 4200 over-voltage threshold) into module 2
-        # cell 5 (a mid-pack cell on the upper LTC).
-        pico_emu.inject_cell_v(module=2, cell=5, mV=4400)
-        wait_for_state(
-            M.FsmState.ERROR,
-            timeout_ms=int(ams_profile["tx_telemetry_period_ms"]) * 2 + 500)
-
-    def test_e066_under(self, fresh_boot, pico_emu, wait_for_state,
-                        ams_profile):
-        assert fresh_boot["first_frame"]["state"] == M.FsmState.START
-        # Inject 2500 mV (< 2800 under-voltage threshold) into module 0
-        # cell 10 (a cell on the lower LTC of module 0; exercises the
-        # client's chain-pos translation for cell >= 10).
-        pico_emu.inject_cell_v(module=0, cell=10, mV=2500)
-        wait_for_state(
-            M.FsmState.ERROR,
-            timeout_ms=int(ams_profile["tx_telemetry_period_ms"]) * 2 + 500)
+# Cell V/T injection coverage moved to Block B-026 per AMS #272 —
+# E-066 and E-067 now test partial-chain stop-reply and per-IC PEC
+# localisation respectively. See test_block_b_safety.py::TestB026CellRangeInjection
+# for the predicate-trip coverage previously held here.
 
 
 # ---------------------------------------------------------------------------
-# E-067 — Inject out-of-range cell T → cell-T predicate trips
+# E-066 — STOP_REPLY 0x04 (module 2) → mask reads 0x1B  (per AMS #272)
 # ---------------------------------------------------------------------------
 
-class TestE067InjectCellOverTemperature:
-    """`CellOverTempC` = 60, `CellUnderTempC` = -10 per
-    `ams_config.hpp`. Same pattern as E-066 but on the NTC aux
-    channels (LTC6811 AUX pins driven through the bench's temperature
-    Beta model). `deci_degC` = degrees C × 10, so 750 = 75 °C and
-    -200 = -20 °C."""
+class TestE066StopReplyModule2:
+    """Per AMS #272 E-066: silence only module 2's two chain positions
+    (chain index 4 + 5). The freshness derivation (#250) drops bit 2 of
+    `module_online_mask` after `BmsStaleMs` while leaving bits 0, 1, 3,
+    4 set — i.e. the mask reads `0x1B` (= `0b11011`). The safety
+    supervisor trips FSM to Error because `module_online_mask !=
+    config::AllModulesMask`.
+    """
 
-    # NOTE: (module=0, sensor=0) is the only temp address currently
-    # confirmed to propagate from Pico state to AMS RDAUXx response on
-    # this bench. Other chain positions / sensor indices don't seem to
-    # land on a channel AMS actually reads for max/min_tempC. Tracked
-    # as a Pico-emulator follow-up; for now these tests use the
-    # known-good address and rely on coverage of the predicate path,
-    # not the address-space coverage.
-    def test_e067_over(self, fresh_boot, pico_emu, wait_for_state,
-                       ams_profile):
+    def test_e066_module2_only(self, fresh_boot, pico_emu, observe_acu,
+                                wait_for_state, ams_profile):
         assert fresh_boot["first_frame"]["state"] == M.FsmState.START
-        pico_emu.inject_cell_t(module=0, sensor=0, deci_degC=750)  # 75 °C
-        wait_for_state(
-            M.FsmState.ERROR,
-            timeout_ms=int(ams_profile["tx_telemetry_period_ms"]) * 2 + 500)
 
-    def test_e067_under(self, fresh_boot, pico_emu, wait_for_state,
-                        ams_profile):
-        assert fresh_boot["first_frame"]["state"] == M.FsmState.START
-        pico_emu.inject_cell_t(module=0, sensor=0, deci_degC=-200)  # -20 °C
-        wait_for_state(
-            M.FsmState.ERROR,
-            timeout_ms=int(ams_profile["tx_telemetry_period_ms"]) * 2 + 500)
+        try:
+            # 0x04 = bit 2 set = silence module 2's chain positions
+            # (LTC 4 + LTC 5 per the 2×N / 2×N+1 mapping).
+            pico_emu.stop_reply(0x04)
+
+            # Budget: BmsStaleMs (1500 ms) + safety-cycle + telemetry slack.
+            window_ms = (int(ams_profile.get("bms_stale_ms", 1500))
+                         + int(ams_profile["tx_telemetry_period_ms"]) + 500)
+            wait_for_state(M.FsmState.ERROR, timeout_ms=window_ms)
+
+            # Confirm the mask drop pattern: bit 2 should be the only
+            # bit cleared. Per #250 the mask reflects current freshness,
+            # so the other 4 modules still report fresh.
+            f = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
+            assert f is not None, "no 0x4A0 after Error transition"
+            mask = M.decode_telem_status(f.data)["module_online_mask"]
+            assert mask == 0x1B, (
+                f"module_online_mask = 0x{mask:02X}, expected 0x1B "
+                "(bit 2 cleared, modules 0/1/3/4 still fresh). "
+                "Either the Pico's per-module silence mapping is "
+                "off or AMS's freshness derivation regressed.")
+        finally:
+            pico_emu.resume_all()
+
+
+# ---------------------------------------------------------------------------
+# E-067 — Per-IC PEC localisation  (per AMS #272)
+# ---------------------------------------------------------------------------
+
+class TestE067PerIcPecLocalisation:
+    """Per AMS #272 E-067: forcing PEC failure on a specific chain
+    index should be visible only on that index's per-IC PEC counter
+    (`0x6C7[N]` for chain 0..7, `0x6C8[N-8]` for chain 8..9) while the
+    other indices stay at 0.
+
+    Method: STOP_REPLY <mask> replaces the silenced positions' bytes
+    with 0xFF on the wire, which fails PEC for exactly those ICs. We
+    silence module 2 (mask 0x04 = chain index 4 + 5) and assert
+    `0x6C7[4]` + `0x6C7[5]` climb above zero while every other byte
+    in `0x6C7` + `0x6C8` stays at 0.
+
+    NOTE: With IFS08_HIL#44 still open (wire-level PEC corruption
+    affecting all chain positions ~70 % of polls, chip 1 outlier),
+    every IC's counter is already non-zero at boot. This test SHOULD
+    fail until #44 is resolved on the bench side — the assertion is
+    correct, the bench is broken.
+    """
+
+    def test_e067_pec_localisation(self, fresh_boot, pico_emu, pit_diag):
+        # Baseline: PEC counters before injecting.
+        pit_diag.wait_for_scan()
+        a0 = pit_diag.wait_for(M.ID_PIT_DIAG_PEC_PER_IC_A)
+        b0 = pit_diag.wait_for(M.ID_PIT_DIAG_PEC_PER_IC_B)
+        baseline = list(a0[0:8]) + list(b0[0:2])
+
+        try:
+            # Silence module 2 → chain index 4 + 5 should fail PEC.
+            pico_emu.stop_reply(0x04)
+            time.sleep(2.0)  # ~2 scan cycles so counters can climb.
+
+            a1 = pit_diag.wait_for(M.ID_PIT_DIAG_PEC_PER_IC_A)
+            b1 = pit_diag.wait_for(M.ID_PIT_DIAG_PEC_PER_IC_B)
+            current = list(a1[0:8]) + list(b1[0:2])
+            delta = [(c - b) & 0xFF for c, b in zip(current, baseline)]
+
+            # The silenced indices (4 + 5) must have climbed.
+            assert delta[4] > 0, f"chain index 4 PEC count did not climb (Δ={delta[4]})"
+            assert delta[5] > 0, f"chain index 5 PEC count did not climb (Δ={delta[5]})"
+
+            # Every other index must have stayed at zero delta. With
+            # IFS08_HIL#44 the baseline is already saturated for every
+            # chip, so the delta IS zero (saturation absorbs new errors)
+            # — that confounds the test until #44 lands. Surface that
+            # explicitly in the failure message.
+            silenced = {4, 5}
+            collateral = [(i, d) for i, d in enumerate(delta)
+                          if i not in silenced and d > 5]  # >5 = noise margin
+            assert not collateral, (
+                "Per-IC PEC count climbed for chain indices outside "
+                f"the silenced module-2 pair (4, 5): {collateral}. "
+                "If IFS08_HIL#44 is still open the baseline is "
+                "saturated at 0xFF, which masks this assertion. "
+                "Drop the bench's PEC corruption first.")
+        finally:
+            pico_emu.resume_all()

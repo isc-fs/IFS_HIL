@@ -260,3 +260,83 @@ class TestD045NegativeCases:
             f"(frame={frame!r} on {bus}). The boot-trigger match is "
             "too permissive."
         )
+
+
+# ---------------------------------------------------------------------------
+# D-052 — JumpReason via pit-diag 0x6C4  (NEW per AMS #272)
+# ---------------------------------------------------------------------------
+
+class TestD052JumpReasonViaPitDiag:
+    """Per AMS #272 D-052: after a CAN-trigger reboot, the BL writes
+    `JumpReason::CanTrigger` (= `0x4A554D50`, 'JUMP' LE per PR #113) to
+    `RTC->BKP2R`. The app reads it on boot and the pit-diag stream
+    exposes it on `0x6C4[0..3]` (LE u32). This replaces the SWD-only
+    D-042 of the previous test plan — every assertion observable over
+    `can0`.
+
+    Sequence:
+      1. fresh_boot → app running, BKP2R = 0 (cold-boot reason).
+      2. cansend 002#B007AD11 on bus_acu → app's matches_trigger()
+         hits → Bootloader::request_reboot() writes BL_BOOT_REQ_MAGIC
+         to BKP0R and resets.
+      3. BL boots, sees BKP0R magic, parks in BL mode.
+      4. Reflash the app via can-flasher with --jump (puts us back in
+         the app; the BL has already written JumpReason to BKP2R as
+         part of its jump path).
+      5. App boots, app_init reads BKP2R → mirrored into pit-diag's
+         g_jump_reason → ships on 0x6C4[0..3].
+      6. Enable pit-diag and read 0x6C4 → expect 0x4A554D50.
+
+    Skipped if AMS_FIRMWARE_BIN isn't set / .bin missing.
+    """
+
+    def test_d052_jump_reason_in_pit_diag(self, fresh_boot, observe_acu,
+                                           pit_diag, ams_profile):
+        import os
+        from pathlib import Path
+
+        # Trigger the reboot.
+        subprocess.run(
+            ["cansend", ams_profile["bus_acu"], "002#B007AD11"],
+            check=True, timeout=2,
+        )
+        assert _trigger_rebooted_to_bl(observe_acu, ams_profile), (
+            "Trigger didn't land the chip in BL; D-052 setup failed.")
+
+        # Reflash + jump so the app comes back. Path: AMS_FIRMWARE_BIN
+        # env var, else `/tmp/AMS.bin` (the default the bench writes
+        # to during sync). Skip if neither is present so off-bench
+        # collection stays clean.
+        bin_path = Path(os.environ.get("AMS_FIRMWARE_BIN", "/tmp/AMS.bin"))
+        if not bin_path.exists():
+            pytest.skip(
+                f"Need AMS .bin at {bin_path} to reflash+jump back to app "
+                "(D-052 reads the post-boot pit-diag jump_reason). Set "
+                "AMS_FIRMWARE_BIN or place the .bin at /tmp/AMS.bin.")
+
+        r = subprocess.run(
+            ["can-flasher", "--interface", "socketcan",
+             "--channel", ams_profile["bus_bms_bl"],
+             "--bitrate", "500000",
+             "--node-id", hex(int(ams_profile["bl_node_id"])),
+             "--timeout", "8000",
+             "flash", str(bin_path),
+             "--address", "0x08020000",
+             "--verify-after", "--jump"],
+            capture_output=True, text=True, timeout=30)
+        assert "jumped to app" in r.stdout, (
+            f"can-flasher didn't report 'jumped to app':\n{r.stdout[-500:]}")
+
+        # Wait for the app to come up and pit-diag to be enabled by
+        # the conftest pit_diag fixture's setup. The fixture already
+        # emits the enable frame; just wait for the first 0x6C4.
+        boot_diag = pit_diag.wait_for(M.ID_PIT_DIAG_BOOT, timeout_s=4.0)
+        assert len(boot_diag) == 8, f"0x6C4 dlc != 8 (got {len(boot_diag)})"
+
+        jump_reason = int.from_bytes(boot_diag[0:4], "little")
+        EXPECTED = 0x4A554D50  # 'JUMP' LE per stm32-can-bootloader PR #113
+        assert jump_reason == EXPECTED, (
+            f"0x6C4[0..3] jump_reason = 0x{jump_reason:08X}, "
+            f"expected 0x{EXPECTED:08X} ('JUMP' LE). Either the BL did "
+            "not write the CanTrigger reason to BKP2R, or app_init "
+            "didn't capture it before pit-diag emit.")
