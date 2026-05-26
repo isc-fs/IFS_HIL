@@ -374,18 +374,45 @@ class TestC041ModeLockedRetained:
     the VCU mid-Run must NOT flip mode — it should trip VCU-stale and
     land in Error with mode_locked == Car still readable.
 
-    Observable via the cockpit byte in 0x4A2[5]: mode_locked encoding
-    is 0x04 (Car) once latched, even after FSM transitions to Error.
+    Observable via the cockpit byte in 0x4A2[5]: bits 2..3 encode the
+    mode latch (0=Undecided, 1=Car, 2=Charger). Unskipped post-#251
+    which hoisted the encoding out of HIL_STUB.
     """
 
-    @pytest.mark.skip(reason=(
-        "Cockpit byte encoding is gated under HIL_STUB in firmware "
-        "(AMS issue #246); on HIL_CLEAR builds byte 5 reads 0x00 and "
-        "mode_locked isn't visible. Drop the skip once #246 hoists "
-        "the encoding out of HIL_STUB."
-    ))
-    def test_c041_mode_locked_retained_through_error(self):
-        pass
+    def test_c041_mode_locked_retained_through_error(
+        self, fresh_boot, observe_acu, tsms, dash_chg, acu_heartbeat,
+        wait_for_state, ams_profile
+    ):
+        _require_inputs(tsms, dash_chg)
+
+        # 1. Drive Start → Precharge → Run; mode latches Car on the
+        #    Start→Precharge edge.
+        _drive_to_run(tsms, dash_chg, acu_heartbeat, wait_for_state,
+                      ams_profile)
+
+        # Sample cockpit byte while in Run. Bits 2..3 should be 0b01 (Car).
+        f_run = observe_acu.last(M.ID_TELEM_TEMPS, extended=False)
+        assert f_run is not None, "no 0x4A2 frame in Run"
+        mode_run = (f_run.data[5] >> 2) & 0x03
+        assert mode_run == 1, (
+            f"mode_locked in Run = {mode_run}, expected 1 (Car). "
+            f"Full cockpit byte = 0x{f_run.data[5]:02X}")
+
+        # 2. Kill VCU heartbeat and wait past VcuStaleMs → FSM trips Error.
+        acu_heartbeat["pause"]()
+        wait_for_state(M.FsmState.ERROR,
+                       timeout_ms=int(ams_profile["vcu_stale_ms"])
+                                  + int(ams_profile["tx_telemetry_period_ms"])
+                                  + 300)
+
+        # 3. mode_locked must STILL read Car after the transition to Error.
+        f_err = observe_acu.last(M.ID_TELEM_TEMPS, extended=False)
+        assert f_err is not None, "no 0x4A2 frame after entering Error"
+        mode_err = (f_err.data[5] >> 2) & 0x03
+        assert mode_err == 1, (
+            f"mode_locked after Error = {mode_err}, expected 1 (Car) -- "
+            "mode latch was supposed to survive the predicate trip. "
+            f"Full cockpit byte = 0x{f_err.data[5]:02X}")
 
 
 # ---------------------------------------------------------------------------
@@ -393,16 +420,80 @@ class TestC041ModeLockedRetained:
 # ---------------------------------------------------------------------------
 
 class TestC042CockpitByteAcrossStates:
-    @pytest.mark.skip(reason=(
-        "Blocked on AMS issue #246 (cockpit byte gated under "
-        "HIL_STUB; HIL_CLEAR build ships 0x00). Same root cause as "
-        "A-010. Once #246 lands, run the FSM through "
-        "Start->Precharge->Transition->Run->Error (and the Charge "
-        "path separately) and assert 0x4A2[5] encodes the right "
-        "valid+mode+TSMS+DASH bits at each step."
-    ))
-    def test_c042_cockpit_byte_per_state(self):
-        pass
+    """Per #245: the cockpit byte at `0x4A2[5]` encodes the FSM-visible
+    cockpit state across every state. Bit layout (verified against
+    safety_task.cpp post-#251):
+
+        bit 7   sentinel — set whenever firmware is running
+        bits 4..6 reserved (0)
+        bits 2..3 mode_locked (0 Undecided / 1 Car / 2 Charger)
+        bit 1   TSMS GPIO readback
+        bit 0   DASH_CHG GPIO readback
+
+    Unskipped post-#251 (cockpit byte hoist out of HIL_STUB).
+    """
+
+    def test_c042_cockpit_byte_per_state(
+        self, fresh_boot, observe_acu, tsms, dash_chg, acu_heartbeat,
+        wait_for_state, ams_profile
+    ):
+        _require_inputs(tsms, dash_chg)
+
+        def _cockpit_now():
+            """Wait one telemetry cycle + slack, return 0x4A2[5]."""
+            time.sleep(int(ams_profile["tx_telemetry_period_ms"]) / 1000.0
+                       + 0.2)
+            f = observe_acu.last(M.ID_TELEM_TEMPS, extended=False)
+            assert f is not None, "no 0x4A2 after state settle"
+            return f.data[5]
+
+        def _decode(cockpit_byte):
+            return {
+                "sentinel": bool(cockpit_byte & 0x80),
+                "mode":     (cockpit_byte >> 2) & 0x03,
+                "tsms":     bool(cockpit_byte & 0x02),
+                "dash":     bool(cockpit_byte & 0x01),
+            }
+
+        # 1. Start (no fixtures driving) — already in fresh_boot.
+        observed = {}
+        observed["Start"] = _decode(_cockpit_now())
+
+        # 2. Drive Start → Precharge (mode latches Car).
+        _drive_to_precharge(tsms, dash_chg, wait_for_state, ams_profile)
+        observed["Precharge"] = _decode(_cockpit_now())
+
+        # 3. Drive Precharge → Transition → Run (acu_heartbeat ramps dc_bus).
+        pack_V = int(ams_profile["stub_expected_pack_mV"]) // 1000
+        acu_heartbeat["set_volts"](int(pack_V * 0.96))
+        wait_for_state(M.FsmState.RUN,
+                       timeout_ms=int(ams_profile["state_transition_window_ms"])
+                                  + int(ams_profile["transition_hold_ms"])
+                                  + 200)
+        observed["Run"] = _decode(_cockpit_now())
+
+        # 4. Run → Error via TSMS drop.
+        tsms.deassert()
+        wait_for_state(M.FsmState.ERROR,
+                       timeout_ms=int(ams_profile["state_transition_window_ms"])
+                                  + 200)
+        observed["Error"] = _decode(_cockpit_now())
+
+        # Assertions: sentinel always set; mode_locked = Car (1) once
+        # latched and through Error.
+        for state, c in observed.items():
+            assert c["sentinel"], f"sentinel bit clear in state {state}: {c}"
+
+        assert observed["Start"]["mode"] == 0, (
+            f"Start should be mode=Undecided (0), got {observed['Start']}")
+        for state in ("Precharge", "Run", "Error"):
+            assert observed[state]["mode"] == 1, (
+                f"{state} should retain mode=Car (1), got {observed[state]}")
+
+        # TSMS bit follows the fixture state.
+        assert observed["Start"]["tsms"] is False
+        assert observed["Precharge"]["tsms"] is True
+        assert observed["Error"]["tsms"] is False    # we dropped it
 
 
 # ---------------------------------------------------------------------------

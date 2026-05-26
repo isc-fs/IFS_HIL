@@ -408,6 +408,88 @@ def dash_chg(ams_profile, mlc_powered):
 
 
 # ---------------------------------------------------------------------------
+# Pit-diag stream enable (AMS PR #248 + #263 + #269)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def pit_diag(ams_profile, mlc_powered, observe_acu):
+    """Enable the AMS pit-diag burst (1 Hz, 58 frames on 0x680..0x6C8)
+    for the duration of the test. Disables on teardown.
+
+    Yields a small helper with:
+      - `wait_for(can_id, timeout_s)` → bytes payload of next 0x6Cx frame
+      - `wait_for_scan(timeout_s)`    → blocks until at least one complete
+                                        scan cycle has been observed
+        (defined as: 0x6C6 firmware-ID arriving after enable, since it's
+        the last frame in tx_pit_diag_scan before the per-IC PEC pair).
+
+    Requires AMS firmware post-#248 (pit-diag stream landed) and
+    post-#263 (TX-FIFO flow control) so all 58 frames reach the wire.
+    """
+    import subprocess
+    from tools.firmware_test.ams import can_map as M
+
+    bus = ams_profile["bus_acu"]
+    _skip_if_no_can(bus)
+
+    def _send_cmd(payload: bytes) -> None:
+        # cansend ID#HEXBYTES — assume bash on the runner.
+        hex_payload = payload.hex().upper()
+        r = subprocess.run(
+            ["cansend", bus, f"{M.ID_PIT_DIAG_CMD:03X}#{hex_payload}"],
+            capture_output=True, text=True, timeout=2.0,
+        )
+        if r.returncode != 0:
+            pytest.skip(f"cansend rejected pit-diag cmd on {bus}: "
+                        f"{r.stderr.strip()}")
+
+    class _PitDiag:
+        def wait_for(self, can_id: int, timeout_s: float = 2.5) -> bytes:
+            """Block up to `timeout_s` for the next frame at `can_id`
+            (default 2.5 s = 2 scan periods + slack). Returns the bytes
+            payload."""
+            deadline = time.monotonic() + timeout_s
+            while time.monotonic() < deadline:
+                f = observe_acu.last(can_id, extended=False)
+                if f is not None:
+                    return bytes(f.data[: f.dlc])
+                time.sleep(0.02)
+            raise AssertionError(
+                f"no pit-diag frame 0x{can_id:03X} observed within "
+                f"{timeout_s:.1f} s -- is the AMS firmware post-#248 "
+                "(pit-diag stream landed)? Is the bus the right one "
+                f"(observing {bus})?")
+
+        def wait_for_scan(self, timeout_s: float = 2.5) -> None:
+            """Block until at least one complete scan has been observed.
+            We anchor on 0x6C6 (firmware-ID) since it's the last frame
+            in tx_pit_diag_scan before the per-IC PEC pair."""
+            observe_acu.clear()
+            self.wait_for(M.ID_PIT_DIAG_FW_ID, timeout_s)
+
+    # Enable
+    _send_cmd(M.PIT_DIAG_ENABLE_MAGIC)
+    # Wait for ACK so the test doesn't race the enable.
+    helper = _PitDiag()
+    try:
+        helper.wait_for(M.ID_PIT_DIAG_ACK, timeout_s=0.5)
+    except AssertionError:
+        pytest.skip("pit-diag enable ACK (0x7F1) not seen within 0.5 s "
+                    "-- AMS firmware may be pre-#248. Confirm with "
+                    "`gh issue view 248 -R isc-fs/IFS08-CE-AMS`.")
+
+    try:
+        yield helper
+    finally:
+        # Best-effort disable on teardown so the next test starts
+        # without a stale enable.
+        try:
+            _send_cmd(M.PIT_DIAG_DISABLE_MAGIC)
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
 # Pico LTC emulator client (v0.3.0+ for STOP_REPLY / inject_*)
 # ---------------------------------------------------------------------------
 
