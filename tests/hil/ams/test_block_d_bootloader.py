@@ -1,15 +1,20 @@
 """
 Block D — Bootloader integration.
 
-Implements D-041..D-045 from `isc-fs/IFS08-CE-AMS#123`.
+Per `isc-fs/IFS08-CE-AMS#245` (post-#243 numbering; supersedes the
+v1.4.0 D-041..D-045 scheme from #123). Block D collapsed to just the
+core BL contract:
 
-| Test  | What it checks                                          | Status      |
-|-------|---------------------------------------------------------|-------------|
-| D-041 | Boot-trigger frame jumps to BL                          | implemented |
-| D-042 | JumpReason logged in RTC_BKP_DR2                        | needs GDB   |
-| D-043 | Node ID in firmware_info                                | host-side   |
-| D-044 | Cold cycle → app auto-jumps                             | implemented |
-| D-045 | Boot-trigger negative cases                             | implemented |
+| #245 ID | What it checks                                         | Status      |
+|---------|--------------------------------------------------------|-------------|
+| D-050   | Cold cycle → app auto-jumps                            | implemented |
+| D-051   | Boot-trigger 0x002 reboots to BL (unblocked by #243)   | implemented |
+| D-051b  | NEW — Same trigger reboots from Error state too        | implemented |
+
+D-042 (BKP2R JumpReason), D-043 (firmware_info node ID), and D-045
+(boot-trigger negative cases) are kept for regression coverage but
+aren't in #245's reduced Block D scope. A-009 picks up the node-ID
+check on the Block A boot baseline.
 """
 
 from __future__ import annotations
@@ -85,9 +90,9 @@ def _trigger_rebooted_to_bl(observe_acu, ams_profile,
 # D-041 — Boot-trigger jumps to BL
 # ---------------------------------------------------------------------------
 
-class TestD041BootTriggerJumps:
+class TestD051BootTriggerJumps:
 
-    def test_d041(self, fresh_boot, observe_acu, ams_profile):
+    def test_d051(self, fresh_boot, observe_acu, ams_profile):
         # Confirm the app is alive before triggering: at least one
         # 0x4A0 frame must be on the bus.
         deadline = time.monotonic() + 4.0
@@ -121,7 +126,7 @@ class TestD041BootTriggerJumps:
 # D-041b — Trigger reaches BL even when FSM is in Error
 # ---------------------------------------------------------------------------
 
-class TestD041bTriggerFromErrorState:
+class TestD051bTriggerFromErrorState:
     """Safety property: the boot trigger is the *only* way to reflash
     the AMS in the car (no reset switch on the enclosure, battery
     disconnect requires opening the accumulator). It MUST therefore be
@@ -136,7 +141,7 @@ class TestD041bTriggerFromErrorState:
     parallel to MainTask's FSM loop; it must remain reachable even
     when MainTask is wedged on the Error path."""
 
-    def test_d041b_trigger_works_from_error(
+    def test_d051b_trigger_works_from_error(
             self, fresh_boot, observe_acu,
             acu_heartbeat, ams_profile):
         # Step 1: trip FSM into Error.
@@ -250,9 +255,9 @@ class TestD043NodeIdInFirmwareInfo:
 # D-044 — Cold cycle → app auto-jumps
 # ---------------------------------------------------------------------------
 
-class TestD044ColdCycleAutoJumps:
+class TestD050ColdCycleAutoJumps:
 
-    def test_d044(self, fresh_boot, ams_profile):
+    def test_d050(self, fresh_boot, ams_profile):
         # `fresh_boot` already does a cold power-cycle and waits for the
         # first 0x4A0 telemetry frame. If we got here, auto-jump worked.
         elapsed_ms = (fresh_boot["t_first_frame"] - fresh_boot["t_power_on"]) * 1000

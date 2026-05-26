@@ -369,3 +369,176 @@ class TestA008TelemetryCadence:
             f"out of {period_ms} ± {jitter_ms} ms window. First few "
             f"offenders: {outliers[:3]}"
         )
+
+
+# ---------------------------------------------------------------------------
+# A-009 — firmware_info.reserved[0] == node ID  (#245 baseline check)
+# ---------------------------------------------------------------------------
+
+class TestA009FirmwareInfoNodeId:
+    """Static check on the .bin we're about to flash: the node-ID
+    embedded in the `bl_fwinfo_t` record must match the BL node ID we
+    address the unit by. Same record D-043 verifies, hoisted into
+    Block A so the boot-baseline scoreboard catches a misbuilt image
+    before the bench wastes cycles flashing it.
+    """
+
+    def test_a009(self, ams_firmware_bin, ams_profile):
+        from pathlib import Path
+        data = Path(ams_firmware_bin).read_bytes()
+        rec_offset = 0x400
+        assert len(data) > rec_offset + 0x40, (
+            f"bin too small ({len(data)} bytes); no firmware_info record."
+        )
+        rec = data[rec_offset:rec_offset + 0x40]
+        reserved0 = int.from_bytes(rec[0x38:0x3C], "little")
+        expected = int(ams_profile["bl_node_id"])
+        assert reserved0 == expected, (
+            f"firmware_info.reserved[0] = 0x{reserved0:08X}, "
+            f"expected 0x{expected:08X}."
+        )
+
+
+# ---------------------------------------------------------------------------
+# A-010 — 0x4A2[5] cockpit byte in Start = 0x80 sentinel
+# ---------------------------------------------------------------------------
+
+class TestA010CockpitByteSentinel:
+    """`0x4A2[5]` packs the cockpit state. In Start, with no fixtures
+    driving PF9/PF10, the byte should read exactly `0x80`:
+      bit 7 = valid sentinel        (always set when firmware is running)
+      bits 4..6 = reserved          (zero)
+      bits 2..3 = mode_locked       (00 = Undecided, FSM hasn't latched yet)
+      bit 1 = TSMS                  (low)
+      bit 0 = DASH_CHG              (low)
+    Any deviation means either the firmware lost the sentinel bit, the
+    inputs are mis-read (FSM thinks TSMS / DASH are HIGH), or the mode
+    locked early (would be 0x84 / 0x88).
+    """
+
+    def test_a010(self, fresh_boot, observe_acu, ams_profile):
+        # Wait one telemetry cycle past fresh_boot so we see the
+        # post-boot steady-state cockpit byte, not a transient.
+        time.sleep(int(ams_profile["tx_telemetry_period_ms"]) / 1000.0 + 0.2)
+        f = observe_acu.last(M.ID_TELEM_TEMPS, extended=False)
+        assert f is not None, "no 0x4A2 frame after settle"
+        cockpit_byte = f.data[5]
+        assert cockpit_byte == 0x80, (
+            f"0x4A2[5] = 0x{cockpit_byte:02X}, expected 0x80 "
+            f"(valid + both inputs LOW + mode Undecided). "
+            f"bit 7 (sentinel)={'1' if cockpit_byte & 0x80 else '0'}, "
+            f"mode={(cockpit_byte >> 2) & 0x03}, "
+            f"TSMS={(cockpit_byte >> 1) & 1}, "
+            f"DASH={cockpit_byte & 1}."
+        )
+
+
+# ---------------------------------------------------------------------------
+# A-011 — ECU TX matrix DLCs match contract  (post-#238)
+# ---------------------------------------------------------------------------
+
+# (ID, expected_dlc, label)
+ECU_TX_DLC_CONTRACT = [
+    (0x020, 1, "ok_precharge"),
+    (0x12C, 2, "v_cell_min"),
+    (0x131, 6, "vmin_module_a"),
+    (0x132, 4, "vmin_module_b"),
+    (0x133, 6, "vmax_module_a"),
+    (0x134, 4, "vmax_module_b"),
+    (0x135, 4, "currents"),
+    (0x136, 6, "tmax_module_a"),
+    (0x137, 6, "tmax_module_b"),
+]
+
+
+class TestA011EcuTxMatrixDlcs:
+    """Every ECU-side TX frame must ship with its contract DLC.
+    Pre-#238 the entire matrix shipped with DLC=0 (the `dlc << 16`
+    misencoding), which made the receiving ECU silently ignore the
+    bus. This test is the regression net: capture each frame from
+    `observe_acu` and assert the DLC is what the contract says.
+    """
+
+    def test_a011(self, fresh_boot, observe_acu, ams_profile):
+        # Wait long enough for at least one full slow-TX cycle
+        # (EcuSlowTxMs = 250 ms) plus jitter slack.
+        time.sleep(0.6)
+        missing: list[str] = []
+        wrong_dlc: list[str] = []
+        for can_id, want_dlc, label in ECU_TX_DLC_CONTRACT:
+            f = observe_acu.last(can_id, extended=False)
+            if f is None:
+                missing.append(f"0x{can_id:03X} ({label})")
+                continue
+            if f.dlc != want_dlc:
+                wrong_dlc.append(
+                    f"0x{can_id:03X} ({label}): got DLC={f.dlc}, "
+                    f"expected {want_dlc}")
+        assert not missing, (
+            "ECU TX matrix frames not seen in the 600 ms window: "
+            + ", ".join(missing))
+        assert not wrong_dlc, (
+            "ECU TX matrix DLC mismatch(es) — same shape as #238 pre-fix:\n  "
+            + "\n  ".join(wrong_dlc))
+
+
+# ---------------------------------------------------------------------------
+# A-012 — FDCAN1 drops extended-ID frames at the HW filter  (post-#236)
+# ---------------------------------------------------------------------------
+
+class TestA012FdCan1RejectsExtendedIds:
+    """The AMS configures FDCAN1's global filter to REJECT extended
+    frames at the hardware gate (PR #236). If that ever regresses,
+    an extended-format 0x100 heartbeat would update `dc_bus_V` and
+    keep the VCU-stale predicate fresh -- masking real bus issues.
+
+    Method: stop the standard heartbeat, send an *extended* 0x100
+    heartbeat at the same cadence, then verify FSM goes to Error
+    via VcuStaleMs (= filter dropped the extended frames, so VCU
+    really is stale even though the wire has 20 Hz of 0x100
+    traffic).
+    """
+
+    def test_a012(self, fresh_boot, observe_acu, acu_heartbeat,
+                  wait_for_state, ams_profile):
+        import subprocess, threading
+
+        # Establish baseline: FSM in Start with standard heartbeat.
+        assert fresh_boot["first_frame"]["state"] == M.FsmState.START
+
+        # Pause the standard heartbeat and drive an extended-ID
+        # equivalent on can0. cansend's 8-digit-hex form picks
+        # extended automatically.
+        acu_heartbeat["pause"]()
+        stop_evt = threading.Event()
+
+        def _send_extended():
+            while not stop_evt.is_set():
+                try:
+                    subprocess.run(
+                        ["cansend", ams_profile["bus_acu"],
+                         "00000100#6801"],
+                        check=False, timeout=1,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL)
+                except Exception:
+                    pass
+                stop_evt.wait(0.05)
+
+        t = threading.Thread(target=_send_extended,
+                             name="a012-ext-100", daemon=True)
+        t.start()
+        try:
+            # Within (VcuStaleMs + one telemetry cycle + slack), FSM
+            # MUST trip to Error -- proves the extended frames are
+            # being dropped at the filter, not seen as fresh VCU
+            # updates by the firmware.
+            wait_for_state(
+                M.FsmState.ERROR,
+                timeout_ms=int(ams_profile["vcu_stale_ms"])
+                           + int(ams_profile["tx_telemetry_period_ms"])
+                           + 300)
+        finally:
+            stop_evt.set()
+            t.join(timeout=1.0)
+            acu_heartbeat["resume"]()
