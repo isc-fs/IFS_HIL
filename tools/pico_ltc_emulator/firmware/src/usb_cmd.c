@@ -265,21 +265,35 @@ void usb_cmd_init(void) {
 }
 
 void usb_cmd_service(void) {
-    int c;
-    while ((c = getchar_timeout_us(0)) != PICO_ERROR_TIMEOUT) {
-        if (c == '\r') continue;
-        if (c == '\n') {
-            line_buf[line_len] = '\0';
-            dispatch(line_buf);
-            line_len = 0;
-            continue;
-        }
-        if (line_len < LINE_MAX - 1) {
-            line_buf[line_len++] = (char)c;
-        } else {
-            // Overflow -- drop and reset to avoid corruption.
-            line_len = 0;
-            emit_line("ERR line overflow");
-        }
+    // ONE getchar per call (IFS08_HIL#44). The earlier while-loop kept
+    // pulling bytes until the CDC RX buffer drained, with each call
+    // to getchar_timeout_us(0) re-entering tud_task() inside the
+    // pico-sdk. That could string together hundreds of µs of USB
+    // work inside a single usb_cmd_service entry. Now main.c gates
+    // entries to ~once per AMS poll cycle, AND each entry pulls at
+    // most one byte -- bounds the worst-case tud_task latency per
+    // entry to one TinyUSB poll round (~10-100 µs typical).
+    //
+    // CDC throughput drop is fine: host commands (SET_CELL, STATUS,
+    // BSL, etc.) are 10-30 bytes each, so completing a command takes
+    // a few main-loop iterations instead of one. AMS poll cycle is
+    // 50 ms; even at the slowest service rate (1 byte / 5 ms idle
+    // window) a 30-byte command lands in 150 ms, comfortably below
+    // the test/operator-tool 1 s timeout.
+    int c = getchar_timeout_us(0);
+    if (c == PICO_ERROR_TIMEOUT) return;
+    if (c == '\r') return;
+    if (c == '\n') {
+        line_buf[line_len] = '\0';
+        dispatch(line_buf);
+        line_len = 0;
+        return;
+    }
+    if (line_len < LINE_MAX - 1) {
+        line_buf[line_len++] = (char)c;
+    } else {
+        // Overflow -- drop and reset to avoid corruption.
+        line_len = 0;
+        emit_line("ERR line overflow");
     }
 }

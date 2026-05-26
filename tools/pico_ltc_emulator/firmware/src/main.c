@@ -39,13 +39,35 @@ int main(void) {
     ltc6811_emu_init();
     usb_cmd_init();
 
+    // USB service rate-limit (IFS08_HIL#44 conservative fix).
+    //
+    // The earlier `if (gpio_get(CSN)) usb_cmd_service();` gate failed
+    // because tud_task() inside getchar_timeout_us can run for
+    // hundreds of µs once entered — long enough that CS goes LOW
+    // mid-call and the SPI TX FIFO (8 bytes ≈ 68 µs of headroom at
+    // 937 kHz SCK) underruns, masking MISO. Diag confirmed: with USB
+    // fully disabled, per-IC PEC drops from ~38/IC over 3 s to 0 for
+    // all chips except chip 1's residual ~31 (separate issue).
+    //
+    // This rate-limit keeps CDC alive (BSL trigger + status queries
+    // still respond, just slower) while bounding the rate of USB
+    // service entries to ~once per SPI poll cycle. Combined with the
+    // CS-HIGH gate it puts USB into a narrow window between AMS
+    // polls (typically 50 ms - 5 ms = ~45 ms idle per cycle).
+    //
+    // USB_SERVICE_EVERY_N picked so AMS polls (5 ms xact, 50 ms
+    // period) almost always finish before the next USB service slot
+    // opens. usb_cmd_service was also tightened to one byte per call
+    // (see usb_cmd.c) so each entry's tud_task() can't drag in a
+    // multi-byte burst.
+    #define USB_SERVICE_EVERY_N 256u
+    uint32_t spi_ticks = 0;
     while (true) {
         // Always service SPI; never let it starve.
         ltc6811_emu_service();
-        // Service USB only when CS is HIGH (bus idle between xacts).
-        // tud_task latency is bounded only during idle, never during
-        // a poll cycle's CS-low window.
-        if (gpio_get(LTC_CSN_PIN)) {
+        ++spi_ticks;
+        if ((spi_ticks & (USB_SERVICE_EVERY_N - 1u)) == 0u
+            && gpio_get(LTC_CSN_PIN)) {
             usb_cmd_service();
         }
     }
