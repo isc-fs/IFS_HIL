@@ -138,7 +138,8 @@ class TestC030C031GateRequiresBoth:
 
 class TestC032StartToPrecharge:
 
-    def test_c032(self, fresh_boot, tsms, dash_chg, wait_for_state, ams_profile):
+    def test_c032(self, fresh_boot, tsms, dash_chg, wait_for_state,
+                  pit_diag, ams_profile):
         _require_inputs(tsms, dash_chg)
         assert fresh_boot["first_frame"]["state"] == M.FsmState.START
 
@@ -148,6 +149,16 @@ class TestC032StartToPrecharge:
             M.FsmState.PRECHARGE,
             timeout_ms=int(ams_profile["state_transition_window_ms"]) + 50)
         assert snap["state"] == M.FsmState.PRECHARGE
+
+        # Per AMS #272 C-032: mode_locked latches Car on the
+        # Start→Precharge edge. Observe via pit-diag 0x6C0[1] which
+        # mirrors g_mode_locked_telemetry: 0=Undecided, 1=Car, 2=Charger.
+        fsm_status = pit_diag.wait_for(M.ID_PIT_DIAG_FSM_STATUS)
+        mode_locked = fsm_status[1]
+        assert mode_locked == 1, (
+            f"0x6C0[1] mode_locked = {mode_locked} after Start→Precharge; "
+            "expected 1 (Car). VCU 0x100 was fresh during the transition "
+            "so the latch should have caught Car mode.")
 
 
 # ---------------------------------------------------------------------------
@@ -219,7 +230,7 @@ class TestC038RunToErrorOnTsmsDrop:
 class TestC037ChargerModeFsm:
 
     def test_c037(self, fresh_boot, tsms, dash_chg, acu_heartbeat, acu_stim,
-                  wait_for_state, ams_profile):
+                  wait_for_state, pit_diag, ams_profile):
         _require_inputs(tsms, dash_chg)
 
         # Silence the VCU heartbeat for > kVcuFreshMs (1 s in firmware).
@@ -232,6 +243,17 @@ class TestC037ChargerModeFsm:
         wait_for_state(
             M.FsmState.PRECHARGE,
             timeout_ms=int(ams_profile["state_transition_window_ms"]) + 50)
+
+        # Per AMS #272 C-037: with VCU stale at the Start→Precharge
+        # edge, mode_locked must latch Charger (= 2) not Car. Read via
+        # pit-diag 0x6C0[1].
+        fsm_status = pit_diag.wait_for(M.ID_PIT_DIAG_FSM_STATUS)
+        mode_locked = fsm_status[1]
+        assert mode_locked == 2, (
+            f"0x6C0[1] mode_locked = {mode_locked} after Charger-mode "
+            "Start→Precharge; expected 2 (Charger). VCU was stale "
+            f"(paused 1.2 s > VcuFreshMs {ams_profile.get('vcu_fresh_ms', 1000)} ms) "
+            "so the latch should have caught Charger mode.")
 
         # Mode already locked; safe to drive DC bus high so precharge
         # completes.
