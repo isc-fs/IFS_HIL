@@ -130,6 +130,32 @@ ID_TELEM_TEMPS   = 0x4A2   # min/max/avg tempC, dc_bus_V, heartbeat
 TX_TELEM_PERIOD_MS = 500
 
 
+# ---------------------------------------------------------------------------
+# Pit-diag stream (AMS PR #248 + #263 + #269). Toggled by a 0x7F0 cmd
+# frame; AMS replies with 0x7F1 ACK then bursts the full 58-frame grid at
+# 1 Hz. All standard ID, classic CAN, DLC 8 (except 0x7F0 = 4, 0x7F1 = 1).
+# Source of truth: Core/Inc/app/pit_diag_emitter.hpp + ams_config.hpp.
+# ---------------------------------------------------------------------------
+ID_PIT_DIAG_CMD          = 0x7F0   # host -> AMS: enable/disable
+ID_PIT_DIAG_ACK          = 0x7F1   # AMS -> host: one-shot {01|00} after change
+ID_PIT_DIAG_CELL_BASE    = 0x680   # 24 frames: 4 cells/frame BE u16 mV
+ID_PIT_DIAG_TEMP_BASE    = 0x6A0   # 25 frames: 8 NTCs/frame i8 degC
+ID_PIT_DIAG_FSM_STATUS   = 0x6C0   # [0]fsm [1]mode [2]inputs [3]ams_ok [4..5]pec_err_total BE [6..7]rsv
+ID_PIT_DIAG_TIMING       = 0x6C1   # [0..1]volt_poll_ms BE [2..3]volt_poll_max BE [4..7]temp_sweep_mask LE
+ID_PIT_DIAG_BAL_MASK_A   = 0x6C2
+ID_PIT_DIAG_BAL_MASK_B   = 0x6C3
+ID_PIT_DIAG_BOOT         = 0x6C4   # [0..3]jump_reason LE [4]app_init_progress [5..7]fdcan1_start_result
+ID_PIT_DIAG_POST_MORTEM  = 0x6C5
+ID_PIT_DIAG_FW_ID        = 0x6C6   # [0..2]semver [3..6]git_hash [7]bl_node_id
+ID_PIT_DIAG_PEC_PER_IC_A = 0x6C7   # [0..7]saturating u8 PEC count per IC for chain index 0..7
+ID_PIT_DIAG_PEC_PER_IC_B = 0x6C8   # [0..1]saturating u8 for chain 8..9, [2..7]reserved
+
+PIT_DIAG_ENABLE_MAGIC  = bytes([0xDE, 0xAD, 0xBE, 0xEF])
+PIT_DIAG_DISABLE_MAGIC = bytes([0x00, 0x00, 0x00, 0x00])
+PIT_DIAG_SCAN_PERIOD_MS = 1000     # 1 Hz scan when enabled
+PIT_DIAG_PEC_SATURATION = 0xFF     # u8 saturation point for per-IC counts
+
+
 # FSM state enum, matches Core/Inc/app/state_machine.hpp `ams::fsm::State`.
 class FsmState:
     START      = 0

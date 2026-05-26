@@ -59,6 +59,12 @@ AMS_DIAG_COUNTER_PENDING = (
     "the wire; SWD-only today."
 )
 
+# NOTE: AMS_DIAG_COUNTER_PENDING is no longer used — the counters E-061..E-064
+# rely on are now on the wire via the pit-diag stream (AMS PR #248 status
+# frames 0x6C0 / 0x6C1 + PR #269 per-IC PEC counts on 0x6C7 / 0x6C8).
+# Tests below read from those frames via the `pit_diag` conftest fixture.
+# The constant stays here so a `git grep` from older docs still resolves.
+
 
 # ---------------------------------------------------------------------------
 # E-060 — Chain discovery: module_online_mask == 0x1F within 500 ms
@@ -89,36 +95,96 @@ class TestE060ChainDiscovery:
 # ---------------------------------------------------------------------------
 
 class TestE061VPollCadence:
-    @pytest.mark.skip(reason=AMS_DIAG_COUNTER_PENDING)
-    def test_e061(self):
-        # Sketch once the counter is on the wire:
-        #   wait 60 s, sample 0x4A3 at end, assert
-        #   g_bms_volt_poll_ms_p99 < 50 and g_bms_volt_poll_max
-        #   doesn't drift across the window.
-        pass
+    """Per #245: `g_bms_volt_poll_ms` stays under 50 ms, `g_bms_volt_poll_max`
+    doesn't drift over a 5 s observation. Now readable on `0x6C1[0..1]` (last
+    cycle, BE u16) and `0x6C1[2..3]` (worst-case-since-boot, BE u16) via the
+    pit-diag stream (AMS PR #248)."""
+
+    def test_e061(self, fresh_boot, pit_diag):
+        # Sample once at start, again 5 s later. Assert no drift in the
+        # "worst-case-since-boot" counter (= no jitter spike during the
+        # window) and bound the per-cycle reading.
+        first = pit_diag.wait_for(M.ID_PIT_DIAG_TIMING)
+        poll_first = int.from_bytes(first[0:2], "big")
+        max_first  = int.from_bytes(first[2:4], "big")
+
+        time.sleep(5.0)
+        second = pit_diag.wait_for(M.ID_PIT_DIAG_TIMING)
+        poll_second = int.from_bytes(second[0:2], "big")
+        max_second  = int.from_bytes(second[2:4], "big")
+
+        # Per #245: under 50 ms budget for the V-poll cycle.
+        assert poll_first  < 50, f"V-poll cycle {poll_first} ms ≥ 50 ms at sample 1"
+        assert poll_second < 50, f"V-poll cycle {poll_second} ms ≥ 50 ms at sample 2"
+        # Drift = worst-case grew during the window.
+        assert max_second <= max_first + 5, (
+            f"V-poll worst-case drifted up by {max_second - max_first} ms "
+            f"in 5 s (first={max_first}, second={max_second}). Looks like "
+            "a jitter spike — investigate BmsPollTask priority / preemption.")
 
 
 class TestE062SpiFramingClean:
-    @pytest.mark.skip(reason=AMS_DIAG_COUNTER_PENDING)
+    """Per #245: `g_ltc_spi_err_count` stays at 0 over the observation window
+    (i.e. no SPI bus-level transport errors — distinct from PEC failures
+    which are tracked in E-063). The pit-diag stream doesn't expose
+    `g_ltc_spi_err_count` directly today, but bus-level errors are
+    irrecoverable and would also bump `g_temp_sweep_last_mask` (covered in
+    E-064) and prevent any cell decode (covered in E-066/E-067 passes).
+    Treating this as covered-by-proxy until AMS adds a dedicated counter
+    frame — keep the test, mark it skipped with a clear reason."""
+
+    @pytest.mark.skip(reason=(
+        "g_ltc_spi_err_count not on pit-diag today; bus-level errors "
+        "would also block E-066/E-067 cell-injection passes, so this "
+        "test is covered-by-proxy. File an AMS issue if a direct counter "
+        "frame is needed (suggest extending 0x6C1 with bytes 6..7 = "
+        "spi_err count BE u16, currently reserved)."
+    ))
     def test_e062(self):
-        # Sketch: sample 0x4A3 over 60 s, assert g_ltc_spi_err_count
-        # delta == 0 (no error increments across the window).
         pass
 
 
 class TestE063PecClean:
-    @pytest.mark.skip(reason=AMS_DIAG_COUNTER_PENDING)
-    def test_e063(self):
-        # Sketch: per-module PEC counter sum delta == 0 over 60 s.
-        pass
+    """Per #245: `g_ltc_pec_err_count[*]` stays at 0 over the observation
+    window. With the per-IC counts now on `0x6C7[0..7]` + `0x6C8[0..1]` via
+    AMS PR #269, this is directly readable.
+
+    NOTE: This test will FAIL today on the MLC2 bench because of
+    IFS08_HIL#44 (wire-level PEC corruption — chain-wide ~70% failure rate
+    + chip 1 outlier). The test SHOULD fail in that state — the assertion
+    is correct, the bench is broken. Mark expected-fail until #44 lands."""
+
+    def test_e063(self, fresh_boot, pit_diag):
+        # Wait one scan cycle so PEC counters settle; the saturating u8s
+        # at 0xFF mean ≥ 255 failures since boot — anything > 0 fails the
+        # assertion since #245 calls for zero.
+        pit_diag.wait_for_scan()
+        a = pit_diag.wait_for(M.ID_PIT_DIAG_PEC_PER_IC_A)
+        b = pit_diag.wait_for(M.ID_PIT_DIAG_PEC_PER_IC_B)
+        per_ic = list(a[0:8]) + list(b[0:2])  # chain 0..9
+        nonzero = [(i, c) for i, c in enumerate(per_ic) if c != 0]
+        assert not nonzero, (
+            "Non-zero PEC errors per IC over the observation window: "
+            + ", ".join(f"IC{i}={c}{' (SATURATED ≥255)' if c == 0xFF else ''}"
+                        for i, c in nonzero)
+            + ". Suspect wire-level signal integrity (see IFS08_HIL#44)."
+        )
 
 
 class TestE064TempSweepClean:
-    @pytest.mark.skip(reason=AMS_DIAG_COUNTER_PENDING)
-    def test_e064(self):
-        # Sketch: g_temp_sweep_last_mask reads 0 (no channel failed
-        # on the last sweep) at any point after fresh_boot.
-        pass
+    """Per #245: `g_temp_sweep_last_mask == 0` on a healthy emulator. Now
+    on `0x6C1[4..7]` (LE u32 bitmask, bit N = NTC channel N failed in the
+    last sweep) via AMS PR #248."""
+
+    def test_e064(self, fresh_boot, pit_diag):
+        timing = pit_diag.wait_for(M.ID_PIT_DIAG_TIMING)
+        mask = int.from_bytes(timing[4:8], "little")
+        assert mask == 0, (
+            f"temp_sweep_last_mask = 0x{mask:08X} -- one or more NTC "
+            "channels failed on the last sweep. Bits identify the "
+            "failing channels (bit 0 = AUX1 / ADG731 ch 0, etc.). "
+            "Suspect the LTC chain's GPIO1 routing or the ADG731 mux."
+        )
 
 
 # ---------------------------------------------------------------------------
