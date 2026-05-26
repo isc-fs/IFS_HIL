@@ -217,17 +217,7 @@ class TestE052PowerCycleResilience:
         )
 
 
-# ---------------------------------------------------------------------------
-# E-053 — Brown-out recovery
-# ---------------------------------------------------------------------------
-
-class TestE053BrownOut:
-
-    @pytest.mark.skip(reason=(
-        "E-053 needs programmable VDD control to dip 3.3 V → 1.5 V → 3.3 V "
-        "for 200 ms. The bench's K_n relay can only fully gate the slot "
-        "supply, not modulate it; an external lab PSU or a programmable "
-        "load on the slot VDD would be required."
-    ))
-    def test_e053_brownout_recovery(self):
-        pass
+# E-053 (brown-out recovery) dropped per AMS #272 — needs programmable
+# VDD control (3.3 V → 1.5 V → 3.3 V dip), and the bench K-relay is
+# on/off only. Requires lab PSU or programmable load on slot VDD; not
+# in the production bench architecture.

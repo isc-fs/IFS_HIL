@@ -2,27 +2,18 @@
 Block B — Safety supervisor (post-refactor: SafetyTask + StateTask +
 TelemetryTask are merged into MainTask, single 10 ms loop).
 
-Per `isc-fs/IFS08-CE-AMS#245` (supersedes the v1.4.0 B-010..B-017
-scheme from #123). Tests below renumbered to match the #245 spec;
-the original B-010..B-013 rows are kept as out-of-#245-scope
-regression coverage (cadence + IWDG + latch contract).
+Per `isc-fs/IFS08-CE-AMS#272` (supersedes #245 — every test below is
+observable over can0; SWD-gated rows removed).
 
-| #245 ID | What it checks                                           | Status     |
+| #272 ID | What it checks                                           | Status     |
 |---------|----------------------------------------------------------|------------|
-| B-020   | Boot grace suppresses VCU/BMS staleness                  | scaffolded |
-| B-021   | VCU 0x100 stale > VcuStaleMs → Error (unblocked by #243) | implemented|
-| B-022   | BMS module stale > BmsStaleMs → Error (Pico STOP_REPLY)  | scaffolded |
-| B-023   | Current sensor stale > IStaleMs → Error                  | deferred — flight build only |
-| B-024   | Current overlimit (|filtered_mA| > CurrentMaxMa) → Error | needs DAC4 ch0 stim |
-| B-025   | sensor_fault from ADC failure → Error                    | scaffolded — needs SWD |
-| B-026   | cell UV/OV/OT/UT → Error via Pico INJECT_CELL_V/T        | scaffolded |
-| B-027   | force_error_set legacy hook                              | deferred — no consumer |
+| B-020   | Boot grace suppresses VCU/BMS staleness                  | scaffolded — needs cold-boot-no-heartbeat fixture |
+| B-021   | VCU 0x100 stale > VcuStaleMs → Error                     | implemented|
+| B-022   | BMS module stale > BmsStaleMs → Error (Pico STOP_REPLY)  | TODO — implement in follow-up PR using pico_emu.stop_reply |
+| B-026a..d | cell UV/OV/OT/UT → Error via Pico INJECT_CELL_V/T      | implemented|
 
-Out-of-#245 retained:
+Out-of-#272 (kept as regression coverage):
 | B-010   | MainTask 10 ms cadence via heartbeat indirection (60 s)  | implemented|
-| B-011   | IWDG resets the chip if MainTask hangs                   | needs GDB  |
-| B-012   | Watchdog reset re-opens relays                           | needs GDB  |
-| B-013   | ErrorLatch clears on boot under HIL_STUB                 | needs GDB  |
 """
 
 from __future__ import annotations
@@ -68,107 +59,7 @@ class TestB010MainTaskCadence:
 
 
 # ---------------------------------------------------------------------------
-# B-011 — IWDG resets the chip if MainTask hangs
-# ---------------------------------------------------------------------------
-
-class TestB011IWDGOnMainTaskHang:
-
-    @pytest.mark.skip(reason=(
-        "B-011 requires GDB+OpenOCD to set a breakpoint inside the 10 ms "
-        "MainTask loop and hold the chip past the IWDG window. No SWD "
-        "interface on this rig's MLC. Open a follow-up issue when "
-        "SWD/JTAG is wired to a slot."
-    ))
-    def test_b011_iwdg_resets_on_hang(self):
-        pass
-
-
-# ---------------------------------------------------------------------------
-# B-012 — Watchdog reset re-opens relays
-# ---------------------------------------------------------------------------
-
-class TestB012WatchdogReopensRelays:
-
-    @pytest.mark.skip(reason=(
-        "B-012 requires (a) IWDG injection (GDB, see B-011) and "
-        "(b) a logic-analyser probe on PB5/6/7 to observe the relay "
-        "lines within milliseconds of the reset. Neither is available "
-        "on the current rig."
-    ))
-    def test_b012_relays_reopen_after_iwdg(self):
-        pass
-
-
-# ---------------------------------------------------------------------------
-# B-013 — ErrorLatch clears on boot under HIL_STUB
-# ---------------------------------------------------------------------------
-
-class TestB013ErrorLatchClearsOnBoot:
-
-    @pytest.mark.skip(reason=(
-        "B-013 requires GDB to write `RTC->BKP1R = 0xA115EE51` (the ERROR "
-        "magic) before the power-cycle so we can observe whether "
-        "App_InitTask::ErrorLatch::clear() wipes it. We can't poke "
-        "backup-domain registers from outside without SWD. The "
-        "auto-clear behaviour is exercised every time `fresh_boot` runs "
-        "(every test in this suite starts from a clean BKP1R), so the "
-        "clear is implicitly tested — this test just isolates it."
-    ))
-    def test_b013_latch_clears_under_hil_stub(self):
-        pass
-
-
-# ---------------------------------------------------------------------------
-# B-014 — BMS predicates trip on cell UV/OV/OT
-# ---------------------------------------------------------------------------
-
-class TestB022BMSStale:
-
-    @pytest.mark.skip(reason=(
-        "B-014 is deferred until an LTC6811 isoSPI chain is present on "
-        "the bench (per #123 'Deferred' section). The HIL_STUB seeder "
-        "writes cell_mV=3750 / cell_tempC=25 deep inside the predicate "
-        "windows, so no fault is reachable from the bench under this "
-        "build flag. Repeat on a real-chain rig with a flight build."
-    ))
-    def test_b022_bms_stale_trips_error(self):
-        pass
-
-
-# ---------------------------------------------------------------------------
-# B-015 — Current overlimit predicate trips
-# ---------------------------------------------------------------------------
-
-class TestB024CurrentOverlimit:
-
-    @pytest.mark.skip(reason=(
-        "B-015 needs an analog source driving PF11 (ADC1 ch2) past "
-        "kImaxMa worth of voltage (≈ 4.6 V offset from kCurrentZeroMv "
-        "for 200 A, well over Vref). The bench's DAC80504 outputs are "
-        "not currently routed to SLOT1_AN0 (= GPIO7 = PF11). When the "
-        "bench respin wires DAC2_OUT0 → SLOT1_AN0, this test becomes "
-        "directly runnable."
-    ))
-    def test_b024_current_overlimit_trips_error(self):
-        pass
-
-
-# ---------------------------------------------------------------------------
-# B-016 — Current sensor stale trips
-# ---------------------------------------------------------------------------
-
-class TestB023CurrentStale:
-
-    @pytest.mark.skip(reason=(
-        "B-016 requires halting CurrentSensorTask via GDB so its "
-        "last_update_tick goes stale. No SWD on the rig."
-    ))
-    def test_b023_current_stale_trips_error(self):
-        pass
-
-
-# ---------------------------------------------------------------------------
-# B-017 — VCU heartbeat stale trips
+# B-021 — VCU heartbeat stale trips (AMS #272 row)
 # ---------------------------------------------------------------------------
 
 class TestB021VCUHeartbeatStale:
@@ -209,54 +100,21 @@ class TestB021VCUHeartbeatStale:
 
 
 # ---------------------------------------------------------------------------
-# B-020 — Boot grace suppresses staleness predicates  (NEW per #245)
+# B-020 placeholder + B-025 SWD-only test dropped per AMS #272.
+# B-020 (boot grace) needs a `cold_boot_no_heartbeat` fixture; reimplement
+# when that lands. B-025 requires SWD which the rig doesn't have.
 # ---------------------------------------------------------------------------
-
-import pytest as _pytest  # noqa: E402
-
-class TestB020BootGraceSuppressesStaleness:
-    """During the first SafetyBootGraceMs (= 2 s) after reset, the
-    safety supervisor must NOT trip on staleness predicates even when
-    they're objectively true (no VCU heartbeat, no current sensor
-    update, etc.). This is the grace window that lets BL hand-off +
-    app-init complete before the safety net starts running."""
-
-    @_pytest.mark.skip(reason=(
-        "Needs a fixture that powers MLC2 with NO heartbeats (acu_heartbeat "
-        "paused, current_heartbeat paused) and observes that 0x4A0[0] stays "
-        "in Start for the full SafetyBootGraceMs before tripping to Error. "
-        "fresh_boot starts both heartbeats so it can't be used as-is. "
-        "Implement once a 'cold_boot_no_heartbeat' fixture lands."
-    ))
-    def test_b020_boot_grace_suppresses_staleness(self):
-        pass
 
 
 # ---------------------------------------------------------------------------
-# B-025 — sensor_fault from ADC failure → Error  (NEW per #245)
-# ---------------------------------------------------------------------------
-
-class TestB025SensorFault:
-    @_pytest.mark.skip(reason=(
-        "Needs a way to force the STM32's ADC into a fault state -- SWD "
-        "attach + GDB to corrupt the calibration register, or a hardware "
-        "stim that drives the ADC input out of its measurable range. "
-        "Neither exists on this rig today."
-    ))
-    def test_b025_sensor_fault_trips_error(self):
-        pass
-
-
-# ---------------------------------------------------------------------------
-# B-026 — cell UV/OV/OT/UT → Error via Pico injection  (NEW per #245)
+# B-026 — cell UV/OV/OT/UT → Error via Pico injection  (AMS #272 row)
 # ---------------------------------------------------------------------------
 
 class TestB026CellRangeInjection:
-    """Per #245: with the Pico LTC emulator running, inject out-of-
-    range cell V / cell T values and observe the corresponding
-    safety predicate trip → FSM goes Error. Unblocked by the Pico
-    emulator INJECT_CELL_V / INJECT_CELL_T commands shipped in
-    PR #39 (v0.3.0+).
+    """Per AMS #272 B-026: with the Pico LTC emulator running, inject out-
+    of-range cell V / cell T values and observe the corresponding safety
+    predicate trip → FSM goes Error. Unblocked by the Pico emulator
+    INJECT_CELL_V / INJECT_CELL_T commands shipped in PR #39 (v0.3.0+).
 
     Predicate thresholds per `ams_config.hpp`:
       - CellOverVoltageMv  = 4200
@@ -308,15 +166,6 @@ class TestB026CellRangeInjection:
             timeout_ms=int(ams_profile["tx_telemetry_period_ms"]) * 2 + 500)
 
 
-# ---------------------------------------------------------------------------
-# B-027 — force_error_set legacy hook  (DEFERRED per #245)
-# ---------------------------------------------------------------------------
-
-class TestB027ForceErrorSetHook:
-    @_pytest.mark.skip(reason=(
-        "Per #245: no live setter exists for force_error_set. Test "
-        "DEFERRED until firmware exposes one (would be a #if HIL-only "
-        "diag-write CAN command). Tracking row only."
-    ))
-    def test_b027_force_error_set(self):
-        pass
+# B-027 force_error_set hook dropped per AMS #272 — no live setter
+# exists in firmware, and #272 doesn't reserve a row for it. If the
+# hook is ever re-added, file a new test against that interface.
