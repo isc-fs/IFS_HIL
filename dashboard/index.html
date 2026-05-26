@@ -622,9 +622,12 @@ function switchTab(name) {
 
 let canES = null;
 let canPaused = false;
-let canBuffer = [];          // pending frames if paused
+let canBuffer = [];           // pending frames if paused
 let canTotalSeen = 0;
-const CAN_MAX_ROWS = 1500;   // cap DOM size
+let canRenderQueue = [];      // pending frames to render this animation frame
+let canRenderScheduled = false;
+const CAN_MAX_ROWS = 1500;    // cap DOM size
+const CAN_TRIM_TARGET = 1350; // after trim, leave this many (10% headroom)
 
 function canEnsureStream() {
   if (canES) return;
@@ -651,29 +654,73 @@ function canTogglePause() {
   document.getElementById('can-status').textContent =
       canPaused ? 'paused (buffering…)' : 'live';
   if (!canPaused) {
-    // Drain whatever accumulated
-    canBuffer.forEach(canRenderRow);
+    // Drain accumulated buffer through the render queue so the rAF
+    // flush batches the DOM update (avoids a single-frame stall when
+    // resuming after a long pause with thousands of buffered frames).
+    for (const f of canBuffer) {
+      if (canPassesFilter(f)) canRenderQueue.push(f);
+    }
     canBuffer = [];
-    canTrim();
-    canMaybeScroll();
+    canScheduleFlush();
   }
 }
 
 function canClear() {
   document.getElementById('can-list').innerHTML = '';
   canBuffer = [];
+  canRenderQueue = [];
   canTotalSeen = 0;
   document.getElementById('can-count').textContent = '0 frames';
 }
 
 function canAppend(f) {
   canTotalSeen++;
-  document.getElementById('can-count').textContent =
-      canTotalSeen.toLocaleString() + ' frames';
   if (canPaused) { canBuffer.push(f); return; }
   if (!canPassesFilter(f)) return;
-  canRenderRow(f);
-  canTrim();
+  canRenderQueue.push(f);
+  canScheduleFlush();
+}
+
+function canScheduleFlush() {
+  if (canRenderScheduled) return;
+  canRenderScheduled = true;
+  requestAnimationFrame(canFlush);
+}
+
+// Drain queued frames into the DOM once per animation frame. Batching
+// is the win: at 300 frames/sec across 3 buses, per-frame appendChild
+// + style recalc + scrollTop costs >300 reflows/sec; rAF caps that at
+// ~60 Hz, with each tick doing one fragment append + one bulk trim +
+// one scroll write. Counter text also moves here so toLocaleString +
+// the DOM text write happen 60x/sec instead of 300x.
+function canFlush() {
+  canRenderScheduled = false;
+
+  document.getElementById('can-count').textContent =
+      canTotalSeen.toLocaleString() + ' frames';
+
+  if (canRenderQueue.length === 0) return;
+
+  const queue = canRenderQueue;
+  canRenderQueue = [];
+
+  const list = document.getElementById('can-list');
+  const frag = document.createDocumentFragment();
+  for (let i = 0; i < queue.length; i++) {
+    frag.appendChild(canBuildRow(queue[i]));
+  }
+  list.appendChild(frag);
+
+  // Bulk trim: removing one element at a time at the boundary triggers
+  // a reflow per removal. Drop to CAN_TRIM_TARGET in a single sweep so
+  // we only pay the trim cost when we actually cross the cap.
+  if (list.childElementCount > CAN_MAX_ROWS) {
+    const toRemove = list.childElementCount - CAN_TRIM_TARGET;
+    for (let i = 0; i < toRemove; i++) {
+      list.removeChild(list.firstChild);
+    }
+  }
+
   canMaybeScroll();
 }
 
@@ -690,8 +737,7 @@ function canPassesFilter(f) {
   return idHex === flt;
 }
 
-function canRenderRow(f) {
-  const list = document.getElementById('can-list');
+function canBuildRow(f) {
   const row = document.createElement('div');
   row.className = 'frame-row' + (f.decoded ? ' kind-' + f.decoded.kind : '');
   const tsSec = (f.ts_ms / 1000).toFixed(3);
@@ -703,7 +749,7 @@ function canRenderRow(f) {
       `<span class="f-dlc">[${f.dlc}]</span>` +
       `<span class="f-data">${f.data}</span>` +
       `<span class="f-dec">${dec}</span>`;
-  list.appendChild(row);
+  return row;
 }
 
 function canFmtDecoded(d) {
@@ -728,11 +774,6 @@ function canFmtDecoded(d) {
     return `dc_bus=${d.dc_bus_V} V`;
   }
   return '';
-}
-
-function canTrim() {
-  const list = document.getElementById('can-list');
-  while (list.childElementCount > CAN_MAX_ROWS) list.removeChild(list.firstChild);
 }
 
 function canMaybeScroll() {
