@@ -94,20 +94,26 @@ branch `dev`.
 
 ## Pi sync workflow (READ BEFORE PUSHING CODE TO THE BENCH)
 
-The HIL bench Pi (`isc@192.168.0.123`) does **not** carry a git
-checkout. `/home/isc/IFS08_HIL/` is a non-git working copy maintained
-by rsync from a developer machine that does have the git checkout.
-This avoids storing GitHub credentials on the bench host and lets you
-test uncommitted changes against real hardware before pushing.
+The HIL bench Pi (`isc@192.168.0.123` on the lab LAN, `isc@100.96.95.78`
+via Tailscale when off-network) does **not** carry a git checkout.
+`/home/isc/IFS08_HIL/` is a non-git working copy maintained by rsync
+from a developer machine that does have the git checkout. This avoids
+storing GitHub credentials on the bench host and lets you test
+uncommitted changes against real hardware before pushing.
 
 **Always sync via the script. Do not `git clone` or `git pull` on
 the Pi.**
 
 ```sh
-# from the repo root on your Mac
-scripts/sync_to_pi.sh                    # default isc@192.168.0.123
-scripts/sync_to_pi.sh --dry-run          # show changes only
-scripts/sync_to_pi.sh user@host          # custom target
+# from the repo root on your Mac, on the lab LAN
+scripts/sync_to_pi.sh                          # default isc@192.168.0.123
+scripts/sync_to_pi.sh --dry-run                # show changes only
+
+# off-network via Tailscale (slower but works from anywhere)
+scripts/sync_to_pi.sh isc@100.96.95.78
+
+# any other host
+scripts/sync_to_pi.sh user@host
 
 # if key auth isn't set up yet:
 HIL_SSH_PASS=isc scripts/sync_to_pi.sh
