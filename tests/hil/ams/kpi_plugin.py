@@ -251,35 +251,37 @@ def pytest_runtest_makereport(item, call):
     if _SESSION is None:
         return
     rep = outcome.get_result()
-    # Only count the actual call phase (not setup/teardown) for
-    # active-test time, but use the worst outcome of any phase.
+    # Only count the actual call phase for active-test time and
+    # primary outcome classification.
     if rep.when == "call":
         _SESSION.total_test_time_s += rep.duration
         _STATE["per_test_durations_s"][rep.nodeid] = rep.duration
         _STATE["per_test_outcomes"][rep.nodeid] = rep.outcome
-    if rep.when in ("call", "setup", "teardown") and rep.failed and rep.when != "call":
-        # Errored in setup or teardown -> classify as errored.
-        if rep.nodeid not in _SESSION.errored_tests:
+        if rep.outcome == "passed":
+            _SESSION.tests_passed += 1
+        elif rep.outcome == "failed":
+            _SESSION.tests_failed += 1
+            if rep.nodeid not in _SESSION.failed_tests:
+                _SESSION.failed_tests.append(rep.nodeid)
+        elif rep.outcome == "skipped":
+            # 'skipped' returned from `call` happens when an xfail
+            # outcome lands or a `pytest.skip()` is called inside the
+            # test body; bucket under skipped for now.
+            _SESSION.tests_skipped += 1
+    elif rep.when == "setup":
+        if rep.outcome == "skipped":
+            # Standard skip-marker path: a `@pytest.mark.skip` or
+            # `@pytest.mark.skipif` fires in setup, the call phase
+            # never runs. Count it here so we don't miss it.
+            _SESSION.tests_skipped += 1
+            return
+        if rep.failed and rep.nodeid not in _SESSION.errored_tests:
             _SESSION.errored_tests.append(rep.nodeid)
-
-
-def pytest_terminal_summary(terminalreporter, exitstatus, config):
-    if _SESSION is None:
-        return
-    stats = terminalreporter.stats
-    _SESSION.tests_passed   = len(stats.get("passed",   []))
-    _SESSION.tests_failed   = len(stats.get("failed",   []))
-    _SESSION.tests_errored  = len(stats.get("error",    []))
-    _SESSION.tests_skipped  = len(stats.get("skipped",  []))
-    _SESSION.tests_xfailed  = len(stats.get("xfailed",  []))
-    _SESSION.tests_xpassed  = len(stats.get("xpassed",  []))
-    _SESSION.tests_executed = (_SESSION.tests_passed
-                                + _SESSION.tests_failed
-                                + _SESSION.tests_errored)
-
-    for rep in stats.get("failed", []):
-        if hasattr(rep, "nodeid") and rep.nodeid not in _SESSION.failed_tests:
-            _SESSION.failed_tests.append(rep.nodeid)
+            _SESSION.tests_errored += 1
+    elif rep.when == "teardown":
+        if rep.failed and rep.nodeid not in _SESSION.errored_tests:
+            _SESSION.errored_tests.append(rep.nodeid)
+            _SESSION.tests_errored += 1
 
 
 def pytest_sessionfinish(session, exitstatus):
@@ -288,6 +290,9 @@ def pytest_sessionfinish(session, exitstatus):
     _SESSION.finished_at_unix = time.time()
     _SESSION.session_wall_clock_s = (
         _SESSION.finished_at_unix - _SESSION.started_at_unix)
+    _SESSION.tests_executed = (_SESSION.tests_passed
+                               + _SESSION.tests_failed
+                               + _SESSION.tests_errored)
 
     # Roll in shim counters.
     _SESSION.power_cycle_count        = _STATE["power_cycle_count"]

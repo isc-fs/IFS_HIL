@@ -137,7 +137,7 @@ def render_md(agg: dict[str, Any], sessions: list[dict]) -> str:
     lines.append(f"| BL triggers fired | {agg['cumulative_bl_triggers']} |")
     lines.append(f"| Frames observed | {agg['cumulative_frames_observed']:,} |")
     lines.append(f"| Block F soak cycles completed | {agg['cumulative_block_f_cycles']} |")
-    lines.append(f"| **Equivalent operator hours (estimate)** | **{agg['equivalent_operator_hours']:.1f} h** |")
+    lines.append(f"| **Equivalent operator hours (estimate)** | **{agg['equivalent_operator_hours']:.2f} h** |")
     lines.append("")
 
     lines.append("## Test outcomes (cumulative)\n")
