@@ -327,9 +327,18 @@ class TestD052JumpReasonViaPitDiag:
         assert "jumped to app" in r.stdout, (
             f"can-flasher didn't report 'jumped to app':\n{r.stdout[-500:]}")
 
-        # Wait for the app to come up and pit-diag to be enabled by
-        # the conftest pit_diag fixture's setup. The fixture already
-        # emits the enable frame; just wait for the first 0x6C4.
+        # Pit-diag default is OFF on every boot (per #248 design — no
+        # persistence across reboots). The conftest pit_diag fixture
+        # enabled it at setup time, but the chip has rebooted since;
+        # re-enable here on the freshly-booted app, then wait for one
+        # full scan so the post-boot 0x6C4 lands.
+        subprocess.run(
+            ["cansend", ams_profile["bus_acu"], "7F0#DEADBEEF"],
+            check=True, timeout=2,
+        )
+        time.sleep(0.2)  # ACK + first scan cadence
+        # Clear stale 0x6C4 from before the reboot (observer is sticky).
+        observe_acu.clear()
         boot_diag = pit_diag.wait_for(M.ID_PIT_DIAG_BOOT, timeout_s=4.0)
         assert len(boot_diag) == 8, f"0x6C4 dlc != 8 (got {len(boot_diag)})"
 

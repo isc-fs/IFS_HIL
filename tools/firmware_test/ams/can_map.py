@@ -215,23 +215,39 @@ def decode_telem_pack(data: bytes) -> dict:
 
 def decode_telem_temps(data: bytes) -> dict:
     """Decode 0x4A2 payload.
-    Layout:
+    Layout (post AMS PR #251 / #272):
       byte 0     min_tempC (int8)
       byte 1     max_tempC (int8)
       byte 2     avg_tempC (int8)
       bytes 3-4  dc_bus_V (little-endian uint16, volts)
-      bytes 5-6  reserved
+      byte 5     cockpit byte (sentinel + mode_locked + TSMS + DASH_CHG bits)
+      byte 6     reserved
       byte 7     heartbeat counter (0..255, wraps)
+
+    The cockpit byte sub-fields per safety_task.cpp:
+      bit 7   sentinel  — set whenever firmware is running (HIL_STUB-aware)
+      bits 4..6 reserved (0)
+      bits 2..3 mode_locked (0 Undecided / 1 Car / 2 Charger)
+      bit 1   TSMS GPIO readback
+      bit 0   DASH_CHG GPIO readback
     """
     if len(data) < 8:
         raise ValueError(f"0x4A2 needs 8 bytes, got {len(data)}")
     def i8(b): return b - 256 if b > 127 else b
+    cb = data[5]
     return {
         "min_tempC": i8(data[0]),
         "max_tempC": i8(data[1]),
         "avg_tempC": i8(data[2]),
         "dc_bus_V":  data[3] | (data[4] << 8),
         "heartbeat": data[7],
+        "cockpit": {
+            "raw":   cb,
+            "valid": bool(cb & 0x80),
+            "mode":  (cb >> 2) & 0x03,
+            "tsms":  bool(cb & 0x02),
+            "dash":  bool(cb & 0x01),
+        },
     }
 
 # ---------------------------------------------------------------------------

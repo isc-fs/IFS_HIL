@@ -153,6 +153,11 @@ class TestC032StartToPrecharge:
         # Per AMS #272 C-032: mode_locked latches Car on the
         # Start→Precharge edge. Observe via pit-diag 0x6C0[1] which
         # mirrors g_mode_locked_telemetry: 0=Undecided, 1=Car, 2=Charger.
+        # `wait_for_scan()` blocks until a complete pit-diag burst lands
+        # AFTER the transition (anchored on 0x6C6) — otherwise we'd risk
+        # reading the cached 0x6C0 from the pre-transition scan (up to
+        # 1 s old, mode_locked still 0).
+        pit_diag.wait_for_scan()
         fsm_status = pit_diag.wait_for(M.ID_PIT_DIAG_FSM_STATUS)
         mode_locked = fsm_status[1]
         assert mode_locked == 1, (
@@ -246,7 +251,9 @@ class TestC037ChargerModeFsm:
 
         # Per AMS #272 C-037: with VCU stale at the Start→Precharge
         # edge, mode_locked must latch Charger (= 2) not Car. Read via
-        # pit-diag 0x6C0[1].
+        # pit-diag 0x6C0[1] — wait for a fresh scan so we don't get
+        # the pre-transition cached frame (same staleness fix as C-032).
+        pit_diag.wait_for_scan()
         fsm_status = pit_diag.wait_for(M.ID_PIT_DIAG_FSM_STATUS)
         mode_locked = fsm_status[1]
         assert mode_locked == 2, (
