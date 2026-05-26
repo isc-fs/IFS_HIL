@@ -8,13 +8,13 @@
 # changes against real hardware.
 #
 # Usage:
-#   scripts/sync_to_pi.sh                    # default isc@192.168.0.123
+#   scripts/sync_to_pi.sh                    # default isc@100.96.95.78
 #   scripts/sync_to_pi.sh --dry-run          # show changes, no transfer
 #   scripts/sync_to_pi.sh user@host          # custom target
 #   scripts/sync_to_pi.sh user@host --dry-run
 #
 # Auth:
-#   - Preferred: SSH key auth (run `ssh-copy-id isc@192.168.0.123` once).
+#   - Preferred: SSH key auth (run `ssh-copy-id isc@100.96.95.78` once).
 #   - Fallback: export HIL_SSH_PASS=<password> and the script uses sshpass.
 #
 # What's excluded:
@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-DEFAULT_TARGET="isc@192.168.0.123"
+DEFAULT_TARGET="isc@100.96.95.78"
 TARGET="$DEFAULT_TARGET"
 DRY=""
 

@@ -94,7 +94,7 @@ branch `dev`.
 
 ## Pi sync workflow (READ BEFORE PUSHING CODE TO THE BENCH)
 
-The HIL bench Pi (`isc@192.168.0.123`) does **not** carry a git
+The HIL bench Pi (`isc@100.96.95.78`) does **not** carry a git
 checkout. `/home/isc/IFS08_HIL/` is a non-git working copy maintained
 by rsync from a developer machine that does have the git checkout.
 This avoids storing GitHub credentials on the bench host and lets you
@@ -105,7 +105,7 @@ the Pi.**
 
 ```sh
 # from the repo root on your Mac
-scripts/sync_to_pi.sh                    # default isc@192.168.0.123
+scripts/sync_to_pi.sh                    # default isc@100.96.95.78
 scripts/sync_to_pi.sh --dry-run          # show changes only
 scripts/sync_to_pi.sh user@host          # custom target
 
@@ -126,13 +126,13 @@ What the script does:
 After sync, if you changed broker or dashboard code:
 
 ```sh
-ssh isc@192.168.0.123 'sudo systemctl restart hil-broker hil-dashboard'
+ssh isc@100.96.95.78 'sudo systemctl restart hil-broker hil-dashboard'
 ```
 
 For one-time SSH key setup (recommended):
 
 ```sh
-ssh-copy-id isc@192.168.0.123   # type "isc" once
+ssh-copy-id isc@100.96.95.78   # type "isc" once
 ```
 
 ---
@@ -547,7 +547,7 @@ module, systemd units). Off-bench on a Mac/Linux laptop you can:
 | "the dashboard is red" | `systemctl status hil-broker`, `journalctl -u hil-broker -b -n 50`. If broker is down, find why before restarting. |
 | "I'm getting undervoltage warnings" | `vcgencmd get_throttled`. If non-zero, the fix is hardware (better 5 V supply on Pi VBUS) — do not patch in software. |
 | "deploy a new firmware via CI" | Push to firmware repo, open PR, comment `/hil-build <subdir>`. CI handles the rest. |
-| "sync to Pi" / "deploy to bench" / "push code to bench" | `scripts/sync_to_pi.sh` from repo root on the Mac. Restart services if broker/dashboard code changed: `ssh isc@192.168.0.123 'sudo systemctl restart hil-broker hil-dashboard'`. Never `git clone` / `git pull` on the Pi. |
+| "sync to Pi" / "deploy to bench" / "push code to bench" | `scripts/sync_to_pi.sh` from repo root on the Mac. Restart services if broker/dashboard code changed: `ssh isc@100.96.95.78 'sudo systemctl restart hil-broker hil-dashboard'`. Never `git clone` / `git pull` on the Pi. |
 | "regenerate fab files" | KiCad work in `docs/BACKPLANE_HIL/`. Outputs in `docs/BACKPLANE_HIL/production/`. PCB is working — confirm scope before regenerating. |
 | "review my PR" | Look for: (1) any direct `/dev/*` opens outside broker (NACK); (2) hw_config.py vs docs drift; (3) breaks the 6 invariants? (4) test coverage in `tests/broker/` for new RPCs; (5) sane systemd dependency order. |
 | "commit this" / *(after any coherent change)* | If on `dev`, branch off first (`feat/`, `fix/`, `docs/`, etc.). Stage only the relevant files (no `-A`), use conventional-commit style, commit without asking. **Never commit to `main`, `jb`, or directly on `dev`.** |
