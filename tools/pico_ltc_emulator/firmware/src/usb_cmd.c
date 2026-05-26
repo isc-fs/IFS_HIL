@@ -12,7 +12,7 @@
 
 #define LINE_MAX 96
 
-#define FW_VERSION_STR "0.3.0"   // adds STOP_REPLY / RESUME_ALL
+#define FW_VERSION_STR "0.4.0"   // adds ADG731 mux snoop (IFS08_HIL#41)
 
 usb_cmd_stats_t g_cmd_stats;
 
@@ -62,7 +62,7 @@ static void cmd_status(void) {
     snprintf(buf, sizeof(buf),
              "OK n_cmds_rx=%lu n_spi_xact=%lu last_cmd=0x%03X "
              "n_valid_cmds=%lu last_ltc_cmd=0x%03X n_cs_cycles=%lu "
-             "rx_bytes=%lu stop_mask=0x%02X "
+             "rx_bytes=%lu stop_mask=0x%02X adg731_ch=%u "
              "last_rx=%02X %02X %02X %02X %02X %02X %02X %02X",
              (unsigned long)g_cmd_stats.n_cmds_rx,
              (unsigned long)g_ltc_stats.n_spi_xact,
@@ -72,6 +72,7 @@ static void cmd_status(void) {
              (unsigned long)g_ltc_stats.n_cs_cycles,
              (unsigned long)g_ltc_stats.rx_byte_count,
              (unsigned)ltc6811_emu_get_stop_mask(),
+             (unsigned)ltc6811_emu_get_adg731_ch(),
              g_ltc_stats.last_rx[0], g_ltc_stats.last_rx[1],
              g_ltc_stats.last_rx[2], g_ltc_stats.last_rx[3],
              g_ltc_stats.last_rx[4], g_ltc_stats.last_rx[5],
@@ -103,7 +104,7 @@ static void cmd_set_temp(int argc, char *argv[]) {
     long dC = parse_int(argv[3], &ok3);
     if (!(ok && ok2 && ok3)) { emit_line("ERR bad int"); return; }
     if (m < 0 || m >= LTC_CHAIN_LEN || s < 0 || s >= AUX_PER_LTC) {
-        emit_line("ERR m in 0..9 s in 0..4"); return;
+        emit_line("ERR m in 0..9 s in 0..31 (ADG731 mux channel)"); return;
     }
     if (dC < INT16_MIN || dC > INT16_MAX) { emit_line("ERR dC i16"); return; }
     cell_state_set_temp((uint8_t)m, (uint8_t)s, (int16_t)dC);

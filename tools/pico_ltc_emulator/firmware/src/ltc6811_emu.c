@@ -72,6 +72,23 @@ static void rebuild_all_responses(void);
 // locking needed.
 static volatile uint8_t g_stop_module_mask = 0u;
 
+// ADG731 mux selector state -- updated by snooping AMS WRCOMM
+// commands (cmd 0x721). The AMS poll loop cycles through every NTC
+// position by writing the ADG731 selector via WRCOMM + STCOMM and
+// then reading AUX1 via RDAUXA. The Pico mirrors that scan by
+// looking up `g_state.temp_dC[ltc][g_adg731_ch]` when it builds the
+// RDAUXA AUX1 bytes -- so injecting at temp_dC[ltc][N] causes AMS
+// to see that temperature only when its mux is at channel N.
+//
+// AMS broadcasts the SAME selector to every IC in the chain (see
+// bms_poll_task.cpp's per_ic_payload loop), so a single global
+// selector suffices today. If AMS ever drives ICs independently, lift
+// this to a per-ltc array of 10 uint8_t -- everything else in the
+// snoop path stays.
+static volatile uint8_t g_adg731_ch = 0u;
+
+uint8_t ltc6811_emu_get_adg731_ch(void)         { return g_adg731_ch; }
+
 void ltc6811_emu_set_stop_mask(uint8_t mask) { g_stop_module_mask = mask & 0x1Fu; }
 uint8_t ltc6811_emu_get_stop_mask(void)      { return g_stop_module_mask; }
 
@@ -275,7 +292,22 @@ static void build_rdcv_chunk(uint8_t ltc_idx, uint8_t group, uint8_t out[8]) {
 // aux 3..4 + a stub ref2 = 30000).
 static void build_rdaux_chunk(uint8_t ltc_idx, uint8_t group, uint8_t out[8]) {
     if (group == 0) {
-        for (uint8_t i = 0; i < 3; i++) {
+        // RDAUXA returns AUX1..3 (= LTC GPIO1..GPIO3 in 100 uV units).
+        // The AMS only ever reads AUX1: GPIO1 is the output of an
+        // ADG731 32:1 analog mux that steers one of up to 20 NTCs in
+        // at a time, selected via WRCOMM+STCOMM. We snoop the
+        // selector (g_adg731_ch) and respond with the value the AMS
+        // wired-in NTC at that mux channel would have reported.
+        //
+        // AUX2 + AUX3 don't correspond to anything AMS reads, but we
+        // still populate them from the legacy slots 1 + 2 so the
+        // pre-mux SET_TEMP API keeps working (test code that bumps
+        // sensor=0 still routes through slot 0 = mux channel 0,
+        // which is the channel AMS visits at every full scan).
+        uint16_t v_aux1 = dC_to_ltc(g_state.temp_dC[ltc_idx][g_adg731_ch]);
+        out[0] = (uint8_t)(v_aux1 & 0xFFu);
+        out[1] = (uint8_t)((v_aux1 >> 8) & 0xFFu);
+        for (uint8_t i = 1; i < 3; i++) {
             uint16_t v = dC_to_ltc(g_state.temp_dC[ltc_idx][i]);
             out[i * 2]     = (uint8_t)(v & 0xFFu);
             out[i * 2 + 1] = (uint8_t)((v >> 8) & 0xFFu);
@@ -400,6 +432,7 @@ void ltc6811_emu_service(void) {
     static int      cmd_parsed_this_xact = 0;
     static int      cs_was_low           = 0;
     static int      response_init_done   = 0;
+    static int      is_wrcomm_xact       = 0;   // true if this xact's cmd was WRCOMM (0x721)
 
     if (!response_init_done) {
         rebuild_all_responses();
@@ -471,6 +504,7 @@ void ltc6811_emu_service(void) {
         rx_idx               = 0;
         tx_data_idx          = 4;   // start CPU push at byte 4 (we pre-loaded 0..3)
         cmd_parsed_this_xact = 0;
+        is_wrcomm_xact       = 0;
         g_ltc_stats.n_cs_cycles++;
     }
     cs_was_low = !cs_now;
@@ -507,6 +541,41 @@ void ltc6811_emu_service(void) {
         if (rx_snap_idx < RESPONSE_LEN) {
             rx_snap[rx_snap_idx++] = b;
         }
+        // WRCOMM payload snoop -- when a WRCOMM xact is in progress
+        // and we've just buffered the 6th RX byte (= first per-IC
+        // payload's p[1]), decode the ADG731 selector. p[0]/p[1]
+        // encoding from ltc6811::pack_adg731_select:
+        //   p[0] = (icom << 4) | data_hi    -> data_hi = p[0] & 0x0F
+        //   p[1] = (data_lo << 4) | fcom    -> data_lo = p[1] >> 4
+        //   data = 0x80 | ((ch & 0x1F) << 1) -> ch = (data >> 1) & 0x1F
+        // AMS broadcasts the same selector to every IC, so capturing
+        // the FIRST per-IC payload is sufficient (don't need to walk
+        // through all 80 payload bytes per xact).
+        if (is_wrcomm_xact && rx_snap_idx == 6) {
+            uint8_t p0 = rx_snap[4];
+            uint8_t p1 = rx_snap[5];
+            // Only update on a REAL selector transmission. Real
+            // writes use icom=0x8 ("drive CSBM low for this slot")
+            // so p[0]'s upper nibble is 0x8. AMS also sends no-op
+            // WRCOMMs (icom=0xF, p[0]=0xFF/p[1]=0xFF) to clear the
+            // COMM register between scans; those would naively
+            // decode to channel 31 -- skip.
+            if (((p0 >> 4) & 0x0Fu) == 0x8u) {
+                uint8_t data = (uint8_t)(((p0 & 0x0Fu) << 4) | ((p1 >> 4) & 0x0Fu));
+                uint8_t new_ch = (uint8_t)((data >> 1) & 0x1Fu);
+                if (new_ch != g_adg731_ch) {
+                    // response_pool[RDAUXA] is prebuilt -- its AUX1
+                    // bytes encode temp_dC[ltc][g_adg731_ch] at the
+                    // time the pool was last refreshed. The selector
+                    // just changed, so rebuild RDAUXA NOW (before
+                    // AMS's STCOMM + ADAX + RDAUXA reaches us). The
+                    // rebuild is ~100 us; AMS waits ~2 ms after
+                    // STCOMM, so we have plenty of margin.
+                    g_adg731_ch = new_ch;
+                    build_one_response(RSP_RDAUXA, 0, 1, 0);
+                }
+            }
+        }
         rx_buf[rx_idx++] = b;
         if (rx_idx < 4) continue;
         rx_idx = 0;
@@ -530,6 +599,9 @@ void ltc6811_emu_service(void) {
                 case 0x02C:  // RDSID
                 case 0x714:  // PLADC
                 case 0x721:  // WRCOMM
+                    is_known = 1;
+                    is_wrcomm_xact = 1;
+                    break;
                 case 0x722:  // RDCOMM
                 case 0x723:  // STCOMM
                     is_known = 1; break;
