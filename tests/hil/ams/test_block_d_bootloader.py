@@ -1,20 +1,20 @@
 """
 Block D — Bootloader integration.
 
-Per `isc-fs/IFS08-CE-AMS#245` (post-#243 numbering; supersedes the
-v1.4.0 D-041..D-045 scheme from #123). Block D collapsed to just the
-core BL contract:
+Per `isc-fs/IFS08-CE-AMS#272`:
 
-| #245 ID | What it checks                                         | Status      |
+| #272 ID | What it checks                                         | Status      |
 |---------|--------------------------------------------------------|-------------|
 | D-050   | Cold cycle → app auto-jumps                            | implemented |
-| D-051   | Boot-trigger 0x002 reboots to BL (unblocked by #243)   | implemented |
-| D-051b  | NEW — Same trigger reboots from Error state too        | implemented |
+| D-051   | Boot-trigger 0x002 reboots to BL                       | implemented |
+| D-051b  | Same trigger reboots from Error state too              | implemented |
+| D-052   | After CAN-trigger reboot, pit-diag 0x6C4[0..3] reads `0x4A554D50` ('JUMP' LE) | TODO — follow-up PR |
 
-D-042 (BKP2R JumpReason), D-043 (firmware_info node ID), and D-045
-(boot-trigger negative cases) are kept for regression coverage but
-aren't in #245's reduced Block D scope. A-009 picks up the node-ID
-check on the Block A boot baseline.
+D-042 (BKP2R via SWD) and D-043 (host-side .bin static check) dropped
+per #272 — D-052 supersedes via pit-diag, and node-ID coverage moves
+to A-009 (firmware_info reserved[0] from pit-diag 0x6C6[7]). D-045
+(boot-trigger negative cases) is kept as regression coverage even
+though it's not on the #272 row list.
 """
 
 from __future__ import annotations
@@ -186,69 +186,14 @@ class TestD051bTriggerFromErrorState:
             acu_heartbeat["resume"]()
 
 
-# ---------------------------------------------------------------------------
-# D-042 — JumpReason logged in RTC_BKP_DR2
-# ---------------------------------------------------------------------------
-
-class TestD042JumpReason:
-
-    @pytest.mark.skip(reason=(
-        "D-042 requires reading `RTC->BKP2R` after the trigger jump. "
-        "On this rig there's no SWD attach and the BL doesn't expose a "
-        "backup-register read primitive over CAN. When the BL gains a "
-        "`diagnose read-bkp` (or similar) command, or SWD is wired up, "
-        "this becomes runnable. The kCanTrigger reason value is "
-        "0x4A554D50 ('JUMP' LE) per PR #113."
-    ))
-    def test_d042_jump_reason_in_bkp2r(self):
-        pass
-
-
-# ---------------------------------------------------------------------------
-# D-043 — Node ID in firmware_info
-# ---------------------------------------------------------------------------
-
-class TestD043NodeIdInFirmwareInfo:
-    """Read the bl_fwinfo_t record from the .bin file on the host. This
-    doesn't need the bench — it's a static check of the firmware image
-    we're about to flash. Kept in Block D for test-plan completeness."""
-
-    def test_d043(self, ams_firmware_bin, ams_profile):
-        # bl_fwinfo_t lives at offset 0x400 of the .bin (= 0x08020400
-        # absolute). Layout per firmware_info.cpp:
-        #   uint32_t magic                  @ 0x00
-        #   uint32_t record_version         @ 0x04
-        #   uint32_t fw_version_major       @ 0x08
-        #   uint32_t fw_version_minor       @ 0x0C
-        #   uint32_t fw_version_patch       @ 0x10
-        #   uint32_t mcu_id                 @ 0x14
-        #   uint8_t  git_hash[8]            @ 0x18
-        #   uint64_t build_timestamp        @ 0x20
-        #   char     product_name[16]       @ 0x28
-        #   uint32_t reserved[2]            @ 0x38
-        bin_path = ams_firmware_bin
-        data = Path(bin_path).read_bytes()
-        rec_offset = 0x400
-        assert len(data) > rec_offset + 0x40, (
-            f"bin file too small ({len(data)} bytes); no firmware_info record."
-        )
-        rec = data[rec_offset:rec_offset + 0x40]
-        magic = int.from_bytes(rec[0:4], "little")
-        product_name = rec[0x28:0x38].rstrip(b"\x00").decode("ascii", "replace")
-        reserved0 = int.from_bytes(rec[0x38:0x3C], "little")
-
-        assert magic == 0xF14F1B00, (
-            f"firmware_info magic = 0x{magic:08X}; expected 0xF14F1B00."
-        )
-        assert product_name == "IFS08-CE-AMS", (
-            f"product_name = {product_name!r}; expected 'IFS08-CE-AMS'."
-        )
-        # Per the test plan, reserved[0] carries the node ID.
-        expected_node_id = int(ams_profile["bl_node_id"])
-        assert reserved0 == expected_node_id, (
-            f"firmware_info reserved[0] (node ID) = 0x{reserved0:08X}; "
-            f"expected 0x{expected_node_id:08X}."
-        )
+# D-042 dropped per AMS #272 — superseded by D-052 which reads
+# jump_reason from pit-diag 0x6C4[0..3] over CAN (no SWD needed).
+# D-052 lands in the follow-up "add #272 new rows" PR.
+#
+# D-043 dropped per AMS #272 — node ID verification now covered by
+# A-009 (reads firmware_info.reserved[0] from pit-diag 0x6C6[7]) and
+# the host-side static .bin check was erroring on a missing
+# `ams_firmware_bin` fixture scope anyway.
 
 
 # ---------------------------------------------------------------------------

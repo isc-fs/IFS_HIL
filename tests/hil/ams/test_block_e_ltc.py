@@ -1,40 +1,30 @@
 """
 Block E — LTC chain integrity.
 
-Per `isc-fs/IFS08-CE-AMS#245`. The real LTC path runs in every build
+Per `isc-fs/IFS08-CE-AMS#272`. The real LTC path runs in every build
 post-#207 (HIL_STUB removed); on the bench the Pi Pico LTC6820/LTC6811
-emulator stands in for the daughter chain. All tests assume the Pico
-is wired on MLC2 J8 per `tools/pico_ltc_emulator/`.
+emulator stands in for the daughter chain on MLC2 J8.
 
-| Test  | What it checks                                                  | Status      |
-|-------|-----------------------------------------------------------------|-------------|
-| E-060 | Chain discovery: module_online_mask == 0x1F within 500 ms       | implemented |
-| E-061 | V-poll cadence: g_bms_volt_poll_ms stays < 50 ms                | scaffolded — diag counter not on wire |
-| E-062 | SPI framing clean: g_ltc_spi_err_count == 0 over 60 s           | scaffolded — diag counter not on wire |
-| E-063 | PEC clean: g_ltc_pec_err_count[*] == 0 over 60 s                | scaffolded — diag counter not on wire |
-| E-064 | T-poll: g_temp_sweep_last_mask == 0                             | scaffolded — diag counter not on wire |
-| E-065 | Stop Pico mid-V-poll → FSM trips Error within ~1 telemetry cycle| **implemented** (PR #39 / asserts state==Error pending AMS #249) |
-| E-066 | Inject out-of-range cell V → cell-range predicate trips         | **implemented** (PR #39; 2 sub-tests over/under) |
-| E-067 | Inject out-of-range cell T → cell-T predicate trips             | **implemented** (PR #39; 2 sub-tests over/under) |
+| #272 ID | What it checks                                                  | Status      |
+|---------|-----------------------------------------------------------------|-------------|
+| E-060   | Chain discovery: module_online_mask == 0x1F within 500 ms       | implemented |
+| E-061   | V-poll cadence: pit-diag 0x6C1[0..3] stays < 50 ms over 60 s    | implemented (PR #45; reads 0x6C1) |
+| E-063   | PEC clean: 0x6C7 + 0x6C8 + 0x6C0[4..5] all 0 over 60 s          | implemented (PR #45; reads 0x6C7/0x6C8) |
+| E-064   | T-poll: 0x6C1[4..7] temp_sweep_last_mask reads 0                | implemented (PR #45; reads 0x6C1) |
+| E-065   | Pico STOP_REPLY 0x1F → mask collapses to 0 + FSM trips Error    | implemented |
+| E-066   | STOP_REPLY 0x04 (module 2) → 0x4A0[2] reads 0x1B + FSM trips    | TODO — follow-up PR; currently asserts cell V injection only |
+| E-067   | Per-IC PEC localisation: Pico fails PEC on chain N → 0x6C7/0x6C8 byte for N climbs alone | TODO — follow-up PR; currently asserts cell T injection only |
 
-The four diag-counter rows (E-061..E-064) need either a new diag CAN
-frame from the AMS firmware (proposed: `0x4A3` packed with the LTC
-counter snapshot — see `docs/ams-hil/test-plan-v1.5.0.md` §2) or a
-poll-on-demand "diag read" command. They're scaffolded with a clear
-skip-reason so they show up in the scoreboard as "blocked on AMS
-exposure decision" rather than silently absent.
+E-062 dropped per #272 — g_ltc_spi_err_count not on pit-diag; covered
+by-proxy via E-066/E-067 cell-injection passes (bus-level errors block
+those too).
 
-The injection rows (E-065..E-067) need three new commands on the
-Pico's USB-CDC control surface:
+Pico USB-CDC control surface used by E-065..E-067:
 
     STOP_REPLY <module_mask>
     INJECT_CELL_V <module> <cell> <mV>
     INJECT_CELL_T <module> <sensor> <degC>
     RESUME_ALL
-
-See test-plan-v1.5.0.md §3. Once those land, drop the skip and
-implement the test bodies — the scaffolds below have the assertion
-shape spelled out so the implementation is a fill-in-the-blanks job.
 """
 
 from __future__ import annotations
@@ -123,25 +113,9 @@ class TestE061VPollCadence:
             "a jitter spike — investigate BmsPollTask priority / preemption.")
 
 
-class TestE062SpiFramingClean:
-    """Per #245: `g_ltc_spi_err_count` stays at 0 over the observation window
-    (i.e. no SPI bus-level transport errors — distinct from PEC failures
-    which are tracked in E-063). The pit-diag stream doesn't expose
-    `g_ltc_spi_err_count` directly today, but bus-level errors are
-    irrecoverable and would also bump `g_temp_sweep_last_mask` (covered in
-    E-064) and prevent any cell decode (covered in E-066/E-067 passes).
-    Treating this as covered-by-proxy until AMS adds a dedicated counter
-    frame — keep the test, mark it skipped with a clear reason."""
-
-    @pytest.mark.skip(reason=(
-        "g_ltc_spi_err_count not on pit-diag today; bus-level errors "
-        "would also block E-066/E-067 cell-injection passes, so this "
-        "test is covered-by-proxy. File an AMS issue if a direct counter "
-        "frame is needed (suggest extending 0x6C1 with bytes 6..7 = "
-        "spi_err count BE u16, currently reserved)."
-    ))
-    def test_e062(self):
-        pass
+# E-062 dropped per AMS #272 — g_ltc_spi_err_count isn't on the
+# pit-diag stream, and bus-level SPI errors would also block the
+# E-066/E-067 cell-injection passes, so coverage is implicit.
 
 
 class TestE063PecClean:

@@ -11,23 +11,21 @@ DASH_CHG is the cockpit dashboard / charger button. They're driven by
 two independent pytest fixtures (`tsms`, `dash_chg`) -- no `cockpit`
 abstraction.
 
-| #245 ID | What it checks                                                 | Status      |
+Per `isc-fs/IFS08-CE-AMS#272` (supersedes #245 — dropped C-036, C-040,
+C-044 as scaffolding-gap or flight-build-only):
+
+| #272 ID | What it checks                                                 | Status      |
 |---------|----------------------------------------------------------------|-------------|
 | C-030   | Start stays put with only TSMS                                 | implemented |
 | C-031   | Start stays put with only DASH_CHG                             | implemented |
-| C-032   | Start -> Precharge on TSMS && DASH_CHG (mode locks Car)        | implemented |
-| C-033   | Precharge -> Transition once DC bus hits 95% of pack           | implemented |
-| ~~C-034~~| ~~Precharge timeout~~ — REMOVED per AMS #244                   | deleted     |
-| ~~C-035~~| ~~Transition hold timer~~ — REMOVED per AMS #244               | deleted     |
-| C-036   | Transition voltage drop -> Error                               | scaffolded  |
-| C-037   | Charger mode FSM (VCU paused) Start->Precharge->Transition->Charge | implemented |
-| C-038   | Run -> Error (sticky) on TSMS drop                             | implemented |
-| C-039   | Run -> Error (sticky) on DASH_CHG drop                         | implemented |
-| C-040   | Charge -> Error on either input drop                           | scaffolded  |
-| C-041   | mode_locked retained mid-Run when VCU killed                   | scaffolded — blocked on AMS #246 |
-| C-042   | 0x4A2[5] cockpit byte across all 6 FSM states                  | scaffolded — blocked on AMS #246 |
+| C-032   | Start → Precharge on TSMS && DASH_CHG (mode locks Car)         | implemented |
+| C-033   | Precharge → Transition once DC bus hits 95 % of pack           | implemented |
+| C-037   | Charger mode FSM: VCU paused → Start→Precharge→Transition→Charge | implemented |
+| C-038   | Run → Error (sticky) on TSMS drop                              | implemented |
+| C-039   | Run → Error (sticky) on DASH_CHG drop                          | implemented |
+| C-041   | mode_locked retained mid-Run when VCU killed                   | implemented (post-#251) |
+| C-042   | 0x4A2[5] cockpit byte across all 6 FSM states                  | implemented (post-#251) |
 | C-043   | Error sticky ≥ 5 s after heartbeat resumes                     | implemented |
-| C-044   | Error survives reset (flight semantics)                        | deferred    |
 | C-045   | Start stays put with no fixtures driving PF9/PF10 (PR #230)    | implemented |
 
 All TSMS/DASH_CHG-driven tests skip cleanly when either fixture is
@@ -289,41 +287,15 @@ class TestC043ErrorSticky:
 # C-028 -- Error survives reset (flight semantics)
 # ---------------------------------------------------------------------------
 
-class TestC044ErrorSurvivesReset:
-
-    @pytest.mark.skip(reason=(
-        "C-028 needs a flight build (no -DAMS_BMS_HIL_STUB) -- the stub "
-        "build's App_InitTask explicitly clears ErrorLatch on every boot, "
-        "which is the inverse of what this test asserts. A flight build "
-        "on this rig would latch ERROR immediately on the missing LTC "
-        "chain, so C-028 is doubly blocked. Defer until the bench has "
-        "an LTC chain and we can run a flight build that boots clean."))
-    def test_c044_error_survives_reset(self):
-        pass
-
+# C-044 (Error survives reset) dropped per AMS #272 — flight-build
+# only and HIL_CLEAR explicitly wipes the latch on every boot by design.
+#
+# C-036 (Transition voltage drop) dropped per AMS #272 — needs a dc_bus
+# step-down stim that the acu_heartbeat fixture doesn't support. File
+# under "scaffolding gap" if the stim path ever lands.
 
 # ---------------------------------------------------------------------------
-# C-036 — Transition voltage drop → Error  (NEW per #245)
-# ---------------------------------------------------------------------------
-
-class TestC036TransitionVoltageDrop:
-    """Per #245: post-swap, if the DC bus slumps in Transition (e.g.
-    AIR+ welded shut, AIR- opens, precharge resistor failure), the
-    safety supervisor must trip → Error."""
-
-    @pytest.mark.skip(reason=(
-        "Needs a stim path that drops dc_bus_V back below the "
-        "precharge-target threshold AFTER FSM enters Transition. "
-        "Currently the acu_heartbeat fixture sets dc_bus monotonically; "
-        "needs either a 'step-down' method on the fixture OR a new "
-        "stim helper. Implement once that lands."
-    ))
-    def test_c036_transition_voltage_drop(self):
-        pass
-
-
-# ---------------------------------------------------------------------------
-# C-039 — Run → Error (latched) on DASH_CHG drop  (NEW per #245)
+# C-039 — Run → Error (latched) on DASH_CHG drop  (AMS #272 row)
 # ---------------------------------------------------------------------------
 
 class TestC039RunToErrorOnDashChgDrop:
@@ -343,29 +315,13 @@ class TestC039RunToErrorOnDashChgDrop:
             timeout_ms=int(ams_profile["state_transition_window_ms"]) + 100)
 
 
-# ---------------------------------------------------------------------------
-# C-040 — Charge → Error (latched) on either input drop  (NEW per #245)
-# ---------------------------------------------------------------------------
-
-class TestC040ChargeToErrorOnInputDrop:
-    @pytest.mark.skip(reason=(
-        "Needs a 'drive_to_charge' helper symmetric to _drive_to_run. "
-        "C-037 (charger mode FSM) covers the Start→Charge path, but "
-        "there's no shared helper that lands the chip in Charge for "
-        "downstream input-drop tests. Implement once factored out."
-    ))
-    def test_c040_tsms_drop(self):
-        pass
-
-    @pytest.mark.skip(reason=(
-        "Same scaffolding gap as test_c040_tsms_drop. Pair test."
-    ))
-    def test_c040_dash_chg_drop(self):
-        pass
+# C-040 (Charge → Error on input drop) dropped per AMS #272 — needs
+# a _drive_to_charge helper symmetric to _drive_to_run. File under
+# "scaffolding gap" if the helper ever lands.
 
 
 # ---------------------------------------------------------------------------
-# C-041 — mode_locked retained mid-Run when VCU killed  (NEW per #245)
+# C-041 — mode_locked retained mid-Run when VCU killed  (AMS #272 row)
 # ---------------------------------------------------------------------------
 
 class TestC041ModeLockedRetained:
