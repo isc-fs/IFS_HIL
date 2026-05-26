@@ -31,11 +31,11 @@ from tools.firmware_test.ams import can_map as M
 
 def _heartbeat_reset_observed(observe_acu, baseline: int,
                               window_s: float = 3.0) -> bool:
-    """Returns True iff the `0x4A2[7]` heartbeat counter drops below
-    `min(baseline, 5)` within `window_s` — signature of an app restart
-    (TelemetryTask seeds the counter from 0). Without an app restart
-    the counter increments monotonically modulo-256 and never wraps in
-    `window_s` at 500 ms cadence."""
+    """DEPRECATED — pre-#241 reboot detector that assumed the BL would
+    auto-jump back to the app. With BKP0R magic (the current BL
+    contract), a trigger reboot leaves the BL parked in BL mode and
+    the app never restarts; the heartbeat counter never resumes.
+    Use `_trigger_rebooted_to_bl` for trigger tests."""
     deadline = time.monotonic() + window_s
     last_seen = baseline
     while time.monotonic() < deadline:
@@ -51,28 +51,53 @@ def _heartbeat_reset_observed(observe_acu, baseline: int,
     return False
 
 
+def _trigger_rebooted_to_bl(observe_acu, ams_profile,
+                            quiet_window_s: float = 1.5) -> bool:
+    """Positive confirmation that the trigger landed the chip in BL.
+
+    Two signals, both required:
+    1. App telemetry STOPS — no new 0x4A0 frames arrive in the next
+       `quiet_window_s` (BL doesn't emit AMS telemetry).
+    2. The BL responds to `can-flasher discover` on the flash bus.
+
+    Replaces the pre-#241 heartbeat-counter-resets approach, which
+    assumed the BL would auto-jump back to the app after the trigger;
+    the current BL stays parked (BKP0R magic) until explicitly told
+    to jump, so the app never restarts and the counter never resumes."""
+    observe_acu.clear()
+    time.sleep(quiet_window_s)
+    # 1) telemetry must have stopped — observer should have no new frames.
+    f = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
+    if f is not None:
+        return False
+    # 2) positive BL discover on the flash bus.
+    r = subprocess.run(
+        ["can-flasher", "--interface", "socketcan",
+         "--channel", ams_profile["bus_bms_bl"],
+         "--bitrate", "500000",
+         "--node-id", hex(int(ams_profile["bl_node_id"])),
+         "--timeout", "3000", "discover"],
+        capture_output=True, text=True, timeout=10)
+    return r.returncode == 0 and "Node" in r.stdout
+
+
 # ---------------------------------------------------------------------------
 # D-041 — Boot-trigger jumps to BL
 # ---------------------------------------------------------------------------
 
 class TestD041BootTriggerJumps:
 
-    def test_d041(self, fresh_boot, observe_acu, heartbeat_helper,
-                  ams_profile):
-        # Let the chip emit a few telemetry frames so the heartbeat
-        # counter is comfortably above the "fresh boot" low watermark.
-        baseline = None
+    def test_d041(self, fresh_boot, observe_acu, ams_profile):
+        # Confirm the app is alive before triggering: at least one
+        # 0x4A0 frame must be on the bus.
         deadline = time.monotonic() + 4.0
+        saw_app = False
         while time.monotonic() < deadline:
-            hb = heartbeat_helper["read"]()
-            if hb is not None and hb >= 6:
-                baseline = hb
+            if observe_acu.last(M.ID_TELEM_STATUS, extended=False) is not None:
+                saw_app = True
                 break
             time.sleep(0.05)
-        assert baseline is not None, (
-            "heartbeat counter never reached ≥ 6; can't establish a "
-            "high-watermark to detect reset."
-        )
+        assert saw_app, "no 0x4A0 from the app — can't test trigger"
 
         # Send the trigger on the ACU bus (FDCAN1).
         subprocess.run(
@@ -80,16 +105,80 @@ class TestD041BootTriggerJumps:
             check=True, timeout=2,
         )
 
-        # Expect the heartbeat counter to drop back to ≤ 5 within a
-        # couple of seconds (chip resets → BL → auto-jump → app reboot
-        # → counter restarts from 0).
-        assert _heartbeat_reset_observed(observe_acu, baseline,
-                                          window_s=3.0), (
-            "heartbeat counter didn't reset after sending the boot-trigger "
-            "frame. The chip didn't reboot — AcuCanTask may not have "
-            "received the standard-ID frame (FDCAN1 std-RX), or "
-            "Bootloader::request_reboot didn't fire."
+        # After the trigger, the chip should reset and land in BL
+        # (BKP0R magic keeps it parked there — no auto-jump). Two
+        # positive signals: telemetry stops, BL is discoverable.
+        assert _trigger_rebooted_to_bl(observe_acu, ams_profile), (
+            "boot-trigger had no effect: app telemetry kept flowing "
+            "and/or BL didn't appear on the flash bus. Either "
+            "AcuCanTask didn't receive the standard-ID frame, "
+            "Bootloader::request_reboot didn't fire, or BL did not "
+            "see the BKP0R magic on reset."
         )
+
+
+# ---------------------------------------------------------------------------
+# D-041b — Trigger reaches BL even when FSM is in Error
+# ---------------------------------------------------------------------------
+
+class TestD041bTriggerFromErrorState:
+    """Safety property: the boot trigger is the *only* way to reflash
+    the AMS in the car (no reset switch on the enclosure, battery
+    disconnect requires opening the accumulator). It MUST therefore be
+    responsive regardless of FSM state — especially Error, since that
+    is the state in which a fix-and-reflash is most likely to be
+    needed.
+
+    This test drives FSM into Error by pausing the VCU heartbeat
+    (VcuStaleMs trips → safety predicate fires → Error sticky), then
+    sends the trigger and verifies the same heartbeat-reset signature
+    as D-041. The trigger handler lives in AcuCanTask::run, which is
+    parallel to MainTask's FSM loop; it must remain reachable even
+    when MainTask is wedged on the Error path."""
+
+    def test_d041b_trigger_works_from_error(
+            self, fresh_boot, observe_acu,
+            acu_heartbeat, ams_profile):
+        # Step 1: trip FSM into Error.
+        acu_heartbeat["pause"]()
+        deadline = time.monotonic() + 5.0
+        in_error = False
+        while time.monotonic() < deadline:
+            f = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
+            if f is not None:
+                state = M.decode_telem_status(f.data)["state"]
+                if state == M.FsmState.ERROR:
+                    in_error = True
+                    break
+            time.sleep(0.05)
+        assert in_error, (
+            "FSM didn't enter Error within 5 s of pausing the VCU "
+            "heartbeat — VcuStaleMs predicate may have changed, or "
+            "the heartbeat fixture failed to pause."
+        )
+
+        # Step 2: send the trigger on the ACU bus.
+        subprocess.run(
+            ["cansend", ams_profile["bus_acu"], "002#B007AD11"],
+            check=True, timeout=2,
+        )
+
+        # Step 3: confirm the trigger landed the chip in BL even from
+        # the Error code path. This is the case the operator MUST
+        # recover from in the car -- if it fails, the AMS becomes
+        # unreflashable without opening the accumulator.
+        try:
+            assert _trigger_rebooted_to_bl(observe_acu, ams_profile), (
+                "boot-trigger ignored while FSM was in Error. This is "
+                "a SAFETY-CRITICAL regression: the trigger is the only "
+                "way to reflash the AMS in the car. AcuCanTask's RX "
+                "path or Bootloader::request_reboot is unreachable "
+                "from the Error code path."
+            )
+        finally:
+            # Restore the heartbeat regardless of pass/fail so the next
+            # test doesn't start in a degraded state.
+            acu_heartbeat["resume"]()
 
 
 # ---------------------------------------------------------------------------

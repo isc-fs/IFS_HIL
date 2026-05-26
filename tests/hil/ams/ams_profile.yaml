@@ -7,7 +7,7 @@
 # moves with it.
 
 # -- Carrier slot -----------------------------------------------------
-mlc_slot:                 1          # which carrier slot the AMS is in
+mlc_slot:                 2          # which carrier slot the AMS is in
 mlc_boot_current_mA:      100        # min draw after K_n closes (bench: 118-128 mA)
 mlc_boot_settle_s:        0.5        # delay after relay close before discover
                                      # short enough to catch BL before auto-jump
@@ -38,9 +38,15 @@ stub_expected_pack_mV:    356250     # 5 * 19 * 3750 mV = pack_voltage_mV under 
 
 # -- FSM / predicate windows (firmware: ams_config.hpp) --------------
 boot_grace_ms:            2000       # kSafetyBootGraceMs
-state_transition_window_ms: 100       # observable window for FSM transitions
-                                     # (3x kSafetyPeriodMs gives the 10 ms loop
-                                     #  a couple of iterations to settle)
+state_transition_window_ms: 700       # observable window for FSM transitions.
+                                     # The FSM itself transitions within ~3x
+                                     # kSafetyPeriodMs (10 ms loop) of the
+                                     # input change, but the 0x4A0 telemetry
+                                     # is broadcast at tx_telemetry_period_ms
+                                     # (500 ms), so the soonest WE can observe
+                                     # the new state is up to a full
+                                     # telemetry-cycle later. Window must
+                                     # cover one cycle + slack.
 precharge_max_ms:         1500       # kPrechargeMaxMs (timeout → Error)
 transition_hold_ms:       100        # kTransitionHoldMs (DC bus held → Run)
 vcu_stale_ms:             200        # kVcuStaleMs
@@ -50,6 +56,19 @@ i_max_mA:                 200000     # kImaxMa (200 A)
 # -- ACU heartbeat (bench → AMS, simulates VCU 0x100) ----------------
 acu_heartbeat_period_ms:  50         # 20 Hz, well under kVcuStaleMs = 200
 acu_heartbeat_dc_bus_v:   0          # quiescent value (precharge tests override)
+
+# -- Current-sensor heartbeat (bench DAC → AMS PF7 Hall input) -------
+# Drives AMS PF7 via DAC4 ch0 so the firmware's current-stale predicate
+# (kIStaleMs = 200) stays fresh and FSM is free to leave Start. Without
+# this, FSM lands in Error within ~200 ms of boot grace and all
+# Start->Precharge transitions are blocked (B-017 / C-021..C-026 fail
+# loudly). DAC channel routing is bench-physical -- see CLAUDE.md
+# DAC80504 wiring section. Voltage model in conftest::current_heartbeat
+# uses 2.5 V at 0 A, 5.7 mV/A (matches ams_config.hpp Hall constants).
+current_heartbeat_period_ms:   50    # 20 Hz, well under kIStaleMs = 200
+current_heartbeat_dac_idx:     3     # broker idx 3 = DAC4 (U15)
+current_heartbeat_dac_channel: 0     # ch0 -> AMS PF7
+current_heartbeat_default_mA:  0     # quiescent 0 A (= 2.5 V on the DAC)
 
 # -- ACU stim frame IDs (mirror firmware kAcuRx*) --------------------
 acu_rx_dc_bus_id:         0x100      # extended, DLC 2, LE uint16 volts
