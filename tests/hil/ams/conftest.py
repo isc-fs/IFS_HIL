@@ -61,6 +61,11 @@ log = logging.getLogger(__name__)
 
 PROFILE_PATH = Path(__file__).parent / "ams_profile.yaml"
 
+# Register the KPI plugin so it sees all session events for AMS HIL
+# runs. See `tests/hil/ams/kpi_plugin.py` and
+# `docs/ams-hil/test-plan-v1.5.0.md` §4. Disable with `--no-kpi`.
+pytest_plugins = ["tests.hil.ams.kpi_plugin"]
+
 
 # ---------------------------------------------------------------------------
 # CLI options
@@ -447,10 +452,40 @@ def fresh_boot(ams_profile, mlc_powered, observe_acu, acu_heartbeat,
     relay_bit = mlc_powered["relay_bit"]
     try:
         client.call("tca.write_pin", addr=0x20, port=0, pin=relay_bit, value=False)
+        # Drop TSMS + DASH_CHG BEFORE power-on. TCA9555 outputs survive
+        # an MLC power-cycle (the TCA itself stays powered), and pytest
+        # creates this fixture before tsms/dash_chg, so without an
+        # explicit deassert here the chip can boot with leftover-HIGH
+        # cockpit inputs and jump straight Start -> Precharge. Tests
+        # that check `first_frame['state'] == Start` then fail.
+        # Idempotent: only writes the keys actually present in
+        # ams_profile, so it's a no-op for benches that don't wire TSMS
+        # or DASH_CHG through a TCA.
+        for key_prefix in ("tsms", "dash_chg"):
+            addr_key = f"{key_prefix}_tca_addr"
+            port_key = f"{key_prefix}_tca_port"
+            pin_key  = f"{key_prefix}_tca_pin"
+            if all(k in ams_profile for k in (addr_key, port_key, pin_key)):
+                addr = int(ams_profile[addr_key])
+                port = int(ams_profile[port_key])
+                pin  = int(ams_profile[pin_key])
+                # Set direction = output for both cockpit pins on this
+                # (addr, port) so the write below actually drives the
+                # line. _combined_output_mask handles the case where
+                # both pins share a port.
+                mask = _combined_output_mask(ams_profile, addr, port)
+                client.call("tca.set_direction", addr=addr, port=port, mask=mask)
+                client.call("tca.write_pin", addr=addr, port=port,
+                            pin=pin, value=False)
         time.sleep(2.0)
         observe_acu.clear()
         client.call("tca.write_pin", addr=0x20, port=0, pin=relay_bit, value=True)
         t_power_on = time.monotonic()
+        # KPI: this fixture is the canonical per-test power-cycle.
+        # Counted toward `power_cycle_count` for relay K_n + carrier
+        # connector reseat-wear accounting.
+        from tests.hil.ams import kpi_plugin
+        kpi_plugin.bump_power_cycle()
     finally:
         client.close()
 

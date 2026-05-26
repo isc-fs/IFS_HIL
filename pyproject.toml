@@ -25,3 +25,8 @@ hil = "tools.flash:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["tools*"]
+
+[tool.pytest.ini_options]
+markers = [
+    "soak: long-running bench-endurance test; opt-in via `pytest -m soak`.",
+]
