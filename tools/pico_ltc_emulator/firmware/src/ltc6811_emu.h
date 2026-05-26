@@ -80,6 +80,17 @@ const uint8_t *ltc6811_emu_last_tx_snapshot(uint16_t *out_cmd, uint16_t *out_len
 // or a parse-side bug in the slave.
 const uint8_t *ltc6811_emu_last_rx_snapshot(uint16_t *out_len);
 
+// Per-module "stop replying" mask. Bit N (0..4) set = module N's two
+// LTC chain positions (2*N, 2*N+1) get 0xFF substituted for their
+// response bytes, which fails PEC15 at the master and causes the
+// AMS firmware to mark those modules as offline within `BmsStaleMs`.
+// Mask 0x00 = normal operation; mask 0x1F = entire chain silent.
+// Used by Block E E-065 (chain-stale predicate) and per-module
+// fault-injection tests. Set via the STOP_REPLY USB command; cleared
+// by RESUME_ALL.
+void    ltc6811_emu_set_stop_mask(uint8_t mask);
+uint8_t ltc6811_emu_get_stop_mask(void);
+
 #ifdef __cplusplus
 }
 #endif

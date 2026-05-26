@@ -66,6 +66,29 @@ static uint8_t response_pool[RSP_COUNT][RESPONSE_LEN];
 static const uint8_t *current_response = response_pool[RSP_RDCVA];
 static void rebuild_all_responses(void);
 
+// Per-module response-suppression mask. See header docstring for
+// semantics. Read on every TX byte push in the hot path, so keep
+// it as a plain uint8 -- writes are atomic on Cortex-M0+, no
+// locking needed.
+static volatile uint8_t g_stop_module_mask = 0u;
+
+void ltc6811_emu_set_stop_mask(uint8_t mask) { g_stop_module_mask = mask & 0x1Fu; }
+uint8_t ltc6811_emu_get_stop_mask(void)      { return g_stop_module_mask; }
+
+// Decide whether the byte at `tx_data_idx` (offset into the data
+// section, i.e. excluding RESPONSE_PAD) belongs to a suppressed
+// chain position. Bytes are laid out 8-per-chain-position; each pair
+// (positions 2N, 2N+1) is one AMS module, so mask bit N suppresses
+// data bytes [N*16 .. N*16+15].
+static inline uint8_t maybe_suppress_data(uint8_t b, int tx_data_idx) {
+    uint8_t mask = g_stop_module_mask;
+    if (mask == 0u) return b;
+    int chain_pos = tx_data_idx >> 3;          // /8
+    int module    = chain_pos >> 1;            // /2 (two LTCs per module)
+    if (mask & (1u << module)) return 0xFFu;
+    return b;
+}
+
 // LTC6811 cell voltage encoding: each cell is uint16_t in units of
 // 100 microvolts (0.1 mV). cell_mV * 10 gives the on-wire value.
 static inline uint16_t mV_to_ltc(uint16_t mV) {
@@ -436,7 +459,14 @@ void ltc6811_emu_service(void) {
         // uniform cells, chip 0's first 4 bytes may be wrong if cmd
         // != current_response -- handled later by cmd-parse swap.
         for (int i = 0; i < RESPONSE_PAD; i++) pio_tx_put_raw(0xFFu);
-        for (int i = 0; i < 4; i++) pio_tx_put_raw(current_response[RESPONSE_PAD + i]);
+        // Pre-load of chip 0's first 4 data bytes -- these belong to
+        // chain position 0 (= module 0), so route through the same
+        // suppress filter as the main pump or a STOP_REPLY on module 0
+        // would still leak real data through the pre-load window.
+        for (int i = 0; i < 4; i++) {
+            pio_tx_put_raw(maybe_suppress_data(
+                current_response[RESPONSE_PAD + i], i));
+        }
 
         rx_idx               = 0;
         tx_data_idx          = 4;   // start CPU push at byte 4 (we pre-loaded 0..3)
@@ -461,7 +491,9 @@ void ltc6811_emu_service(void) {
         //     test that's what we're unblocking.
         while (pio_tx_writable() &&
                tx_data_idx < (RESPONSE_LEN - RESPONSE_PAD)) {
-            if (!tx_push(current_response[RESPONSE_PAD + tx_data_idx])) break;
+            uint8_t b = maybe_suppress_data(
+                current_response[RESPONSE_PAD + tx_data_idx], tx_data_idx);
+            if (!tx_push(b)) break;
             tx_data_idx++;
         }
     }

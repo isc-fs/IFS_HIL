@@ -162,6 +162,75 @@ class PicoLtcClient:
     def reset_state(self) -> None:
         self._send_recv("RESET_STATE")
 
+    # ------------------------------------------------------------------
+    # Per-module response suppression  (Pico firmware v0.3.0+)
+    # ------------------------------------------------------------------
+
+    def stop_reply(self, module_mask: int) -> None:
+        """Stop responding to LTC SPI polls on the modules selected by
+        `module_mask` (5-bit, bit N = AMS module N). Bytes for the
+        silenced chain positions are replaced with 0xFF, which fails
+        PEC15 at the master. Used by Block E E-065 + B-026 tests.
+
+        Example: `pico.stop_reply(0x1F)` silences all 5 modules.
+                 `pico.stop_reply(0x04)` silences only module 2."""
+        if not (0 <= module_mask <= 0x1F):
+            raise ValueError(f"module_mask must be 0..0x1F, got 0x{module_mask:X}")
+        self._send_recv(f"STOP_REPLY 0x{module_mask:02X}")
+
+    def resume_all(self) -> None:
+        """Drop any active STOP_REPLY mask; resume nominal SPI reply.
+        Does NOT reset cell/temp state (use reset_state for that)."""
+        self._send_recv("RESUME_ALL")
+
+    # ------------------------------------------------------------------
+    # AMS-view helpers — translate (module, cell-within-module) to the
+    # chain-position addressing the Pico firmware speaks. Each AMS
+    # module = 2 LTC6811 chain positions (upper + lower); cells 0..9
+    # live on the upper LTC, cells 10..18 on the lower LTC (matching
+    # ams_config.hpp::CellsPerLtcUpper=10, CellsPerLtcLower=9).
+    #
+    # Use these in tests rather than the chain-pos `set_cell` so test
+    # code reads as "inject mV into module 3 cell 15" instead of "set
+    # chain pos 7 cell 5".
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _module_cell_to_chain(module: int, cell: int) -> tuple[int, int]:
+        if not (0 <= module < 5):
+            raise ValueError(f"module must be 0..4, got {module}")
+        if not (0 <= cell < 19):
+            raise ValueError(f"cell must be 0..18, got {cell}")
+        if cell < 10:
+            return (2 * module,     cell)           # upper LTC
+        else:
+            return (2 * module + 1, cell - 10)      # lower LTC
+
+    def set_module_cell(self, module: int, cell: int, mV: int) -> None:
+        """`module` ∈ 0..4, `cell` ∈ 0..18 (AMS-view addressing)."""
+        chain_pos, cell_in_ltc = self._module_cell_to_chain(module, cell)
+        self.set_cell(chain_pos, cell_in_ltc, mV)
+
+    def set_module_temp(self, module: int, sensor: int, deci_degC: int) -> None:
+        """`module` ∈ 0..4, `sensor` ∈ 0..4 (5 NTC channels per LTC's
+        upper position; lower LTC's aux channels are unused in this
+        bench's wiring). Drives the upper LTC of the module."""
+        if not (0 <= module < 5):
+            raise ValueError(f"module must be 0..4, got {module}")
+        if not (0 <= sensor < 5):
+            raise ValueError(f"sensor must be 0..4, got {sensor}")
+        chain_pos = 2 * module                          # upper LTC carries aux
+        self.set_temp(chain_pos, sensor, deci_degC)
+
+    # Spec-language aliases (per docs/ams-hil/test-plan-v1.5.0.md §3).
+    # `inject_cell_v` and `inject_cell_t` are the names the #245 plan
+    # uses; they're just thin wrappers over the AMS-view helpers above.
+    def inject_cell_v(self, module: int, cell: int, mV: int) -> None:
+        self.set_module_cell(module, cell, mV)
+
+    def inject_cell_t(self, module: int, sensor: int, deci_degC: int) -> None:
+        self.set_module_temp(module, sensor, deci_degC)
+
     def reboot_to_bootloader(self) -> None:
         """Trigger reset_usb_boot() on the Pico. After this call the
         device re-enumerates as USB MSC; the CDC port goes away. Wait

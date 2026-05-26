@@ -12,7 +12,7 @@
 
 #define LINE_MAX 96
 
-#define FW_VERSION_STR "0.2.0"
+#define FW_VERSION_STR "0.3.0"   // adds STOP_REPLY / RESUME_ALL
 
 usb_cmd_stats_t g_cmd_stats;
 
@@ -58,11 +58,12 @@ static void cmd_ping(void) {
 }
 
 static void cmd_status(void) {
-    char buf[224];
+    char buf[256];
     snprintf(buf, sizeof(buf),
              "OK n_cmds_rx=%lu n_spi_xact=%lu last_cmd=0x%03X "
              "n_valid_cmds=%lu last_ltc_cmd=0x%03X n_cs_cycles=%lu "
-             "rx_bytes=%lu last_rx=%02X %02X %02X %02X %02X %02X %02X %02X",
+             "rx_bytes=%lu stop_mask=0x%02X "
+             "last_rx=%02X %02X %02X %02X %02X %02X %02X %02X",
              (unsigned long)g_cmd_stats.n_cmds_rx,
              (unsigned long)g_ltc_stats.n_spi_xact,
              (unsigned)g_ltc_stats.last_cmd,
@@ -70,6 +71,7 @@ static void cmd_status(void) {
              (unsigned)g_ltc_stats.last_ltc_cmd,
              (unsigned long)g_ltc_stats.n_cs_cycles,
              (unsigned long)g_ltc_stats.rx_byte_count,
+             (unsigned)ltc6811_emu_get_stop_mask(),
              g_ltc_stats.last_rx[0], g_ltc_stats.last_rx[1],
              g_ltc_stats.last_rx[2], g_ltc_stats.last_rx[3],
              g_ltc_stats.last_rx[4], g_ltc_stats.last_rx[5],
@@ -132,7 +134,32 @@ static void cmd_set_all_temps(int argc, char *argv[]) {
 static void cmd_reset_state(void) {
     cell_state_reset();
     ltc6811_emu_reset_stats();
+    ltc6811_emu_set_stop_mask(0u);          // RESET_STATE also drops any stop-mask
     ltc6811_emu_refresh_responses();
+    emit_line("OK");
+}
+
+// STOP_REPLY <module_mask>  -- 5-bit per-module mask, bit N silences
+// LTC chain positions 2N and 2N+1 (= AMS module N). Bytes for the
+// silenced positions are replaced with 0xFF on the wire, which fails
+// PEC15 at the master and trips the BMS-stale predicate within
+// `BmsStaleMs`. Used by Block E E-065 + B-026 fault-injection tests.
+static void cmd_stop_reply(int argc, char *argv[]) {
+    if (argc != 2) { emit_line("ERR usage: STOP_REPLY <mask 0x00..0x1F>"); return; }
+    int ok = 1;
+    long mask = parse_int(argv[1], &ok);
+    if (!ok || mask < 0 || mask > 0x1F) {
+        emit_line("ERR mask 0x00..0x1F (5 bits, one per AMS module)");
+        return;
+    }
+    ltc6811_emu_set_stop_mask((uint8_t)mask);
+    emit_line("OK");
+}
+
+// RESUME_ALL  -- shorthand for STOP_REPLY 0. Doesn't reset cell/temp
+// state (use RESET_STATE for that) -- just resumes nominal SPI reply.
+static void cmd_resume_all(void) {
+    ltc6811_emu_set_stop_mask(0u);
     emit_line("OK");
 }
 
@@ -222,6 +249,8 @@ static void dispatch(char *line) {
     else if (eq(argv[0], "SET_ALL_CELLS"))  cmd_set_all_cells(argc, argv);
     else if (eq(argv[0], "SET_ALL_TEMPS"))  cmd_set_all_temps(argc, argv);
     else if (eq(argv[0], "RESET_STATE"))    cmd_reset_state();
+    else if (eq(argv[0], "STOP_REPLY"))     cmd_stop_reply(argc, argv);
+    else if (eq(argv[0], "RESUME_ALL"))     cmd_resume_all();
     else if (eq(argv[0], "DUMP"))           cmd_dump_response(argc, argv);
     else if (eq(argv[0], "DUMP_TX"))        cmd_dump_tx();
     else if (eq(argv[0], "DUMP_RX"))        cmd_dump_rx();
