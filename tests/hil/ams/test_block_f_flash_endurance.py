@@ -44,6 +44,8 @@ import time
 
 import pytest
 
+from tools.firmware_test.ams import can_map as M
+
 
 # Cycle-count multiplier for development runs (full counts are slow).
 # Profile-side hook: scripts/conftest pulls the multiplier from
@@ -195,18 +197,83 @@ class TestF075MixedVersionRoundTrip:
 # ---------------------------------------------------------------------------
 
 class TestF076StaleLatchFlash:
-    @pytest.mark.soak
-    @pytest.mark.skip(reason=SWD_PRE_SET_BKP_PENDING)
-    def test_f076_hil_clear_set(self):
-        # Pre-set RTC->BKP1R = 0xA115EE51 via SWD, run F-071 once
-        # with AMS_HIL_CLEAR_ERROR_LATCH=1. App must boot out of Error.
-        pass
+    """Per AMS #272 F-076 (rewritten): drive the FSM to Error via a
+    TSMS drop in Run (no SWD / no BKP poking) — that latches BKP1R via
+    safety_task.cpp → ErrorLatch::set(). Then power-cycle and verify
+    the latch-clear behaviour matches the build flag:
+
+      HIL_CLEAR build:  next boot reads Start within SafetyBootGraceMs
+                        (App_InitTask::ErrorLatch::clear() wipes the
+                        latch; #226 contract).
+      Flight build:     boot reads Error and stays (latch survives).
+
+    Only the HIL_CLEAR variant runs against this bench's build (the
+    sync target is always built with AMS_HIL_CLEAR_ERROR_LATCH=ON).
+    The flight variant stays skipped until a flight .bin lands in the
+    bench's artifact pipeline.
+    """
 
     @pytest.mark.soak
-    @pytest.mark.skip(reason=SWD_PRE_SET_BKP_PENDING + " " + FLIGHT_BUILD_VARIANT_PENDING)
+    def test_f076_hil_clear_set(
+        self, fresh_boot, mlc_powered, tsms, dash_chg, acu_heartbeat,
+        wait_for_state, observe_acu, ams_profile,
+    ):
+        import os
+        from broker.server import BrokerClient
+
+        # Skip cleanly if the cockpit fixtures aren't wired (consistent
+        # with Block C behaviour for the same dependency).
+        if tsms is None or dash_chg is None:
+            pytest.skip("tsms / dash_chg fixture unavailable")
+
+        # Step 1: drive FSM to Error via TSMS drop in Run. This writes
+        # BKP1R = 0xA115EE51 inside safety_task::trip_error.
+        from tests.hil.ams.test_block_c_fsm import _drive_to_run
+        _drive_to_run(tsms, dash_chg, acu_heartbeat, wait_for_state, ams_profile)
+        tsms.deassert()
+        wait_for_state(
+            M.FsmState.ERROR,
+            timeout_ms=int(ams_profile["state_transition_window_ms"]) + 200)
+
+        # Step 2: power-cycle MLC2.
+        client = BrokerClient(os.environ.get("HIL_BROKER_SOCKET",
+                                             "/run/hil-broker/broker.sock"))
+        try:
+            relay_bit = mlc_powered["relay_bit"]
+            client.call("tca.write_pin", addr=0x20, port=0,
+                        pin=relay_bit, value=False)
+            time.sleep(float(ams_profile["power_cycle_off_s"]))
+            observe_acu.clear()
+            client.call("tca.write_pin", addr=0x20, port=0,
+                        pin=relay_bit, value=True)
+        finally:
+            client.close()
+
+        # Step 3: HIL_CLEAR build must clear the latch and come up Start
+        # within SafetyBootGraceMs (= 2 s) + boot+telemetry slack.
+        boot_grace_ms = int(ams_profile.get("boot_grace_ms", 2000))
+        budget_ms = boot_grace_ms + 3000   # BL + first-telem slack
+        deadline = time.monotonic() + budget_ms / 1000.0
+        last = None
+        while time.monotonic() < deadline:
+            f = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
+            if f is not None:
+                last = M.decode_telem_status(f.data)["state"]
+                if last == M.FsmState.START:
+                    return  # PASS — latch was cleared
+            time.sleep(0.05)
+        raise AssertionError(
+            f"After TSMS-drop → Error → power-cycle, first 0x4A0 within "
+            f"{budget_ms} ms was state={last}; expected Start. "
+            "AMS_HIL_CLEAR_ERROR_LATCH may not be wiping BKP1R on boot.")
+
+    @pytest.mark.soak
+    @pytest.mark.skip(reason=FLIGHT_BUILD_VARIANT_PENDING)
     def test_f076_hil_clear_unset(self):
-        # Same pre-set, but with HIL_CLEAR=0 (flight build). App must
-        # boot INTO Error and the latch must survive.
+        # Flight variant: build with AMS_HIL_CLEAR_ERROR_LATCH=0, repeat
+        # the TSMS-drop fault stim, power-cycle, assert chip comes up
+        # Error and stays. Skipped until a flight .bin lands in the
+        # bench artifact pipeline.
         pass
 
 
@@ -259,14 +326,81 @@ class TestF079DiscoverLatencyLongSoak:
 # ---------------------------------------------------------------------------
 
 class TestF080TriggerFromError:
+    """Per AMS #272 F-080 (rewritten): force Error via TSMS drop in Run
+    (no SWD / no GDB), then issue the BL trigger. The trigger handler
+    in AcuCanTask must remain reachable regardless of FSM state —
+    especially Error, since that's the state where a fix-and-reflash
+    is most needed.
+
+    Same fault-stim path as F-076, but the assertion is "BL trigger
+    still works" rather than "latch clears on boot". Sibling test to
+    D-051b but specifically a regression net for the post-#243
+    trigger-from-Error path under soak.
+
+    Default 20 cycles per #272. Scaled by `--soak-cycle-scale`.
+    """
+
     @pytest.mark.soak
-    @pytest.mark.skip(reason=FLIGHT_BUILD_VARIANT_PENDING)
-    def test_f080_trigger_from_error(self):
-        # Sketch: HIL_CLEAR=0 build with the latch deliberately set,
-        # repeat F-071 20 times. The trigger path must still reach BL
-        # even though the app booted into Error. Regression net for
-        # the post-#243 + post-D-041b path.
-        pass
+    def test_f080_trigger_from_error(
+        self, mlc_powered, tsms, dash_chg, acu_heartbeat,
+        wait_for_state, observe_acu, ams_profile, soak_scale,
+    ):
+        import subprocess
+        # Same TSMS-drop fault-stim helpers as F-076.
+        if tsms is None or dash_chg is None:
+            pytest.skip("tsms / dash_chg fixture unavailable")
+        from tests.hil.ams.test_block_c_fsm import _drive_to_run
+        from tests.hil.ams.test_block_d_bootloader import _trigger_rebooted_to_bl
+
+        cycles = _cycles(20, soak_scale)
+        failures: list[tuple[int, str]] = []
+        from broker.server import BrokerClient
+        import os
+        client = BrokerClient(os.environ.get("HIL_BROKER_SOCKET",
+                                             "/run/hil-broker/broker.sock"))
+        try:
+            for i in range(cycles):
+                # 1) Cold-boot via K_n cycle so each iteration starts
+                #    from a known-good state.
+                relay_bit = mlc_powered["relay_bit"]
+                client.call("tca.write_pin", addr=0x20, port=0,
+                            pin=relay_bit, value=False)
+                time.sleep(float(ams_profile["power_cycle_off_s"]))
+                client.call("tca.write_pin", addr=0x20, port=0,
+                            pin=relay_bit, value=True)
+                time.sleep(float(ams_profile["mlc_boot_settle_s"]))
+
+                # 2) Drive into Run, then TSMS drop → Error.
+                try:
+                    _drive_to_run(tsms, dash_chg, acu_heartbeat,
+                                  wait_for_state, ams_profile)
+                except Exception as e:
+                    failures.append((i, f"drive_to_run failed: {e}"))
+                    continue
+                tsms.deassert()
+                try:
+                    wait_for_state(
+                        M.FsmState.ERROR,
+                        timeout_ms=int(ams_profile["state_transition_window_ms"]) + 200)
+                except Exception as e:
+                    failures.append((i, f"TSMS-drop didn't trip Error: {e}"))
+                    continue
+
+                # 3) Trigger BL from Error.
+                subprocess.run(
+                    ["cansend", ams_profile["bus_acu"], "002#B007AD11"],
+                    check=False, timeout=2)
+                if not _trigger_rebooted_to_bl(observe_acu, ams_profile):
+                    failures.append(
+                        (i, "BL trigger ignored while FSM in Error — "
+                            "SAFETY-CRITICAL: app becomes unreflashable "
+                            "from the cockpit fault path"))
+        finally:
+            client.close()
+
+        assert not failures, (
+            f"{len(failures)} of {cycles} trigger-from-Error cycles failed. "
+            f"First few: {failures[:5]}")
 
 
 # ---------------------------------------------------------------------------
