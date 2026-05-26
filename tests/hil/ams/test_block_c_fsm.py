@@ -11,17 +11,24 @@ DASH_CHG is the cockpit dashboard / charger button. They're driven by
 two independent pytest fixtures (`tsms`, `dash_chg`) -- no `cockpit`
 abstraction.
 
-| Test  | What it checks                                                   | Status      |
-|-------|------------------------------------------------------------------|-------------|
-| C-020 | Start stays put with only TSMS or only DASH_CHG                  | implemented |
-| C-021 | Start -> Precharge on TSMS && DASH_CHG                           | implemented |
-| C-022 | Precharge -> Transition once DC bus hits 95% of pack             | implemented |
-| C-023 | Transition -> Run after hold in car mode (VCU heartbeat fresh)   | implemented |
-| C-024 | Precharge timeout -> Error                                       | implemented |
-| C-025 | Run -> Error (sticky) on TSMS drop                               | implemented |
-| C-026 | Transition -> Charge in charger mode (VCU heartbeat paused)      | implemented |
-| C-027 | Error sticky within a boot                                       | implemented |
-| C-028 | Error survives reset (flight semantics)                          | deferred    |
+| #245 ID | What it checks                                                 | Status      |
+|---------|----------------------------------------------------------------|-------------|
+| C-030   | Start stays put with only TSMS                                 | implemented |
+| C-031   | Start stays put with only DASH_CHG                             | implemented |
+| C-032   | Start -> Precharge on TSMS && DASH_CHG (mode locks Car)        | implemented |
+| C-033   | Precharge -> Transition once DC bus hits 95% of pack           | implemented |
+| ~~C-034~~| ~~Precharge timeout~~ — REMOVED per AMS #244                   | deleted     |
+| ~~C-035~~| ~~Transition hold timer~~ — REMOVED per AMS #244               | deleted     |
+| C-036   | Transition voltage drop -> Error                               | scaffolded  |
+| C-037   | Charger mode FSM (VCU paused) Start->Precharge->Transition->Charge | implemented |
+| C-038   | Run -> Error (sticky) on TSMS drop                             | implemented |
+| C-039   | Run -> Error (sticky) on DASH_CHG drop                         | implemented |
+| C-040   | Charge -> Error on either input drop                           | scaffolded  |
+| C-041   | mode_locked retained mid-Run when VCU killed                   | scaffolded — blocked on AMS #246 |
+| C-042   | 0x4A2[5] cockpit byte across all 6 FSM states                  | scaffolded — blocked on AMS #246 |
+| C-043   | Error sticky ≥ 5 s after heartbeat resumes                     | implemented |
+| C-044   | Error survives reset (flight semantics)                        | deferred    |
+| C-045   | Start stays put with no fixtures driving PF9/PF10 (PR #230)    | implemented |
 
 All TSMS/DASH_CHG-driven tests skip cleanly when either fixture is
 unavailable (`tsms_*` / `dash_chg_*` keys absent from
@@ -84,9 +91,9 @@ def _drive_to_run(tsms, dash_chg, acu_heartbeat, wait_for_state, ams_profile):
 # C-020 -- Start stays put with only one of the two inputs
 # ---------------------------------------------------------------------------
 
-class TestC020GateRequiresBoth:
+class TestC030C031GateRequiresBoth:
 
-    def test_c020_tsms_only(self, fresh_boot, tsms, dash_chg, wait_for_state,
+    def test_c030_tsms_only(self, fresh_boot, tsms, dash_chg, wait_for_state,
                             observe_acu, ams_profile):
         _require_inputs(tsms, dash_chg)
         assert fresh_boot["first_frame"]["state"] == M.FsmState.START
@@ -107,7 +114,7 @@ class TestC020GateRequiresBoth:
                     f"must be high to fire the gate.")
             time.sleep(0.02)
 
-    def test_c020_dash_chg_only(self, fresh_boot, tsms, dash_chg, wait_for_state,
+    def test_c031_dash_chg_only(self, fresh_boot, tsms, dash_chg, wait_for_state,
                                 observe_acu, ams_profile):
         _require_inputs(tsms, dash_chg)
         assert fresh_boot["first_frame"]["state"] == M.FsmState.START
@@ -131,9 +138,9 @@ class TestC020GateRequiresBoth:
 # C-021 -- Start -> Precharge on TSMS && DASH_CHG
 # ---------------------------------------------------------------------------
 
-class TestC021StartToPrecharge:
+class TestC032StartToPrecharge:
 
-    def test_c021(self, fresh_boot, tsms, dash_chg, wait_for_state, ams_profile):
+    def test_c032(self, fresh_boot, tsms, dash_chg, wait_for_state, ams_profile):
         _require_inputs(tsms, dash_chg)
         assert fresh_boot["first_frame"]["state"] == M.FsmState.START
 
@@ -149,9 +156,9 @@ class TestC021StartToPrecharge:
 # C-022 -- Precharge -> Transition on DC bus target
 # ---------------------------------------------------------------------------
 
-class TestC022PrechargeToTransition:
+class TestC033PrechargeToTransition:
 
-    def test_c022(self, fresh_boot, tsms, dash_chg, acu_heartbeat,
+    def test_c033(self, fresh_boot, tsms, dash_chg, acu_heartbeat,
                   wait_for_state, ams_profile):
         _require_inputs(tsms, dash_chg)
         _drive_to_precharge(tsms, dash_chg, wait_for_state, ams_profile)
@@ -166,46 +173,31 @@ class TestC022PrechargeToTransition:
 
 
 # ---------------------------------------------------------------------------
-# C-023 -- Transition -> Run after hold (car mode)
+# C-034 / C-035 -- REMOVED in #245 per AMS PR #244
 # ---------------------------------------------------------------------------
-
-class TestC023TransitionToRun:
-
-    def test_c023(self, fresh_boot, tsms, dash_chg, acu_heartbeat,
-                  wait_for_state, ams_profile):
-        _require_inputs(tsms, dash_chg)
-        run = _drive_to_run(tsms, dash_chg, acu_heartbeat, wait_for_state,
-                            ams_profile)
-        assert run["state"] == M.FsmState.RUN
-
-
-# ---------------------------------------------------------------------------
-# C-024 -- Precharge timeout -> Error
-# ---------------------------------------------------------------------------
-
-class TestC024PrechargeTimeout:
-
-    def test_c024(self, fresh_boot, tsms, dash_chg, acu_heartbeat,
-                  wait_for_state, ams_profile):
-        _require_inputs(tsms, dash_chg)
-        _drive_to_precharge(tsms, dash_chg, wait_for_state, ams_profile)
-        # Heartbeat stays at default 0 V -- precharge never reaches target.
-
-        window_ms = (int(ams_profile["precharge_max_ms"]) +
-                     int(ams_profile["state_transition_window_ms"]) + 200)
-        wait_for_state(M.FsmState.ERROR, timeout_ms=window_ms)
-
+# Both PrechargeMaxMs and TransitionHoldMs were deleted in #244:
+#   - Precharge holds indefinitely until precharge_target_reached
+#     fires OR a safety predicate trips. No more 1.5 s timeout to
+#     Error -- the deletion was the point of #244.
+#   - Transition is now a one-FSM-step passthrough (Precharge ->
+#     Transition -> Run within a single 10 ms safety tick), so there's
+#     no observable hold interval to time.
+# The old test_c023 (Transition -> Run after hold) and test_c024
+# (Precharge timeout) covered behaviour the firmware no longer
+# exhibits. Deleted here rather than skipped because they'd be
+# misleading regression signal (would always fail or always pass for
+# the wrong reason). See #245 Block C table.
 
 # ---------------------------------------------------------------------------
-# C-025 -- Run -> Error (latched) on TSMS drop
+# C-038 -- Run -> Error (latched) on TSMS drop
 # ---------------------------------------------------------------------------
 # Operator chose conservative semantics in PR #187: every AIR-open event
 # is a sticky fault requiring power-cycle. Run / Charge no longer have
 # a "clean shutdown back to Start" path.
 
-class TestC025RunToErrorOnInputDrop:
+class TestC038RunToErrorOnTsmsDrop:
 
-    def test_c025_tsms_drop(self, fresh_boot, tsms, dash_chg, acu_heartbeat,
+    def test_c038_tsms_drop(self, fresh_boot, tsms, dash_chg, acu_heartbeat,
                             wait_for_state, ams_profile):
         _require_inputs(tsms, dash_chg)
         _drive_to_run(tsms, dash_chg, acu_heartbeat, wait_for_state,
@@ -226,9 +218,9 @@ class TestC025RunToErrorOnInputDrop:
 # fires the heartbeat can resume (or a oneshot bump) so precharge
 # actually completes; the locked mode does NOT re-evaluate.
 
-class TestC026TransitionToCharge:
+class TestC037ChargerModeFsm:
 
-    def test_c026(self, fresh_boot, tsms, dash_chg, acu_heartbeat, acu_stim,
+    def test_c037(self, fresh_boot, tsms, dash_chg, acu_heartbeat, acu_stim,
                   wait_for_state, ams_profile):
         _require_inputs(tsms, dash_chg)
 
@@ -264,9 +256,9 @@ class TestC026TransitionToCharge:
 # C-027 -- Error sticky within a boot
 # ---------------------------------------------------------------------------
 
-class TestC027ErrorSticky:
+class TestC043ErrorSticky:
 
-    def test_c027(self, fresh_boot, acu_heartbeat, wait_for_state,
+    def test_c043(self, fresh_boot, acu_heartbeat, wait_for_state,
                   observe_acu, ams_profile):
         # Trip Error via VCU staleness (same path as B-017). Other fault
         # paths (current overlimit) need PF7 stim we don't have.
@@ -297,7 +289,7 @@ class TestC027ErrorSticky:
 # C-028 -- Error survives reset (flight semantics)
 # ---------------------------------------------------------------------------
 
-class TestC028ErrorSurvivesReset:
+class TestC044ErrorSurvivesReset:
 
     @pytest.mark.skip(reason=(
         "C-028 needs a flight build (no -DAMS_BMS_HIL_STUB) -- the stub "
@@ -306,5 +298,161 @@ class TestC028ErrorSurvivesReset:
         "on this rig would latch ERROR immediately on the missing LTC "
         "chain, so C-028 is doubly blocked. Defer until the bench has "
         "an LTC chain and we can run a flight build that boots clean."))
-    def test_c028_error_survives_reset(self):
+    def test_c044_error_survives_reset(self):
         pass
+
+
+# ---------------------------------------------------------------------------
+# C-036 — Transition voltage drop → Error  (NEW per #245)
+# ---------------------------------------------------------------------------
+
+class TestC036TransitionVoltageDrop:
+    """Per #245: post-swap, if the DC bus slumps in Transition (e.g.
+    AIR+ welded shut, AIR- opens, precharge resistor failure), the
+    safety supervisor must trip → Error."""
+
+    @pytest.mark.skip(reason=(
+        "Needs a stim path that drops dc_bus_V back below the "
+        "precharge-target threshold AFTER FSM enters Transition. "
+        "Currently the acu_heartbeat fixture sets dc_bus monotonically; "
+        "needs either a 'step-down' method on the fixture OR a new "
+        "stim helper. Implement once that lands."
+    ))
+    def test_c036_transition_voltage_drop(self):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# C-039 — Run → Error (latched) on DASH_CHG drop  (NEW per #245)
+# ---------------------------------------------------------------------------
+
+class TestC039RunToErrorOnDashChgDrop:
+    """Sibling to C-038 (TSMS drop). Run → Error must also fire when
+    DASH_CHG (cockpit) drops, mirroring the operator-intent semantics."""
+
+    def test_c039_dash_chg_drop(self, fresh_boot, tsms, dash_chg,
+                                 acu_heartbeat, wait_for_state, ams_profile):
+        _require_inputs(tsms, dash_chg)
+        run = _drive_to_run(tsms, dash_chg, acu_heartbeat,
+                            wait_for_state, ams_profile)
+        assert run["state"] == M.FsmState.RUN
+
+        dash_chg.deassert()
+        wait_for_state(
+            M.FsmState.ERROR,
+            timeout_ms=int(ams_profile["state_transition_window_ms"]) + 100)
+
+
+# ---------------------------------------------------------------------------
+# C-040 — Charge → Error (latched) on either input drop  (NEW per #245)
+# ---------------------------------------------------------------------------
+
+class TestC040ChargeToErrorOnInputDrop:
+    @pytest.mark.skip(reason=(
+        "Needs a 'drive_to_charge' helper symmetric to _drive_to_run. "
+        "C-037 (charger mode FSM) covers the Start→Charge path, but "
+        "there's no shared helper that lands the chip in Charge for "
+        "downstream input-drop tests. Implement once factored out."
+    ))
+    def test_c040_tsms_drop(self):
+        pass
+
+    @pytest.mark.skip(reason=(
+        "Same scaffolding gap as test_c040_tsms_drop. Pair test."
+    ))
+    def test_c040_dash_chg_drop(self):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# C-041 — mode_locked retained mid-Run when VCU killed  (NEW per #245)
+# ---------------------------------------------------------------------------
+
+class TestC041ModeLockedRetained:
+    """Per #245: the mode latch (Car / Charger) is captured at
+    Start→Precharge and held for the rest of the FSM lifetime. Killing
+    the VCU mid-Run must NOT flip mode — it should trip VCU-stale and
+    land in Error with mode_locked == Car still readable.
+
+    Observable via the cockpit byte in 0x4A2[5]: mode_locked encoding
+    is 0x04 (Car) once latched, even after FSM transitions to Error.
+    """
+
+    @pytest.mark.skip(reason=(
+        "Cockpit byte encoding is gated under HIL_STUB in firmware "
+        "(AMS issue #246); on HIL_CLEAR builds byte 5 reads 0x00 and "
+        "mode_locked isn't visible. Drop the skip once #246 hoists "
+        "the encoding out of HIL_STUB."
+    ))
+    def test_c041_mode_locked_retained_through_error(self):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# C-042 — 0x4A2[5] cockpit byte across all 6 FSM states  (NEW per #245)
+# ---------------------------------------------------------------------------
+
+class TestC042CockpitByteAcrossStates:
+    @pytest.mark.skip(reason=(
+        "Blocked on AMS issue #246 (cockpit byte gated under "
+        "HIL_STUB; HIL_CLEAR build ships 0x00). Same root cause as "
+        "A-010. Once #246 lands, run the FSM through "
+        "Start->Precharge->Transition->Run->Error (and the Charge "
+        "path separately) and assert 0x4A2[5] encodes the right "
+        "valid+mode+TSMS+DASH bits at each step."
+    ))
+    def test_c042_cockpit_byte_per_state(self):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# C-045 — Start stays put with no fixtures driving PF9/PF10  (NEW per #245)
+# ---------------------------------------------------------------------------
+
+class TestC045StartStaysWithNoCockpitInputs:
+    """Per #245 (post-#230): with no HIL fixtures driving PF9/PF10,
+    the AMS firmware's internal GPIO_PULLDOWN keeps TSMS + DASH_CHG
+    LOW. FSM must stay in Start indefinitely (or until VCU-stale
+    grace expires) and NEVER spuriously transition to Precharge.
+
+    This is the regression net for AMS PR #230 — the pre-#230
+    GPIO_NOPULL config let the inputs float to mid-rail, which the
+    FSM occasionally read as HIGH and triggered phantom Precharge
+    transitions in early bench runs.
+
+    Method: power-cycle the chip without ever calling tsms.assert_()
+    or dash_chg.assert_(). The `fresh_boot` fixture already deasserts
+    both pins pre-power-on (#37's cockpit-pre-deassert fix), so this
+    is just a "watch state for a few cycles" test.
+    """
+
+    def test_c045_no_inputs_no_transition(self, fresh_boot, observe_acu,
+                                            wait_for_state, ams_profile):
+        # First frame from fresh_boot should be Start.
+        assert fresh_boot["first_frame"]["state"] == M.FsmState.START, (
+            "first frame post-boot wasn't Start; fresh_boot's cockpit "
+            "pre-deassert may have regressed."
+        )
+        # Watch for ~2 telemetry cycles. Within that window state must
+        # stay Start. (Allow Error as a soft-pass: VCU staleness CAN
+        # trip if the heartbeat dropped a frame -- that's a separate
+        # predicate; what we're checking here is that we DON'T see
+        # Precharge / Transition / Run / Charge.)
+        deadline = time.monotonic() + \
+            (int(ams_profile["tx_telemetry_period_ms"]) * 2 / 1000.0) + 0.3
+        spurious_transitions: list[str] = []
+        while time.monotonic() < deadline:
+            f = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
+            if f is not None:
+                d = M.decode_telem_status(f.data)
+                st = d["state"]
+                if st not in (M.FsmState.START, M.FsmState.ERROR):
+                    spurious_transitions.append(d["state_name"])
+                    break
+            time.sleep(0.05)
+        assert not spurious_transitions, (
+            f"FSM transitioned to {spurious_transitions[0]} with no "
+            "cockpit inputs driven. PR #230's GPIO_PULLDOWN contract "
+            "may have regressed: PF9 / PF10 are floating to HIGH and "
+            "the firmware is reading them as asserted."
+        )

@@ -2,18 +2,27 @@
 Block B — Safety supervisor (post-refactor: SafetyTask + StateTask +
 TelemetryTask are merged into MainTask, single 10 ms loop).
 
-Implements B-010..B-017 from `isc-fs/IFS08-CE-AMS#123`.
+Per `isc-fs/IFS08-CE-AMS#245` (supersedes the v1.4.0 B-010..B-017
+scheme from #123). Tests below renumbered to match the #245 spec;
+the original B-010..B-013 rows are kept as out-of-#245-scope
+regression coverage (cadence + IWDG + latch contract).
 
-| Test  | What it checks                                            | Status     |
-|-------|-----------------------------------------------------------|------------|
-| B-010 | MainTask 10 ms cadence via heartbeat indirection (60 s)   | implemented|
-| B-011 | IWDG resets the chip if MainTask hangs                    | needs GDB  |
-| B-012 | Watchdog reset re-opens relays                            | needs GDB  |
-| B-013 | ErrorLatch clears on boot under HIL_STUB                  | needs GDB  |
-| B-014 | BMS predicates trip on cell UV/OV/OT                      | deferred (LTC chain) |
-| B-015 | Current overlimit predicate trips → Error                 | needs PF11 stim |
-| B-016 | Current sensor stale → Error                              | needs GDB  |
-| B-017 | VCU heartbeat stale → Error                               | implemented|
+| #245 ID | What it checks                                           | Status     |
+|---------|----------------------------------------------------------|------------|
+| B-020   | Boot grace suppresses VCU/BMS staleness                  | scaffolded |
+| B-021   | VCU 0x100 stale > VcuStaleMs → Error (unblocked by #243) | implemented|
+| B-022   | BMS module stale > BmsStaleMs → Error (Pico STOP_REPLY)  | scaffolded |
+| B-023   | Current sensor stale > IStaleMs → Error                  | deferred — flight build only |
+| B-024   | Current overlimit (|filtered_mA| > CurrentMaxMa) → Error | needs DAC4 ch0 stim |
+| B-025   | sensor_fault from ADC failure → Error                    | scaffolded — needs SWD |
+| B-026   | cell UV/OV/OT/UT → Error via Pico INJECT_CELL_V/T        | scaffolded |
+| B-027   | force_error_set legacy hook                              | deferred — no consumer |
+
+Out-of-#245 retained:
+| B-010   | MainTask 10 ms cadence via heartbeat indirection (60 s)  | implemented|
+| B-011   | IWDG resets the chip if MainTask hangs                   | needs GDB  |
+| B-012   | Watchdog reset re-opens relays                           | needs GDB  |
+| B-013   | ErrorLatch clears on boot under HIL_STUB                 | needs GDB  |
 """
 
 from __future__ import annotations
@@ -113,7 +122,7 @@ class TestB013ErrorLatchClearsOnBoot:
 # B-014 — BMS predicates trip on cell UV/OV/OT
 # ---------------------------------------------------------------------------
 
-class TestB014BMSPredicates:
+class TestB022BMSStale:
 
     @pytest.mark.skip(reason=(
         "B-014 is deferred until an LTC6811 isoSPI chain is present on "
@@ -122,7 +131,7 @@ class TestB014BMSPredicates:
         "windows, so no fault is reachable from the bench under this "
         "build flag. Repeat on a real-chain rig with a flight build."
     ))
-    def test_b014_bms_predicates_trip(self):
+    def test_b022_bms_stale_trips_error(self):
         pass
 
 
@@ -130,7 +139,7 @@ class TestB014BMSPredicates:
 # B-015 — Current overlimit predicate trips
 # ---------------------------------------------------------------------------
 
-class TestB015CurrentOverlimit:
+class TestB024CurrentOverlimit:
 
     @pytest.mark.skip(reason=(
         "B-015 needs an analog source driving PF11 (ADC1 ch2) past "
@@ -140,7 +149,7 @@ class TestB015CurrentOverlimit:
         "bench respin wires DAC2_OUT0 → SLOT1_AN0, this test becomes "
         "directly runnable."
     ))
-    def test_b015_current_overlimit_trips_error(self):
+    def test_b024_current_overlimit_trips_error(self):
         pass
 
 
@@ -148,13 +157,13 @@ class TestB015CurrentOverlimit:
 # B-016 — Current sensor stale trips
 # ---------------------------------------------------------------------------
 
-class TestB016CurrentStale:
+class TestB023CurrentStale:
 
     @pytest.mark.skip(reason=(
         "B-016 requires halting CurrentSensorTask via GDB so its "
         "last_update_tick goes stale. No SWD on the rig."
     ))
-    def test_b016_current_stale_trips_error(self):
+    def test_b023_current_stale_trips_error(self):
         pass
 
 
@@ -162,12 +171,12 @@ class TestB016CurrentStale:
 # B-017 — VCU heartbeat stale trips
 # ---------------------------------------------------------------------------
 
-class TestB017VCUHeartbeatStale:
+class TestB021VCUHeartbeatStale:
     """Pause the bench's 0x100 emission, wait kVcuStaleMs + slack, and
     confirm the FSM latches Error. The chip must be past boot grace
     first — pre-grace the predicate is gated."""
 
-    def test_b017_vcu_stale_trips_error(self, fresh_boot, acu_heartbeat,
+    def test_b021_vcu_stale_trips_error(self, fresh_boot, acu_heartbeat,
                                          observe_acu, wait_for_state,
                                          ams_profile):
         # Wait grace + a couple of telemetry cycles so we're firmly in
@@ -197,3 +206,96 @@ class TestB017VCUHeartbeatStale:
             # Always resume — leaving the heartbeat off would cascade
             # into subsequent tests in the same session.
             acu_heartbeat["resume"]()
+
+
+# ---------------------------------------------------------------------------
+# B-020 — Boot grace suppresses staleness predicates  (NEW per #245)
+# ---------------------------------------------------------------------------
+
+import pytest as _pytest  # noqa: E402
+
+class TestB020BootGraceSuppressesStaleness:
+    """During the first SafetyBootGraceMs (= 2 s) after reset, the
+    safety supervisor must NOT trip on staleness predicates even when
+    they're objectively true (no VCU heartbeat, no current sensor
+    update, etc.). This is the grace window that lets BL hand-off +
+    app-init complete before the safety net starts running."""
+
+    @_pytest.mark.skip(reason=(
+        "Needs a fixture that powers MLC2 with NO heartbeats (acu_heartbeat "
+        "paused, current_heartbeat paused) and observes that 0x4A0[0] stays "
+        "in Start for the full SafetyBootGraceMs before tripping to Error. "
+        "fresh_boot starts both heartbeats so it can't be used as-is. "
+        "Implement once a 'cold_boot_no_heartbeat' fixture lands."
+    ))
+    def test_b020_boot_grace_suppresses_staleness(self):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# B-025 — sensor_fault from ADC failure → Error  (NEW per #245)
+# ---------------------------------------------------------------------------
+
+class TestB025SensorFault:
+    @_pytest.mark.skip(reason=(
+        "Needs a way to force the STM32's ADC into a fault state -- SWD "
+        "attach + GDB to corrupt the calibration register, or a hardware "
+        "stim that drives the ADC input out of its measurable range. "
+        "Neither exists on this rig today."
+    ))
+    def test_b025_sensor_fault_trips_error(self):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# B-026 — cell UV/OV/OT/UT → Error via Pico injection  (NEW per #245)
+# ---------------------------------------------------------------------------
+
+class TestB026CellRangeInjection:
+    """Per #245: with the Pico LTC emulator running, the bench should be
+    able to inject out-of-range cell V / cell T values and observe the
+    corresponding safety predicate trip → FSM goes Error. Needs the
+    Pico to support INJECT_CELL_V / INJECT_CELL_T commands per
+    docs/ams-hil/test-plan-v1.5.0.md §3."""
+
+    @_pytest.mark.skip(reason=(
+        "Blocked on Pico emulator INJECT_CELL_V command. See "
+        "docs/ams-hil/test-plan-v1.5.0.md §3."
+    ))
+    def test_b026_cell_overvoltage(self):
+        pass
+
+    @_pytest.mark.skip(reason=(
+        "Blocked on Pico emulator INJECT_CELL_V command. See "
+        "docs/ams-hil/test-plan-v1.5.0.md §3."
+    ))
+    def test_b026_cell_undervoltage(self):
+        pass
+
+    @_pytest.mark.skip(reason=(
+        "Blocked on Pico emulator INJECT_CELL_T command. See "
+        "docs/ams-hil/test-plan-v1.5.0.md §3."
+    ))
+    def test_b026_cell_overtemperature(self):
+        pass
+
+    @_pytest.mark.skip(reason=(
+        "Blocked on Pico emulator INJECT_CELL_T command. See "
+        "docs/ams-hil/test-plan-v1.5.0.md §3."
+    ))
+    def test_b026_cell_undertemperature(self):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# B-027 — force_error_set legacy hook  (DEFERRED per #245)
+# ---------------------------------------------------------------------------
+
+class TestB027ForceErrorSetHook:
+    @_pytest.mark.skip(reason=(
+        "Per #245: no live setter exists for force_error_set. Test "
+        "DEFERRED until firmware exposes one (would be a #if HIL-only "
+        "diag-write CAN command). Tracking row only."
+    ))
+    def test_b027_force_error_set(self):
+        pass
