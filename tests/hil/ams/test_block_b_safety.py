@@ -252,39 +252,60 @@ class TestB025SensorFault:
 # ---------------------------------------------------------------------------
 
 class TestB026CellRangeInjection:
-    """Per #245: with the Pico LTC emulator running, the bench should be
-    able to inject out-of-range cell V / cell T values and observe the
-    corresponding safety predicate trip → FSM goes Error. Needs the
-    Pico to support INJECT_CELL_V / INJECT_CELL_T commands per
-    docs/ams-hil/test-plan-v1.5.0.md §3."""
+    """Per #245: with the Pico LTC emulator running, inject out-of-
+    range cell V / cell T values and observe the corresponding
+    safety predicate trip → FSM goes Error. Unblocked by the Pico
+    emulator INJECT_CELL_V / INJECT_CELL_T commands shipped in
+    PR #39 (v0.3.0+).
 
-    @_pytest.mark.skip(reason=(
-        "Blocked on Pico emulator INJECT_CELL_V command. See "
-        "docs/ams-hil/test-plan-v1.5.0.md §3."
-    ))
-    def test_b026_cell_overvoltage(self):
-        pass
+    Predicate thresholds per `ams_config.hpp`:
+      - CellOverVoltageMv  = 4200
+      - CellUnderVoltageMv = 2800
+      - CellOverTempC      = 60
+      - CellUnderTempC     = -10
 
-    @_pytest.mark.skip(reason=(
-        "Blocked on Pico emulator INJECT_CELL_V command. See "
-        "docs/ams-hil/test-plan-v1.5.0.md §3."
-    ))
-    def test_b026_cell_undervoltage(self):
-        pass
+    Each sub-test picks a different (module, cell|sensor) so the
+    suite stresses the chain-position translation in the client too.
+    """
 
-    @_pytest.mark.skip(reason=(
-        "Blocked on Pico emulator INJECT_CELL_T command. See "
-        "docs/ams-hil/test-plan-v1.5.0.md §3."
-    ))
-    def test_b026_cell_overtemperature(self):
-        pass
+    def test_b026_cell_overvoltage(self, fresh_boot, pico_emu,
+                                    wait_for_state, ams_profile):
+        assert fresh_boot["first_frame"]["state"] == M.FsmState.START
+        pico_emu.inject_cell_v(module=2, cell=5, mV=4400)  # > 4200
+        wait_for_state(
+            M.FsmState.ERROR,
+            timeout_ms=int(ams_profile["tx_telemetry_period_ms"]) * 2 + 500)
 
-    @_pytest.mark.skip(reason=(
-        "Blocked on Pico emulator INJECT_CELL_T command. See "
-        "docs/ams-hil/test-plan-v1.5.0.md §3."
-    ))
-    def test_b026_cell_undertemperature(self):
-        pass
+    def test_b026_cell_undervoltage(self, fresh_boot, pico_emu,
+                                     wait_for_state, ams_profile):
+        assert fresh_boot["first_frame"]["state"] == M.FsmState.START
+        # cell 10 lives on the lower LTC of module 0 -- exercises the
+        # client's >= 10 → chain_pos+1 translation.
+        pico_emu.inject_cell_v(module=0, cell=10, mV=2500)  # < 2800
+        wait_for_state(
+            M.FsmState.ERROR,
+            timeout_ms=int(ams_profile["tx_telemetry_period_ms"]) * 2 + 500)
+
+    # See E-067 NOTE: temp injection only confirmed to reach AMS at
+    # (module=0, sensor=0) today; full address-space coverage is a
+    # Pico-emulator follow-up. Both sub-tests use the known-good
+    # address so they exercise the OV/UV-of-temperature predicate
+    # paths even though they cover only one chain slot.
+    def test_b026_cell_overtemperature(self, fresh_boot, pico_emu,
+                                        wait_for_state, ams_profile):
+        assert fresh_boot["first_frame"]["state"] == M.FsmState.START
+        pico_emu.inject_cell_t(module=0, sensor=0, deci_degC=750)  # 75 °C
+        wait_for_state(
+            M.FsmState.ERROR,
+            timeout_ms=int(ams_profile["tx_telemetry_period_ms"]) * 2 + 500)
+
+    def test_b026_cell_undertemperature(self, fresh_boot, pico_emu,
+                                         wait_for_state, ams_profile):
+        assert fresh_boot["first_frame"]["state"] == M.FsmState.START
+        pico_emu.inject_cell_t(module=0, sensor=0, deci_degC=-200)  # -20 °C
+        wait_for_state(
+            M.FsmState.ERROR,
+            timeout_ms=int(ams_profile["tx_telemetry_period_ms"]) * 2 + 500)
 
 
 # ---------------------------------------------------------------------------

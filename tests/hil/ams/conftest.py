@@ -408,6 +408,50 @@ def dash_chg(ams_profile, mlc_powered):
 
 
 # ---------------------------------------------------------------------------
+# Pico LTC emulator client (v0.3.0+ for STOP_REPLY / inject_*)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def pico_emu():
+    """USB-CDC client for the Pi Pico LTC6811 emulator on MLC2 J8.
+
+    Skips cleanly when the Pico isn't reachable -- lets the test
+    suite stay green off-bench and on rigs where the emulator isn't
+    wired. Per-test scope so each test starts from a clean reset
+    state (`reset_state` on teardown also drops any STOP_REPLY mask
+    left over by a previous test).
+
+    Used by E-065 / E-066 / E-067 (LTC chain integrity) and B-026
+    (cell UV/OV/OT/UT fault injection).
+    """
+    try:
+        from tools.pico_ltc_emulator.host.pico_ltc_client import PicoLtcClient
+    except Exception as e:
+        pytest.skip(f"Pico LTC client import failed: {e}")
+    try:
+        client = PicoLtcClient()
+        client.open()
+        # Probe — if PING fails, the Pico either isn't there or is in
+        # BOOTSEL. Skip rather than fail.
+        try:
+            client.ping()
+        except Exception as e:
+            client.close()
+            pytest.skip(f"Pico LTC emulator did not respond to PING: {e}")
+    except Exception as e:
+        pytest.skip(f"Pico LTC emulator unreachable: {e}")
+    try:
+        yield client
+    finally:
+        # Best-effort cleanup so the next test sees nominal-healthy seed.
+        try: client.resume_all()
+        except Exception: pass
+        try: client.reset_state()
+        except Exception: pass
+        client.close()
+
+
+# ---------------------------------------------------------------------------
 # Flasher
 # ---------------------------------------------------------------------------
 
