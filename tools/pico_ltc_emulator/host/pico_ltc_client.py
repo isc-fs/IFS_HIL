@@ -212,15 +212,28 @@ class PicoLtcClient:
         self.set_cell(chain_pos, cell_in_ltc, mV)
 
     def set_module_temp(self, module: int, sensor: int, deci_degC: int) -> None:
-        """`module` ∈ 0..4, `sensor` ∈ 0..4 (5 NTC channels per LTC's
-        upper position; lower LTC's aux channels are unused in this
-        bench's wiring). Drives the upper LTC of the module."""
+        """`module` ∈ 0..4, `sensor` ∈ 0..19 (the ADG731-routed NTC
+        slot index, matching AMS `Adg731ChannelMap` -- NTC_1..NTC_20
+        per module's upper LTC). Drives the upper LTC of the module;
+        the lower LTC's aux channels aren't wired through a mux on
+        this bench.
+
+        The mapping from `sensor` (0..19) to the actual ADG731
+        channel selector value (0..9 + 16..25) is held by the AMS
+        firmware and snooped by the Pico emu via WRCOMM; pass the
+        *position in Adg731ChannelMap*, not the raw channel number.
+        Use `inject_cell_t` (alias) for spec-language code.
+        """
         if not (0 <= module < 5):
             raise ValueError(f"module must be 0..4, got {module}")
-        if not (0 <= sensor < 5):
-            raise ValueError(f"sensor must be 0..4, got {sensor}")
+        if not (0 <= sensor < 20):
+            raise ValueError(f"sensor must be 0..19 (Adg731ChannelMap "
+                             f"index), got {sensor}")
+        # AMS-side index N maps to ADG731 mux channel
+        # Adg731ChannelMap[N], i.e. N for N<10, N+6 for N>=10.
+        adg731_ch = sensor if sensor < 10 else sensor + 6
         chain_pos = 2 * module                          # upper LTC carries aux
-        self.set_temp(chain_pos, sensor, deci_degC)
+        self.set_temp(chain_pos, adg731_ch, deci_degC)
 
     # Spec-language aliases (per docs/ams-hil/test-plan-v1.5.0.md §3).
     # `inject_cell_v` and `inject_cell_t` are the names the #245 plan

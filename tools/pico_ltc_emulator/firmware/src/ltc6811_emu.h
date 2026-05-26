@@ -91,6 +91,12 @@ const uint8_t *ltc6811_emu_last_rx_snapshot(uint16_t *out_len);
 void    ltc6811_emu_set_stop_mask(uint8_t mask);
 uint8_t ltc6811_emu_get_stop_mask(void);
 
+// Current ADG731 mux selector value (0..31) as snooped from the most
+// recent WRCOMM command the AMS issued. Used by STATUS for operator
+// diagnostics + by build_rdaux_chunk to pick which temp_dC slot
+// drives AUX1. Defaults to 0 at boot before any WRCOMM is observed.
+uint8_t ltc6811_emu_get_adg731_ch(void);
+
 #ifdef __cplusplus
 }
 #endif
