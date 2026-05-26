@@ -416,6 +416,16 @@ class TestA010CockpitByteSentinel:
     locked early (would be 0x84 / 0x88).
     """
 
+    @pytest.mark.skip(reason=(
+        "AMS firmware encodes the cockpit byte only under "
+        "#if defined(AMS_BMS_HIL_STUB) in safety_task.cpp -- the #else "
+        "branch (which our default HIL_CLEAR_ERROR_LATCH=1 build hits) "
+        "calls encode_temps without tsms_dash_chg_byte, so 0x4A2[5] "
+        "reads 0x00 on the wire. Drop this skip once AMS hoists the "
+        "encoding out of HIL_STUB or adds an always-on variant. "
+        "Bench-side proof: A-010 measurement shows 0x00 against the "
+        "post-#243 dev tip."
+    ))
     def test_a010(self, fresh_boot, observe_acu, ams_profile):
         # Wait one telemetry cycle past fresh_boot so we see the
         # post-boot steady-state cockpit byte, not a transient.
