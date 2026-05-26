@@ -546,3 +546,61 @@ class TestA012FdCan1RejectsExtendedIds:
             stop_evt.set()
             t.join(timeout=1.0)
             acu_heartbeat["resume"]()
+
+
+# ---------------------------------------------------------------------------
+# A-013 — firmware_info via pit-diag 0x6C6  (NEW per AMS #272)
+# ---------------------------------------------------------------------------
+
+class TestA013FirmwareInfoMatchesSource:
+    """Per AMS #272 A-013: pit-diag `0x6C6` ships the firmware identity
+    record (semver bytes 0..2, git hash bytes 3..6, BL node ID byte 7).
+    Cross-check against the local `VERSION` file and `git rev-parse
+    --short=8 HEAD` of the firmware source tree the .bin was built from.
+
+    Defaults assume the firmware was built from `/tmp/IFS08-CE-AMS`
+    (the AMS source mirror on the bench Pi). Override with the
+    AMS_SOURCE_DIR env var when building from elsewhere.
+    """
+
+    def test_a013(self, fresh_boot, pit_diag, ams_profile):
+        import os
+        import subprocess
+        from pathlib import Path
+
+        src = Path(os.environ.get("AMS_SOURCE_DIR", "/tmp/IFS08-CE-AMS"))
+        version_file = src / "VERSION"
+        if not version_file.exists():
+            pytest.skip(
+                f"AMS_SOURCE_DIR/{version_file.name} not found at {version_file}. "
+                "Set AMS_SOURCE_DIR to the path the .bin was built from "
+                "(default /tmp/IFS08-CE-AMS).")
+
+        # Expected semver from VERSION file.
+        raw = version_file.read_text().strip()
+        major, minor, patch = (int(x) for x in raw.split("."))
+
+        # Expected git hash from the source tree.
+        try:
+            git_hash = subprocess.check_output(
+                ["git", "rev-parse", "--short=8", "HEAD"],
+                cwd=src, timeout=2, text=True).strip()
+        except Exception as e:
+            pytest.skip(f"git rev-parse failed in {src}: {e}")
+        expected_hash_bytes = bytes.fromhex(git_hash)[:4]
+
+        # Wait for pit-diag scan (0x6C6 is near the end of the burst).
+        pit_diag.wait_for_scan()
+        fw_id = pit_diag.wait_for(M.ID_PIT_DIAG_FW_ID)
+        assert len(fw_id) == 8, f"0x6C6 dlc != 8 (got {len(fw_id)})"
+
+        assert fw_id[0] == major, f"0x6C6[0] semver major = {fw_id[0]}, expected {major}"
+        assert fw_id[1] == minor, f"0x6C6[1] semver minor = {fw_id[1]}, expected {minor}"
+        assert fw_id[2] == patch, f"0x6C6[2] semver patch = {fw_id[2]}, expected {patch}"
+        assert bytes(fw_id[3:7]) == expected_hash_bytes, (
+            f"0x6C6[3..6] git_hash = {bytes(fw_id[3:7]).hex()}, "
+            f"expected {expected_hash_bytes.hex()} (full: {git_hash})")
+        expected_node_id = int(ams_profile["bl_node_id"])
+        assert fw_id[7] == expected_node_id, (
+            f"0x6C6[7] bl_node_id = 0x{fw_id[7]:02X}, "
+            f"expected 0x{expected_node_id:02X}")
