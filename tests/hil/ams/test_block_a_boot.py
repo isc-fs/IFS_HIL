@@ -39,14 +39,81 @@ class TestA001RelaysOpenOnPowerUp:
     TCA9555 input wired to the slot's relay-control pins — which the
     BACKPLANE_HIL doesn't currently route."""
 
-    @pytest.mark.skip(reason=(
-        "A-001 requires a logic analyser or TCA9555 input wired to "
-        "SLOT1_DIG0..2 to observe the 50 ms relay-open assertion. "
-        "Not present on this rig. The FSM=Start state read in A-004 "
-        "is the indirect bench-observable guarantee that relays are open."
-    ))
-    def test_a001_relays_open_within_50ms(self):
-        pass
+    # PB5 (AIR+), PB6 (AIR-), PB7 (Precharge) are routed through the
+    # MLC2 carrier header to MCP3208 U11 ("ADC3", broker idx=2):
+    #   PB5 -> ADC3 ch1
+    #   PB6 -> ADC3 ch2
+    #   PB7 -> ADC3 ch3
+    # (PB4 -> ADC3 ch0 is a separate signal, not part of the AIR/
+    # precharge set.) STM32H7 cold reset leaves GPIOs as input-Z;
+    # MX_GPIO_Init in app boot then sets PB5/6/7 as outputs LOW.
+    # We assert all three read below LOW_THRESHOLD_V within 50 ms of
+    # the TCA9555 relay-energise write (= t=0 anchor).
+    def test_a001_relays_open_within_50ms(self, mlc_powered):
+        from broker.server import BrokerClient
+        ADC_IDX        = 2          # MCP3208 U11 ("ADC3")
+        AIR_P_CH       = 1          # PB5
+        AIR_N_CH       = 2          # PB6
+        PRECHARGE_CH   = 3          # PB7
+        LOW_THRESHOLD_V = 0.5       # CMOS-LOW guard; bench floor ~10 mV
+
+        client = BrokerClient(os.environ.get(
+            "HIL_BROKER_SOCKET", "/run/hil-broker/broker.sock"))
+        try:
+            relay_bit = mlc_powered["relay_bit"]
+            # Drop, settle, then assert t=0 anchor exactly before energise.
+            client.call("tca.write_pin", addr=0x20, port=0,
+                        pin=relay_bit, value=False)
+            time.sleep(1.5)
+            t0 = time.monotonic()
+            client.call("tca.write_pin", addr=0x20, port=0,
+                        pin=relay_bit, value=True)
+
+            # Spec: each signal must READ LOW "within 50 ms of power-on"
+            # = each signal must have CONVERGED to LOW by the 50 ms mark.
+            # The 0..50 ms window is the chip's cold-reset + BL + app-
+            # init transient -- during it GPIOs are input-Z and the ADC
+            # will read whatever bias is on the trace (typically mid-
+            # rail). What matters is the steady-state LOW after the
+            # window, not the transient.
+            #
+            # Capture the full 0..100 ms trajectory so a failing trace
+            # surfaces the convergence time; assert all three are LOW
+            # at t >= 50 ms.
+            channels = [(AIR_P_CH, "AIR+"),
+                        (AIR_N_CH, "AIR-"),
+                        (PRECHARGE_CH, "Precharge")]
+            trace: list[tuple[float, dict[int, float]]] = []
+            deadline = t0 + 0.100
+            while time.monotonic() < deadline:
+                t_ms = (time.monotonic() - t0) * 1e3
+                sample = {ch: client.call("adc.read_voltage",
+                                          idx=ADC_IDX, channel=ch)
+                          for ch, _ in channels}
+                trace.append((t_ms, sample))
+
+            # Find the steady-state sample window: first sample at-or-
+            # after t = 50 ms, and every sample after it must be LOW.
+            post_50ms = [(t, s) for t, s in trace if t >= 50.0]
+            assert post_50ms, (
+                "no ADC samples collected after 50 ms — broker too slow "
+                f"(captured {len(trace)} samples in 100 ms)"
+            )
+            failures = [(t, s) for t, s in post_50ms
+                        if any(s[ch] >= LOW_THRESHOLD_V for ch, _ in channels)]
+            if failures:
+                trace_lines = "\n  ".join(
+                    f"t={t:6.1f} ms  AIR+={s[AIR_P_CH]:.3f}  "
+                    f"AIR-={s[AIR_N_CH]:.3f}  Pre={s[PRECHARGE_CH]:.3f}"
+                    for t, s in trace)
+                raise AssertionError(
+                    f"relay-output GPIO(s) read HIGH after 50 ms boot "
+                    f"window (threshold {LOW_THRESHOLD_V} V). "
+                    f"{len(failures)} of {len(post_50ms)} post-50 ms "
+                    f"samples failed. Full trace:\n  {trace_lines}"
+                )
+        finally:
+            client.close()
 
 
 # ---------------------------------------------------------------------------
