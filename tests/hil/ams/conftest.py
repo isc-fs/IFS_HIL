@@ -61,6 +61,11 @@ log = logging.getLogger(__name__)
 
 PROFILE_PATH = Path(__file__).parent / "ams_profile.yaml"
 
+# Register the KPI plugin so it sees all session events for AMS HIL
+# runs. See `tests/hil/ams/kpi_plugin.py` and
+# `docs/ams-hil/test-plan-v1.5.0.md` §4. Disable with `--no-kpi`.
+pytest_plugins = ["tests.hil.ams.kpi_plugin"]
+
 
 # ---------------------------------------------------------------------------
 # CLI options
@@ -476,6 +481,11 @@ def fresh_boot(ams_profile, mlc_powered, observe_acu, acu_heartbeat,
         observe_acu.clear()
         client.call("tca.write_pin", addr=0x20, port=0, pin=relay_bit, value=True)
         t_power_on = time.monotonic()
+        # KPI: this fixture is the canonical per-test power-cycle.
+        # Counted toward `power_cycle_count` for relay K_n + carrier
+        # connector reseat-wear accounting.
+        from tests.hil.ams import kpi_plugin
+        kpi_plugin.bump_power_cycle()
     finally:
         client.close()
 
