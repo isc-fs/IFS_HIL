@@ -93,6 +93,21 @@ dash_chg_tca_addr:        0x21
 dash_chg_tca_port:        1
 dash_chg_tca_pin:         1          # P11 -> PF10
 
+# -- Relay-readback (AMS GPIO outputs sampled by bench ADC3 / MCP3208) -
+# Per the bench wiring spec: SLOT2 connector taps PB4..PB7 to ADC3
+# (silk: ADC3, broker idx 2) channels 0..3. The conftest fixture
+# `relays_readback` exposes a read()/poll_for()/sample_for() helper
+# that thresholds the analogue reading at the digital boundary.
+ams_ok_adc_idx:           2          # ADC3 (= broker idx 2)
+ams_ok_adc_channel:       0          # PB4
+air_p_adc_idx:            2
+air_p_adc_channel:        1          # PB5
+air_n_adc_idx:            2
+air_n_adc_channel:        2          # PB6
+prech_adc_idx:            2
+prech_adc_channel:        3          # PB7
+relay_readback_digital_threshold_v: 1.65   # midpoint of 0-3.3 V CMOS
+
 # -- Block E soak budgets --------------------------------------------
 soak_idle_minutes:        30         # E-050 idle in Start
 soak_run_minutes:         30         # E-051 in Run
