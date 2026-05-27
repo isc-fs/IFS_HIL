@@ -67,17 +67,21 @@ def _drive_to_precharge(tsms, dash_chg, wait_for_state, ams_profile):
 
 
 def _drive_to_run(tsms, dash_chg, acu_heartbeat, wait_for_state, ams_profile):
-    """Both inputs + ramped DC bus -> Run (car mode)."""
+    """Both inputs + ramped DC bus -> Run (car mode).
+
+    Per AMS PR #244 the Transition state is a single-tick passthrough
+    (Precharge → Transition → Run within one 10 ms safety tick), so the
+    20 ms test poll window can't reliably observe Transition. We wait
+    for Run directly — it's the stable post-Transition state. The
+    intermediate Transition is still emitted on 0x4A0 but only briefly;
+    catch-or-not-catch is not what the test is asserting.
+    """
     _drive_to_precharge(tsms, dash_chg, wait_for_state, ams_profile)
 
-    # Pack voltage under stub = 356_250 mV -> 356.25 V. 95% target ~ 339 V.
+    # Pack voltage = 356_250 mV -> 356.25 V. 95% target ~ 339 V. Use 96%.
     pack_V   = int(ams_profile["stub_expected_pack_mV"]) // 1000
     target_V = int(pack_V * 0.96)
     acu_heartbeat["set_volts"](target_V)
-
-    wait_for_state(
-        M.FsmState.TRANSITION,
-        timeout_ms=int(ams_profile["state_transition_window_ms"]) + 100)
 
     hold_ms = int(ams_profile["transition_hold_ms"])
     return wait_for_state(
@@ -171,6 +175,12 @@ class TestC032StartToPrecharge:
 # ---------------------------------------------------------------------------
 
 class TestC033PrechargeToTransition:
+    """Per AMS PR #244 the Transition state is a single-tick passthrough
+    (Precharge → Transition → Run within one 10 ms safety tick). The
+    20 ms test poll window can't reliably observe Transition. Waiting
+    for Run is the right success signal for the Precharge → Transition
+    contract — reaching Run proves the gate fired (Run is unreachable
+    from Precharge without going through Transition)."""
 
     def test_c033(self, fresh_boot, tsms, dash_chg, acu_heartbeat,
                   wait_for_state, ams_profile):
@@ -182,8 +192,10 @@ class TestC033PrechargeToTransition:
         acu_heartbeat["set_volts"](target_V)
 
         wait_for_state(
-            M.FsmState.TRANSITION,
-            timeout_ms=int(ams_profile["state_transition_window_ms"]) + 100)
+            M.FsmState.RUN,
+            timeout_ms=int(ams_profile["state_transition_window_ms"])
+                       + int(ams_profile["transition_hold_ms"])
+                       + 100)
 
 
 # ---------------------------------------------------------------------------
@@ -263,14 +275,13 @@ class TestC037ChargerModeFsm:
             "so the latch should have caught Charger mode.")
 
         # Mode already locked; safe to drive DC bus high so precharge
-        # completes.
+        # completes. Transition is a single-tick passthrough (#244) so
+        # the 20 ms test poll can't catch it; wait for Charge directly
+        # (Charger mode's analog of Run; both are unreachable from
+        # Precharge without going through Transition).
         pack_V   = int(ams_profile["stub_expected_pack_mV"]) // 1000
         target_V = int(pack_V * 0.96)
         acu_stim.send_dc_bus_v(target_V)
-
-        wait_for_state(
-            M.FsmState.TRANSITION,
-            timeout_ms=int(ams_profile["state_transition_window_ms"]) + 100)
 
         # Hold elapses -> Charge (not Run, because mode_locked = Charger).
         hold_ms = int(ams_profile["transition_hold_ms"])

@@ -91,7 +91,11 @@ BMS_TEMP_STALE_MS          = 1000  # refactor: enforced
 # ---------------------------------------------------------------------------
 # ACU bus (FDCAN1) — RX from vehicle to AMS
 # ---------------------------------------------------------------------------
-ID_DC_BUS_VOLTAGE   = 0x100         # extended, DLC 2, little-endian volts
+ID_DC_BUS_VOLTAGE   = 0x100         # STANDARD (11-bit), DLC 2, little-endian volts
+                                    # Post AMS PR #236: FDCAN1 HW filter rejects
+                                    # extended IDs, so this frame MUST be sent as
+                                    # standard. A-012 verifies the reject path by
+                                    # explicitly cansending extended form.
 ID_START_BUTTON     = 0x600         # standard, DLC 1, byte 0 = 0/1
 ID_CHARGER_DETECT   = 0x18FF50E7    # extended (29-bit), any payload
 
