@@ -36,7 +36,12 @@ class AcuStim:
     """ACU CAN stimulus on FDCAN1 (kernel `can0` on the IFS08_HIL bench)."""
 
     # Frame IDs — also exported here so callers don't have to import can_map
-    DC_BUS_VOLTAGE_ID = 0x100         # ext, DLC 2, little-endian volts
+    DC_BUS_VOLTAGE_ID = 0x100         # STANDARD (11-bit), DLC 2, little-endian volts
+                                      # Standard since AMS PR #236 — FDCAN1 hardware
+                                      # filter REJECTS extended frames now (matches
+                                      # the production VCU contract). Pre-#236 code
+                                      # mis-sent this as extended → AMS dropped every
+                                      # frame at the filter → VCU stale → FSM Error.
 
     def __init__(self, channel: str = "can0"):
         self.channel = channel
@@ -63,11 +68,16 @@ class AcuStim:
     # -- frame senders --------------------------------------------------
 
     def send_dc_bus_v(self, volts: int) -> None:
-        """Emit 0x100 ext with DC bus voltage. Payload is little-endian uint16
-        in volts (per CAN_MAP.md decode `(buf[1] << 8) | buf[0]`)."""
+        """Emit 0x100 standard with DC bus voltage. Payload is little-endian
+        uint16 in volts (per CAN_MAP.md decode `(buf[1] << 8) | buf[0]`).
+
+        Standard 11-bit frame (post AMS PR #236). The pre-#236 extended
+        form is REJECTED at the FDCAN1 hardware filter — using it here
+        used to silently break every test that depended on VCU
+        freshness (precharge ramp, mode latching, FSM transitions)."""
         v = int(volts) & 0xFFFF
         payload = bytes([v & 0xFF, (v >> 8) & 0xFF])
-        self._send(self.DC_BUS_VOLTAGE_ID, payload, is_extended_id=True)
+        self._send(self.DC_BUS_VOLTAGE_ID, payload, is_extended_id=False)
 
     def send_raw(self, can_id: int, data: bytes, *, is_extended_id: bool = False) -> None:
         """Escape hatch for ad-hoc frames."""
