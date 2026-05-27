@@ -67,7 +67,7 @@ def _drive_to_precharge(tsms, dash_chg, wait_for_state, ams_profile):
 
 
 def _drive_to_run(tsms, dash_chg, acu_heartbeat, wait_for_state, ams_profile):
-    """Both inputs + ramped DC bus -> Run (car mode).
+    """Both inputs + RC-ramped DC bus -> Run (car mode).
 
     Per AMS PR #244 the Transition state is a single-tick passthrough
     (Precharge → Transition → Run within one 10 ms safety tick), so the
@@ -75,13 +75,24 @@ def _drive_to_run(tsms, dash_chg, acu_heartbeat, wait_for_state, ams_profile):
     for Run directly — it's the stable post-Transition state. The
     intermediate Transition is still emitted on 0x4A0 but only briefly;
     catch-or-not-catch is not what the test is asserting.
+
+    The bus voltage is *ramped* (not stepped). Real precharge rises
+    along an RC curve through the 690 Ω resistor; stepping 0 → ~pack
+    in one tick trips an AMS Error from Precharge before Transition
+    ever fires.
     """
     _drive_to_precharge(tsms, dash_chg, wait_for_state, ams_profile)
 
-    # Pack voltage = 356_250 mV -> 356.25 V. 95% target ~ 339 V. Use 96%.
-    pack_V   = int(ams_profile["stub_expected_pack_mV"]) // 1000
-    target_V = int(pack_V * 0.96)
-    acu_heartbeat["set_volts"](target_V)
+    # AMS predicate (state_machine.hpp::precharge_target_reached):
+    #   bus_mV * 100 >= pack_mV * 95   (i.e. bus >= 95 % of pack)
+    # `stub_expected_pack_mV` is our nominal — the actual pack reported
+    # by the LTC chain can flicker ±a few V (discovery in progress, PEC
+    # retries on chip-1). Targeting 96 % leaves a sub-1 % margin and
+    # we sometimes fall below the threshold, fire `!target_reached` in
+    # Transition, and land in Error. Target the full pack to keep the
+    # comparison comfortably true through the noise.
+    pack_V = int(ams_profile["stub_expected_pack_mV"]) // 1000
+    acu_heartbeat["ramp_to"](pack_V)
 
     hold_ms = int(ams_profile["transition_hold_ms"])
     return wait_for_state(
@@ -187,9 +198,11 @@ class TestC033PrechargeToTransition:
         _require_inputs(tsms, dash_chg)
         _drive_to_precharge(tsms, dash_chg, wait_for_state, ams_profile)
 
-        pack_V   = int(ams_profile["stub_expected_pack_mV"]) // 1000
-        target_V = int(pack_V * 0.96)
-        acu_heartbeat["set_volts"](target_V)
+        # Ramp to full pack (not 96 %): the predicate is `bus >= 95 % of
+        # pack`, and at 96 % we don't have enough margin against pack
+        # jitter — see `_drive_to_run` for the full reasoning.
+        pack_V = int(ams_profile["stub_expected_pack_mV"]) // 1000
+        acu_heartbeat["ramp_to"](pack_V)
 
         wait_for_state(
             M.FsmState.RUN,
@@ -246,7 +259,7 @@ class TestC038RunToErrorOnTsmsDrop:
 
 class TestC037ChargerModeFsm:
 
-    def test_c037(self, fresh_boot, tsms, dash_chg, acu_heartbeat, acu_stim,
+    def test_c037(self, fresh_boot, tsms, dash_chg, acu_heartbeat,
                   wait_for_state, pit_diag, ams_profile):
         _require_inputs(tsms, dash_chg)
 
@@ -279,9 +292,14 @@ class TestC037ChargerModeFsm:
         # the 20 ms test poll can't catch it; wait for Charge directly
         # (Charger mode's analog of Run; both are unreachable from
         # Precharge without going through Transition).
-        pack_V   = int(ams_profile["stub_expected_pack_mV"]) // 1000
-        target_V = int(pack_V * 0.96)
-        acu_stim.send_dc_bus_v(target_V)
+        #
+        # Resume heartbeat + ramp bus to full pack. mode_locked is
+        # already latched to Charger, so the resumed heartbeat won't
+        # re-evaluate Car. Target = pack (not 96 %) so we have margin
+        # against pack jitter — see `_drive_to_run` for reasoning.
+        pack_V = int(ams_profile["stub_expected_pack_mV"]) // 1000
+        acu_heartbeat["resume"]()
+        acu_heartbeat["ramp_to"](pack_V)
 
         # Hold elapses -> Charge (not Run, because mode_locked = Charger).
         hold_ms = int(ams_profile["transition_hold_ms"])
@@ -459,9 +477,10 @@ class TestC042CockpitByteAcrossStates:
         _drive_to_precharge(tsms, dash_chg, wait_for_state, ams_profile)
         observed["Precharge"] = _decode(_cockpit_now())
 
-        # 3. Drive Precharge → Transition → Run (acu_heartbeat ramps dc_bus).
+        # 3. Drive Precharge → Transition → Run (ramp to full pack;
+        #    a step jump, or 96 % target, can trip the predicate).
         pack_V = int(ams_profile["stub_expected_pack_mV"]) // 1000
-        acu_heartbeat["set_volts"](int(pack_V * 0.96))
+        acu_heartbeat["ramp_to"](pack_V)
         wait_for_state(M.FsmState.RUN,
                        timeout_ms=int(ams_profile["state_transition_window_ms"])
                                   + int(ams_profile["transition_hold_ms"])
