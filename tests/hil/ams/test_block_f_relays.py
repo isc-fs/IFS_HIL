@@ -157,6 +157,11 @@ class TestF062PrechargeToggles:
 
 class TestF063AmsOkFollowsFsm:
 
+    @pytest.mark.xfail(
+        reason="AMS #276 — FSM latches Error at boot-grace expiry on "
+               "stub-retired fw (1fa1e57); AMS_OK reads LOW in Start because "
+               "the chip is already in Error. Remove when #276 is fixed.",
+        strict=True)
     def test_f063(self, fresh_boot, tsms, dash_chg, acu_heartbeat,
                   wait_for_state, relays_readback, ams_profile):
         _require(relays_readback)

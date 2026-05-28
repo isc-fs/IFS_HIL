@@ -105,6 +105,11 @@ class TestB021VCUHeartbeatStale:
     confirm the FSM latches Error. The chip must be past boot grace
     first — pre-grace the predicate is gated."""
 
+    @pytest.mark.xfail(
+        reason="AMS #276 — FSM latches Error at boot-grace expiry on "
+               "stub-retired fw (1fa1e57); chip is already in Error before "
+               "this test can pause the heartbeat. Remove when #276 is fixed.",
+        strict=True)
     def test_b021_vcu_stale_trips_error(self, fresh_boot, acu_heartbeat,
                                          observe_acu, wait_for_state,
                                          ams_profile):

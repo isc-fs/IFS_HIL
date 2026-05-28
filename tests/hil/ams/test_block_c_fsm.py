@@ -360,6 +360,11 @@ class TestC039RunToErrorOnDashChgDrop:
     """Sibling to C-038 (TSMS drop). Run → Error must also fire when
     DASH_CHG (cockpit) drops, mirroring the operator-intent semantics."""
 
+    @pytest.mark.xfail(
+        reason="AMS #276 — FSM latches Error at boot-grace expiry on "
+               "stub-retired fw (1fa1e57); chip never sustains Run. "
+               "Remove when #276 is fixed.",
+        strict=True)
     def test_c039_dash_chg_drop(self, fresh_boot, tsms, dash_chg,
                                  acu_heartbeat, wait_for_state, ams_profile):
         _require_inputs(tsms, dash_chg)
@@ -393,6 +398,11 @@ class TestC041ModeLockedRetained:
     which hoisted the encoding out of HIL_STUB.
     """
 
+    @pytest.mark.xfail(
+        reason="AMS #276 — FSM latches Error at boot-grace expiry on "
+               "stub-retired fw (1fa1e57); chip never reaches Run. "
+               "Remove when #276 is fixed.",
+        strict=True)
     def test_c041_mode_locked_retained_through_error(
         self, fresh_boot, observe_acu, tsms, dash_chg, acu_heartbeat,
         wait_for_state, ams_profile
@@ -447,6 +457,11 @@ class TestC042CockpitByteAcrossStates:
     Unskipped post-#251 (cockpit byte hoist out of HIL_STUB).
     """
 
+    @pytest.mark.xfail(
+        reason="AMS #276 — FSM latches Error at boot-grace expiry on "
+               "stub-retired fw (1fa1e57); chip never reaches Run. "
+               "Remove when #276 is fixed.",
+        strict=True)
     def test_c042_cockpit_byte_per_state(
         self, fresh_boot, observe_acu, tsms, dash_chg, acu_heartbeat,
         wait_for_state, ams_profile

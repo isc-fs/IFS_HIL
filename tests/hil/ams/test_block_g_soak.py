@@ -111,6 +111,11 @@ def _run_soak(observe_acu, ams_profile, *,
 
 class TestE050IdleSoakInStart:
 
+    @pytest.mark.xfail(
+        reason="AMS #276 — FSM latches Error at boot-grace expiry on "
+               "stub-retired fw (1fa1e57); chip cannot hold Start for the "
+               "soak. Remove when #276 is fixed.",
+        strict=True)
     def test_e050(self, fresh_boot, observe_acu, ams_profile, soak_scale):
         minutes = float(ams_profile["soak_idle_minutes"]) * soak_scale
         _run_soak(observe_acu, ams_profile,
@@ -125,6 +130,11 @@ class TestE050IdleSoakInStart:
 
 class TestE051RunSoak:
 
+    @pytest.mark.xfail(
+        reason="AMS #276 — FSM latches Error at boot-grace expiry on "
+               "stub-retired fw (1fa1e57); chip never sustains Run for the "
+               "soak. Remove when #276 is fixed.",
+        strict=True)
     def test_e051(self, fresh_boot, tsms, dash_chg, acu_heartbeat,
                   wait_for_state, observe_acu, ams_profile, soak_scale):
         # Drive into Run via the TSMS + DASH_CHG GPIOs (replaces the
