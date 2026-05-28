@@ -64,6 +64,16 @@ static int  dma_tx_chan;
 enum { RSP_RDCVA, RSP_RDCVB, RSP_RDCVC, RSP_RDCVD, RSP_RDAUXA, RSP_RDAUXB, RSP_COUNT };
 static uint8_t response_pool[RSP_COUNT][RESPONSE_LEN];
 static const uint8_t *current_response = response_pool[RSP_RDCVA];
+// Response buffer snapshotted at CS-rising (= pre-load time). chip 0's
+// 8 data bytes are BOTH pre-loaded and pumped from THIS pointer, so the
+// chip stays self-consistent (data + PEC from a single response) even
+// when the command — parsed mid-xact — swaps `current_response`. chip
+// 1..9 are pumped from the freshly parsed `current_response` and are
+// gated until the parse completes. Without this split, the pump leaked
+// the previous xact's response into chip 1's data bytes while chip 1's
+// PEC came from the new response → chip-1-only PEC failures on the
+// master (IFS08_HIL#44 residual). See ltc6811_emu_service().
+static const uint8_t *preparse_response = response_pool[RSP_RDCVA];
 static void rebuild_all_responses(void);
 
 // Per-module response-suppression mask. See header docstring for
@@ -262,9 +272,10 @@ void ltc6811_emu_init(void) {
     // worked. Build response_pool now so chip 0's first 4 data
     // bytes are available to pre-load here.
     rebuild_all_responses();
-    current_response = response_pool[RSP_RDCVA];
+    current_response   = response_pool[RSP_RDCVA];
+    preparse_response  = current_response;
     for (int i = 0; i < 4; i++) pio_tx_put_raw(0xFFu);
-    for (int i = 0; i < 4; i++) pio_tx_put_raw(current_response[RESPONSE_PAD + i]);
+    for (int i = 0; i < 4; i++) pio_tx_put_raw(preparse_response[RESPONSE_PAD + i]);
 
     // Bring both SMs out of reset and let them run.
     pio_sm_set_enabled(PIO_INST, sm_tx, true);
@@ -436,7 +447,8 @@ void ltc6811_emu_service(void) {
 
     if (!response_init_done) {
         rebuild_all_responses();
-        current_response = response_pool[RSP_RDCVA];
+        current_response   = response_pool[RSP_RDCVA];
+        preparse_response  = current_response;
         response_init_done = 1;
     }
 
@@ -491,6 +503,16 @@ void ltc6811_emu_service(void) {
         // regardless of which RDCV cmd actually comes. For non-
         // uniform cells, chip 0's first 4 bytes may be wrong if cmd
         // != current_response -- handled later by cmd-parse swap.
+        //
+        // Snapshot the response we're committing chip 0 to NOW. The
+        // command for THIS xact isn't known yet (master hasn't clocked
+        // it in), so chip 0's 8 bytes are necessarily built from the
+        // previous xact's response. We pump the rest of chip 0 from the
+        // same snapshot (see the data pump below) so chip 0 stays
+        // self-consistent — data + PEC from one response, PEC-valid on
+        // the master even when it's a poll stale. chip 1..9 wait for the
+        // real command and use `current_response`.
+        preparse_response = current_response;
         for (int i = 0; i < RESPONSE_PAD; i++) pio_tx_put_raw(0xFFu);
         // Pre-load of chip 0's first 4 data bytes -- these belong to
         // chain position 0 (= module 0), so route through the same
@@ -498,7 +520,7 @@ void ltc6811_emu_service(void) {
         // would still leak real data through the pre-load window.
         for (int i = 0; i < 4; i++) {
             pio_tx_put_raw(maybe_suppress_data(
-                current_response[RESPONSE_PAD + i], i));
+                preparse_response[RESPONSE_PAD + i], i));
         }
 
         rx_idx               = 0;
@@ -510,23 +532,34 @@ void ltc6811_emu_service(void) {
     cs_was_low = !cs_now;
 
     if (!cs_now) {
-        // Pump data bytes from current_response into TX FIFO.
-        // Two cases:
-        //   - cmd not parsed yet: keep pushing from current_response
-        //     (the value when CS-rising last fired). Pre-load already
-        //     covered bytes 0..7 so this only kicks in if CPU has
-        //     been very slow getting back to the service loop.
-        //   - cmd parsed: if cmd swapped current_response, our
-        //     tx_data_idx is now mid-stream of the new buffer and
-        //     subsequent pushes are correct from byte 8+. The first
-        //     4 data bytes (0..3) may be stale (pre-loaded from old
-        //     current_response), giving wrong chip 0 data for non-
-        //     uniform cells -- acceptable for the uniform bench
-        //     test that's what we're unblocking.
+        // Pump data bytes into the TX FIFO, choosing the source per
+        // chain position so a mid-xact command swap can't split a
+        // single chip across two responses (the IFS08_HIL#44 chip-1
+        // residual):
+        //   - chip 0 (data idx 0..7): always `preparse_response` (the
+        //     pre-load-time snapshot). chip 0's first 4 bytes were
+        //     already pre-loaded from it; completing chip 0 from the
+        //     same buffer keeps data + PEC consistent → PEC-valid even
+        //     if it's one poll stale.
+        //   - chip 1..9 (data idx >= 8): `current_response`, but ONLY
+        //     once the command has been parsed. Before the parse the
+        //     real command is unknown, so we must NOT emit chip 1+ data
+        //     yet — break and let the FIFO ride on the pre-loaded chip-0
+        //     bytes (≈82 µs of headroom; the 4-byte command finishes
+        //     at ≈41 µs, so chip 1's first byte, clocked at ≈123 µs,
+        //     is always covered by the parsed response).
         while (pio_tx_writable() &&
                tx_data_idx < (RESPONSE_LEN - RESPONSE_PAD)) {
+            const uint8_t *src;
+            if (tx_data_idx < 8) {
+                src = preparse_response;
+            } else if (cmd_parsed_this_xact) {
+                src = current_response;
+            } else {
+                break;  // chip 1+ gated until the command is known
+            }
             uint8_t b = maybe_suppress_data(
-                current_response[RESPONSE_PAD + tx_data_idx], tx_data_idx);
+                src[RESPONSE_PAD + tx_data_idx], tx_data_idx);
             if (!tx_push(b)) break;
             tx_data_idx++;
         }
