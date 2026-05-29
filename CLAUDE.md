@@ -129,6 +129,21 @@ What the script does:
 - Uses key auth by default; falls back to `sshpass` if
   `HIL_SSH_PASS` is set.
 
+**Gotcha — stale files linger (no `--delete`).** When a test file is
+renamed or removed in the repo, its old copy stays on the Pi and keeps
+getting collected. After the #272 `test_block_e_soak.py` →
+`test_block_g_soak.py` rename the Pi ran *both* and silently
+double-ran the soaks (~60 min wasted per sweep). Periodically
+reconcile — anything only on the Pi is either a stale leftover (back
+up + remove) or a real test not yet landed in `dev` (land it), so
+check which before deleting:
+
+```sh
+comm -13 \
+  <(git ls-files tests/hil/ams/ | xargs -n1 basename | sort) \
+  <(ssh isc@192.168.0.123 'ls ~/IFS08_HIL/tests/hil/ams/*.py | xargs -n1 basename | sort')
+```
+
 After sync, if you changed broker or dashboard code:
 
 ```sh
