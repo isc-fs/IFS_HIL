@@ -12,7 +12,6 @@ the variant rows.
 | F-070 | Cold soak: power-cycle → BL → app jump → first 4A0 | 100    | scaffolded  |
 | F-071 | CAN-trigger soak: trigger → BL → flash → jump      | 100    | scaffolded  |
 | F-072 | Cross-trigger mix: alternate cold + CAN reboots    | 100    | scaffolded  |
-| F-073 | CRC integrity per cycle (READ_VERIFY)              | 100    | scaffolded — needs BL READ_VERIFY or SWD |
 | F-074 | Bus-busy flash (heartbeat + noise during flash)    |  20    | scaffolded  |
 | F-075 | Mixed-version round-trip (v1.5 → v1.4-eol → v1.5)  |  10    | scaffolded — needs v1.4-eol image fixture |
 | F-076 | Stale-latch flash (with/without HIL_CLEAR)         | 5×2    | scaffolded — needs SWD to pre-set BKP1R |
@@ -60,21 +59,10 @@ SCAFFOLD_PENDING = (
     "counters per cycle. See docs/ams-hil/test-plan-v1.5.0.md §1."
 )
 
-BL_READ_VERIFY_PENDING = (
-    "Blocked on BL READ_VERIFY support over CAN (or SWD attach on "
-    "the bench). Track in the stm32-can-bootloader repo."
-)
-
 V1_4_EOL_IMAGE_PENDING = (
     "Blocked on a checked-in v1.4.0-eol .bin fixture under "
     "tests/hil/ams/fixtures/. Add once the AMS team publishes a "
     "frozen v1.4 image."
-)
-
-SWD_PRE_SET_BKP_PENDING = (
-    "Blocked on a pre-test SWD step that writes RTC->BKP1R = "
-    "0xA115EE51 before the boot cycle. Either ST-Link CLI scripted "
-    "into the bench fixture, or extend the BL with a diag-write op."
 )
 
 INTERRUPT_FLASH_PENDING = (
@@ -146,20 +134,6 @@ class TestF072CrossTriggerMix:
     def test_f072_cross_trigger_mix(self):
         # Sketch: alternate F-070 and F-071 over 100 cycles. Both
         # reset paths must produce a clean boot.
-        pass
-
-
-# ---------------------------------------------------------------------------
-# F-073 — CRC integrity per cycle (100×)
-# ---------------------------------------------------------------------------
-
-class TestF073CrcIntegrity:
-    @pytest.mark.soak
-    @pytest.mark.skip(reason=BL_READ_VERIFY_PENDING)
-    def test_f073_crc_integrity(self):
-        # Sketch: after each F-071 cycle, read back
-        # 0x08020000..0x080DFFFF via BL READ_VERIFY (or SWD), compute
-        # CRC, compare against source. Zero mismatches over 100 cycles.
         pass
 
 
