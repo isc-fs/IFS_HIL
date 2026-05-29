@@ -12,9 +12,10 @@ the variant rows.
 | F-070 | Cold soak: power-cycle → BL → app jump → first 4A0 | 100    | scaffolded  |
 | F-071 | CAN-trigger soak: trigger → BL → flash → jump      | 100    | scaffolded  |
 | F-072 | Cross-trigger mix: alternate cold + CAN reboots    | 100    | scaffolded  |
+| F-073 | CRC integrity per cycle (can-flasher readback-CRC) | 100    | scaffolded  |
 | F-074 | Bus-busy flash (heartbeat + noise during flash)    |  20    | scaffolded  |
 | F-075 | Mixed-version round-trip (v1.5 → v1.4-eol → v1.5)  |  10    | scaffolded — needs v1.4-eol image fixture |
-| F-076 | Stale-latch flash (with/without HIL_CLEAR)         | 5×2    | scaffolded — needs SWD to pre-set BKP1R |
+| F-076 | Stale-latch flash (TSMS-drop fault stim, no SWD)   | 5×2    | HIL_CLEAR impl; flight variant needs flight build |
 | F-077 | Interrupted-flash recovery (yank VBUS mid-flash)   |  10    | scaffolded — needs programmable PSU or relay yank |
 | F-078 | Power-off duration sweep ({1, 5, 30, 60, 300} s)   | 5×5    | scaffolded  |
 | F-079 | DISCOVER latency long-soak                         | 1000   | scaffolded  |
@@ -134,6 +135,23 @@ class TestF072CrossTriggerMix:
     def test_f072_cross_trigger_mix(self):
         # Sketch: alternate F-070 and F-071 over 100 cycles. Both
         # reset paths must produce a clean boot.
+        pass
+
+
+# ---------------------------------------------------------------------------
+# F-073 — CRC integrity per cycle (100×)
+# ---------------------------------------------------------------------------
+
+class TestF073CrcIntegrity:
+    @pytest.mark.soak
+    @pytest.mark.skip(reason=SCAFFOLD_PENDING)
+    def test_f073_crc_integrity(self):
+        # After each F-071 cycle, CRC-compare 0x08020000..0x080DFFFF
+        # against the source image via `can-flasher verify` (or
+        # `flash --verify-after`, a readback-CRC over CAN through the
+        # BL's FlashReadCrc/FlashVerify ops — no SWD). The trigger soak
+        # flasher runs --no-verify-after for speed; F-073 is the row
+        # that turns the readback-CRC back on. Zero mismatches / 100.
         pass
 
 
