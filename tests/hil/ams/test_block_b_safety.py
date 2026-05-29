@@ -138,9 +138,8 @@ class TestB021VCUHeartbeatStale:
 
 
 # ---------------------------------------------------------------------------
-# B-020 placeholder + B-025 SWD-only test dropped per AMS #272.
-# B-020 (boot grace) needs a `cold_boot_no_heartbeat` fixture; reimplement
-# when that lands. B-025 requires SWD which the rig doesn't have.
+# B-020 placeholder dropped per AMS #272 — needs a `cold_boot_no_heartbeat`
+# fixture; reimplement when that lands.
 # ---------------------------------------------------------------------------
 
 

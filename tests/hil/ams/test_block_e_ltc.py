@@ -42,17 +42,9 @@ PICO_INJECTION_PENDING = (
     "IFS08_HIL pico_ltc_emulator issue once filed)."
 )
 
-AMS_DIAG_COUNTER_PENDING = (
-    "Blocked on AMS exposing LTC counters via telemetry (proposed "
-    "0x4A3 diag frame in docs/ams-hil/test-plan-v1.5.0.md §2) or a "
-    "BL diag-read command. Counter lives in firmware but isn't on "
-    "the wire; SWD-only today."
-)
-
-# NOTE: AMS_DIAG_COUNTER_PENDING is no longer used — the counters E-061..E-064
-# rely on are now on the wire via the pit-diag stream (AMS PR #248 status
-# frames 0x6C0 / 0x6C1 + PR #269 per-IC PEC counts on 0x6C7 / 0x6C8).
-# Tests below read from those frames via the `pit_diag` conftest fixture.
+# E-061..E-064 read LTC counters from the pit-diag stream (AMS PR #248
+# status frames 0x6C0 / 0x6C1 + PR #269 per-IC PEC counts on 0x6C7 / 0x6C8)
+# via the `pit_diag` conftest fixture.
 # The constant stays here so a `git grep` from older docs still resolves.
 
 
