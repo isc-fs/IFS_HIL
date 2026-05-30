@@ -351,6 +351,97 @@ def current_heartbeat(ams_profile, mlc_powered):
 
 
 # ---------------------------------------------------------------------------
+# charger_0x101 -- operator charge-request emitter (AMS #311 / #316)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def charger_0x101(ams_profile, mlc_powered):
+    """Background emitter for the operator charge-request `0x101`.
+
+    A connected charger broadcasts `0x101` with the magic 'CHRG'
+    (0x43485247) at >= 2 Hz. The AMS uses this charge-request freshness
+    to (a) select Charger mode at the mode lock when the VCU `0x100` is
+    absent and (b) gate the Charger Precharge->Transition proceed
+    (one-button, no second press -- #316). Request it for Charger-path
+    tests; Car-path tests simply don't (no `0x101` -> Car).
+
+    Exposes (acu_heartbeat-shaped):
+      - `pause()` / `resume()` -- stop / restart emission (pause simulates
+                                  a charger disconnect, C-037c)
+      - `paused`               -- current state
+    """
+    from tools.firmware_test.acu_stim import AcuStim
+
+    bus = ams_profile["bus_acu"]
+    _skip_if_no_can(bus)
+
+    period_s = float(ams_profile.get("charger_0x101_period_ms", 200)) / 1000.0
+    can_id   = int(ams_profile.get("charger_0x101_id", 0x101))
+    payload  = bytes.fromhex(str(ams_profile.get("charger_0x101_payload",
+                                                 "4348524700000000")))
+
+    stim = AcuStim(channel=bus)
+    stim.start()
+    state = {"paused": False, "id": can_id, "period_ms": int(period_s * 1000)}
+    stop_evt = threading.Event()
+
+    def _loop():
+        while not stop_evt.is_set():
+            if not state["paused"]:
+                try:
+                    stim.send_raw(can_id, payload, is_extended_id=False)
+                except Exception as e:
+                    log.warning("charger_0x101 send failed: %s", e)
+                    break
+            stop_evt.wait(period_s)
+
+    t = threading.Thread(target=_loop, name="charger-0x101", daemon=True)
+    t.start()
+    log.info("charger_0x101 emitting 0x%X %s @ %d ms",
+             can_id, payload.hex(), int(period_s * 1000))
+
+    state["pause"]  = lambda: state.__setitem__("paused", True)
+    state["resume"] = lambda: state.__setitem__("paused", False)
+
+    yield state
+
+    stop_evt.set()
+    t.join(timeout=1.0)
+    stim.stop()
+
+
+# ---------------------------------------------------------------------------
+# wait_for_settled -- telemetry settle after fresh_boot (AMS #301 / first poll)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def wait_for_settled(observe_acu, ams_profile):
+    """Wait for telemetry to settle after `fresh_boot`.
+
+    `fresh_boot` returns at the *first* 0x4A0, which carries partial-
+    first-poll cells (some modules not yet read) and AMS_OK not yet
+    asserted (it waits for grace + first full poll, ~4.4 s -- AMS #301).
+    Poll for a 0x4A0 where min_cell == the stub seed AND AMS_OK is high,
+    so tests read a steady-state frame instead of racing the boot.
+    """
+    def _wait(timeout_s: float = 8.0) -> dict:
+        stub_mv = int(ams_profile["stub_cell_mV"])
+        deadline = time.monotonic() + timeout_s
+        last = None
+        while time.monotonic() < deadline:
+            f = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
+            if f is not None:
+                last = M.decode_telem_status(f.data)
+                if last["min_cell_mV"] == stub_mv and last["ams_ok"]:
+                    return last
+            time.sleep(0.05)
+        raise AssertionError(
+            f"telemetry did not settle (min_cell=={stub_mv} & AMS_OK) "
+            f"within {timeout_s}s. Last: {last}")
+    return _wait
+
+
+# ---------------------------------------------------------------------------
 # TSMS + DASH_CHG GPIO stimulus -- two independent fixtures, one per pin.
 #
 # TSMS lives on the SIDE of the car (external operator master switch);

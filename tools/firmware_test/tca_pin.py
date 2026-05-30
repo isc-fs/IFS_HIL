@@ -27,6 +27,7 @@ Example:
 from __future__ import annotations
 
 import logging
+import time
 
 log = logging.getLogger(__name__)
 
@@ -56,3 +57,19 @@ class TcaPin:
 
     def deassert(self) -> None:
         self.set(False)
+
+    def press(self, hold_ms: int = 60, settle_ms: int = 20) -> None:
+        """Momentary press -- a single rising edge.
+
+        SafetyTask edge-detects DASH_CHG at the 10 ms cadence (AMS #316)
+        and latches the low->high edge until the 20 ms FSM step consumes
+        it. Drive low first so the assert is a genuine edge (a line
+        already held high fires nothing -- see C-032b), hold the high
+        long enough for the 10 ms poll to catch it, then release to the
+        idle level so the next press is another clean edge.
+        """
+        self.deassert()
+        time.sleep(settle_ms / 1000.0)
+        self.assert_()
+        time.sleep(hold_ms / 1000.0)
+        self.deassert()
