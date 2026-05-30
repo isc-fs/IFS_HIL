@@ -146,21 +146,12 @@ class TestE051RunSoak:
                         "tsms_tca_* / dash_chg_tca_* keys in "
                         "ams_profile.yaml once PF9/PF10 are wired "
                         "through the TCA9555.")
-        tsms.assert_()
-        dash_chg.assert_()
-        wait_for_state(M.FsmState.PRECHARGE,
-                       timeout_ms=int(ams_profile["state_transition_window_ms"]) + 50)
-
-        # Transition is a single-tick passthrough (#244) the 20 ms poll
-        # can't observe -- ramp the bus and wait for Run directly, same
-        # as Block C/F `_drive_to_run`. (Ramp, not a 96 % step: stepping
-        # can trip an Error from Precharge; target full pack for margin.)
-        pack_V = int(ams_profile["stub_expected_pack_mV"]) // 1000
-        acu_heartbeat["ramp_to"](pack_V)
-
-        wait_for_state(M.FsmState.RUN,
-                       timeout_ms=(int(ams_profile["transition_hold_ms"]) +
-                                   int(ams_profile["state_transition_window_ms"]) + 100))
+        # Use Block C's maintained drive helper (TSMS held + a #316 DASH_CHG
+        # momentary press, then RC-ramp the bus to Run) -- same path as
+        # F-076/F-080. The old inline held-DASH model no longer fires the
+        # gate on v1.6.0 (#316: DASH_CHG is edge-detected, not a level).
+        from tests.hil.ams.test_block_c_fsm import _drive_to_run
+        _drive_to_run(tsms, dash_chg, acu_heartbeat, wait_for_state, ams_profile)
 
         minutes = float(ams_profile["soak_run_minutes"]) * soak_scale
         _run_soak(observe_acu, ams_profile,
