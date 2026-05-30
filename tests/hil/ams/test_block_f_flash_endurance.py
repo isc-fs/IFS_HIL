@@ -352,15 +352,33 @@ class TestF080TriggerFromError:
                                              "/run/hil-broker/broker.sock"))
         try:
             for i in range(cycles):
-                # 1) Cold-boot via K_n cycle so each iteration starts
-                #    from a known-good state.
+                # 1) Cold-boot via K_n cycle so each iteration starts from a
+                #    known-good state. Pause the heartbeat across the off
+                #    window (sending 0x100 to a dead carrier breaks the
+                #    heartbeat thread + congests can0 on recovery).
                 relay_bit = mlc_powered["relay_bit"]
+                acu_heartbeat["pause"]()
                 client.call("tca.write_pin", addr=0x20, port=0,
                             pin=relay_bit, value=False)
                 time.sleep(float(ams_profile["power_cycle_off_s"]))
+                observe_acu.clear()
                 client.call("tca.write_pin", addr=0x20, port=0,
                             pin=relay_bit, value=True)
-                time.sleep(float(ams_profile["mlc_boot_settle_s"]))
+                acu_heartbeat["resume"]()
+
+                # Wait for the app to boot + emit telemetry before driving --
+                # the #316 press edge is lost if fired before the app is
+                # ready (0x4A0 is grace-gated to ~boot_grace + first poll).
+                booted = False
+                bd = time.monotonic() + 5.0
+                while time.monotonic() < bd:
+                    if observe_acu.last(M.ID_TELEM_STATUS, extended=False) is not None:
+                        booted = True
+                        break
+                    time.sleep(0.05)
+                if not booted:
+                    failures.append((i, "no telemetry within 5 s of power-on"))
+                    continue
 
                 # 2) Drive into Run, then TSMS drop → Error.
                 try:
