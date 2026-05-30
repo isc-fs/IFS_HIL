@@ -567,21 +567,26 @@ class TestC039cChargeSurvivesDashRelease:
 
 
 # ---------------------------------------------------------------------------
-# C-027 -- Error sticky within a boot
+# C-043 -- Error sticky within a boot
 # ---------------------------------------------------------------------------
 
 class TestC043ErrorSticky:
 
-    def test_c043(self, fresh_boot, acu_heartbeat, wait_for_state,
-                  observe_acu, ams_profile):
-        # Trip Error via VCU staleness (same path as B-017). Other fault
-        # paths (current overlimit) need PF7 stim we don't have.
-        time.sleep(int(ams_profile["boot_grace_ms"]) / 1000.0 + 0.2)
+    def test_c043(self, fresh_boot, tsms, dash_chg, acu_heartbeat,
+                  wait_for_state, observe_acu, ams_profile):
+        _require_inputs(tsms, dash_chg)
+        # Under #304 VcuStale is Car-only, so the trip must happen in a
+        # Car-locked state -- pausing the VCU in pre-lock Start no longer
+        # faults (B-027). Drive to Run (locks Car) first, THEN trip Error
+        # via VCU staleness, which is a *removable* cause (resume the
+        # heartbeat) -- exactly what a stickiness test needs.
+        _drive_to_run(tsms, dash_chg, acu_heartbeat, wait_for_state,
+                      ams_profile)
 
         acu_heartbeat["pause"]()
         try:
             window_ms = (int(ams_profile["vcu_stale_ms"]) +
-                         int(ams_profile["tx_telemetry_period_ms"]) + 200)
+                         int(ams_profile["tx_telemetry_period_ms"]) + 300)
             wait_for_state(M.FsmState.ERROR, timeout_ms=window_ms)
         finally:
             acu_heartbeat["resume"]()
@@ -776,10 +781,29 @@ class TestC042CockpitByteAcrossStates:
             assert observed[state]["mode"] == 1, (
                 f"{state} should retain mode=Car (1), got {observed[state]}")
 
-        # TSMS bit follows the fixture state.
+        # TSMS bit follows the fixture (held) state.
         assert observed["Start"]["tsms"] is False
         assert observed["Precharge"]["tsms"] is True
         assert observed["Error"]["tsms"] is False    # we dropped it
+
+        # DASH_CHG bit 0 is the LIVE GPIO level (#316/#317), NOT the
+        # consumed edge. We drive via momentary press(), so the line is
+        # released (LOW) by the time each state is sampled.
+        for state in ("Start", "Precharge", "Run", "Error"):
+            assert observed[state]["dash"] is False, (
+                f"{state} cockpit dash bit = {observed[state]['dash']}, "
+                "expected False -- DASH is momentary and released after the "
+                "press; bit 0 tracks the live level, not the consumed edge.")
+
+        # Prove bit 0 tracks the LIVE level: hold DASH high while Error is
+        # latched (sticky) -- the live readback must flip True even though
+        # no transition consumes the edge.
+        dash_chg.assert_()
+        live = _decode(_cockpit_now())
+        dash_chg.deassert()
+        assert live["dash"] is True, (
+            f"cockpit dash bit stayed {live['dash']} with DASH held HIGH in "
+            "Error; bit 0 must mirror the live GPIO level.")
 
 
 # ---------------------------------------------------------------------------
@@ -833,3 +857,89 @@ class TestC045StartStaysWithNoCockpitInputs:
             "may have regressed: PF9 / PF10 are floating to HIGH and "
             "the firmware is reading them as asserted."
         )
+
+
+# ===========================================================================
+# Block C-AMS_OK -- SDC enable drive (PB4 / 0x6C0[3])   (NEW per #301 / #317)
+# ===========================================================================
+# AMS_OK was never firmware-driven before #301 (floating/decaying on the
+# external SDC leg -- see #299). #301 added Relays::set_ams_ok() so PB4 is
+# actively HIGH only when past boot grace AND no Error is latched. The
+# bench samples PB4 through MCP3208 (relays_readback.ams_ok). #317 marks
+# AMS_OK HIGH during grace OR while Error is latched as a HARD fail.
+
+
+class TestC046AmsOkLowInGrace:
+    """#301: AMS_OK (PB4 -> external SDC enable) reads LOW during boot
+    grace (< SafetyBootGraceMs). HIGH during grace is a #317 hard-fail."""
+
+    def test_c046_ams_ok_low_in_grace(self, fresh_boot, relays_readback,
+                                       ams_profile):
+        if relays_readback is None:
+            pytest.skip("relays_readback disabled (no ams_ok_adc_* keys)")
+        # fresh_boot returns at the first 0x4A0, well inside the LOW window:
+        # AMS_OK holds LOW through grace AND until the first full BMS poll
+        # (~4.4 s post-boot per #301). Sample immediately -- must be LOW.
+        since_boot = time.monotonic() - fresh_boot["t_power_on"]
+        state = relays_readback.read()
+        volts = relays_readback.read_volts()
+        assert state["ams_ok"] is False, (
+            f"AMS_OK HIGH {since_boot:.2f} s after power-on (PB4 = "
+            f"{volts['ams_ok']:.2f} V). It must stay LOW through boot grace "
+            f"({int(ams_profile['boot_grace_ms'])} ms) -- #317 hard-fail.")
+
+
+class TestC047AmsOkHighHealthy:
+    """#301: once past boot grace with no Error latched (healthy Start),
+    AMS_OK reads HIGH -- the external SDC leg is actively driven, not
+    floating/decaying. Settles ~4.4 s after boot (grace + first full
+    BMS poll)."""
+
+    def test_c047_ams_ok_high_when_healthy(self, fresh_boot, relays_readback,
+                                           ams_profile):
+        if relays_readback is None:
+            pytest.skip("relays_readback disabled (no ams_ok_adc_* keys)")
+        s = relays_readback.poll_for(lambda x: x["ams_ok"], timeout_s=8.0)
+        assert s is not None and s["ams_ok"], (
+            "AMS_OK never went HIGH within 8 s of boot in a healthy Start "
+            "(cells nominal, VCU fresh). #301 drives PB4 HIGH past grace + "
+            "first full poll (~4.4 s); stuck-LOW means the SDC enable isn't "
+            "being driven.")
+
+
+class TestC048AmsOkLowOnError:
+    """#301: AMS_OK drops LOW within one safety tick (10 ms) of any Error
+    latch and stays LOW for the sticky-Error session. AMS_OK HIGH while
+    Error is latched is a #317 hard-fail."""
+
+    def test_c048_ams_ok_drops_on_error(
+        self, fresh_boot, tsms, dash_chg, acu_heartbeat, relays_readback,
+        wait_for_state, ams_profile):
+        _require_inputs(tsms, dash_chg)
+        if relays_readback is None:
+            pytest.skip("relays_readback disabled (no ams_ok_adc_* keys)")
+
+        # Healthy Run -> AMS_OK HIGH.
+        _drive_to_run(tsms, dash_chg, acu_heartbeat, wait_for_state,
+                      ams_profile)
+        high = relays_readback.poll_for(lambda x: x["ams_ok"], timeout_s=6.0)
+        assert high is not None, "AMS_OK never HIGH in healthy Run (pre-trip)"
+
+        # Trip Error via TSMS drop (sticky AIR-open fault, C-039a).
+        tsms.deassert()
+        wait_for_state(
+            M.FsmState.ERROR,
+            timeout_ms=int(ams_profile["state_transition_window_ms"]) + 100)
+
+        # AMS_OK must drop LOW promptly (10 ms firmware contract; allow a
+        # telemetry cycle of bench + ADC latency) and then STAY low.
+        low = relays_readback.poll_for(lambda x: not x["ams_ok"], timeout_s=1.0)
+        assert low is not None, (
+            "AMS_OK stayed HIGH after the FSM latched Error -- #301 must pull "
+            "PB4 LOW within one safety tick. #317 hard-fail.")
+
+        # Sticky: AMS_OK must NOT recover HIGH while Error is still latched.
+        held = relays_readback.poll_for(lambda x: x["ams_ok"], timeout_s=3.0)
+        assert held is None, (
+            "AMS_OK went back HIGH while Error was still latched -- the SDC "
+            "enable must stay LOW for the sticky-Error session.")
