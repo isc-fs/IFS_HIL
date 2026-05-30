@@ -142,37 +142,29 @@ class TestD051bTriggerFromErrorState:
     when MainTask is wedged on the Error path."""
 
     def test_d051b_trigger_works_from_error(
-            self, fresh_boot, observe_acu,
-            acu_heartbeat, ams_profile):
-        # Step 1: trip FSM into Error.
-        acu_heartbeat["pause"]()
-        deadline = time.monotonic() + 5.0
-        in_error = False
-        while time.monotonic() < deadline:
-            f = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
-            if f is not None:
-                state = M.decode_telem_status(f.data)["state"]
-                if state == M.FsmState.ERROR:
-                    in_error = True
-                    break
-            time.sleep(0.05)
-        assert in_error, (
-            "FSM didn't enter Error within 5 s of pausing the VCU "
-            "heartbeat — VcuStaleMs predicate may have changed, or "
-            "the heartbeat fixture failed to pause."
-        )
-
-        # Step 2: send the trigger on the ACU bus.
-        subprocess.run(
-            ["cansend", ams_profile["bus_acu"], "002#B007AD11"],
-            check=True, timeout=2,
-        )
-
-        # Step 3: confirm the trigger landed the chip in BL even from
-        # the Error code path. This is the case the operator MUST
-        # recover from in the car -- if it fails, the AMS becomes
-        # unreflashable without opening the accumulator.
+            self, fresh_boot, observe_acu, pico_emu, wait_for_settled,
+            wait_for_state, ams_profile):
+        # Step 1: trip FSM into Error. #304 made VcuStale Car-only, so
+        # pausing the VCU in pre-lock Start no longer faults; trip via a
+        # sustained cell under-voltage instead (fires from Start directly,
+        # no Car lock needed -- the Error *reason* is irrelevant here).
+        wait_for_settled()
+        pico_emu.inject_cell_v(module=0, cell=10, mV=2500)  # < 2800
         try:
+            wait_for_state(
+                M.FsmState.ERROR,
+                timeout_ms=int(ams_profile["tx_telemetry_period_ms"]) * 2 + 800)
+
+            # Step 2: send the trigger on the ACU bus.
+            subprocess.run(
+                ["cansend", ams_profile["bus_acu"], "002#B007AD11"],
+                check=True, timeout=2,
+            )
+
+            # Step 3: confirm the trigger landed the chip in BL even from
+            # the Error code path. This is the case the operator MUST
+            # recover from in the car -- if it fails, the AMS becomes
+            # unreflashable without opening the accumulator.
             assert _trigger_rebooted_to_bl(observe_acu, ams_profile), (
                 "boot-trigger ignored while FSM was in Error. This is "
                 "a SAFETY-CRITICAL regression: the trigger is the only "
@@ -181,9 +173,9 @@ class TestD051bTriggerFromErrorState:
                 "from the Error code path."
             )
         finally:
-            # Restore the heartbeat regardless of pass/fail so the next
-            # test doesn't start in a degraded state.
-            acu_heartbeat["resume"]()
+            # Restore nominal cells so the next test starts clean.
+            pico_emu.resume_all()
+            pico_emu.set_all_cells(3750)
 
 
 # D-042 dropped per AMS #272 — superseded by D-052 which reads

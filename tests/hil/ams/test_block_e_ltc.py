@@ -205,30 +205,48 @@ class TestE066StopReplyModule2:
     """
 
     def test_e066_module2_only(self, fresh_boot, pico_emu, observe_acu,
-                                wait_for_state, ams_profile):
+                                wait_for_settled, wait_for_state, ams_profile):
         assert fresh_boot["first_frame"]["state"] == M.FsmState.START
+        # Establish the all-fresh baseline (mask 0x1F) past grace + first
+        # full poll before silencing -- boot grace suppresses BMS staleness,
+        # so a stop_reply during grace wouldn't drop the mask in-window.
+        settled = wait_for_settled()
+        assert settled["module_online_mask"] == 0x1F, (
+            f"baseline mask = 0x{settled['module_online_mask']:02X}, "
+            "expected 0x1F before silencing.")
 
         try:
             # 0x04 = bit 2 set = silence module 2's chain positions
             # (LTC 4 + LTC 5 per the 2×N / 2×N+1 mapping).
             pico_emu.stop_reply(0x04)
 
-            # Budget: BmsStaleMs (1500 ms) + safety-cycle + telemetry slack.
+            # Poll for the partial mask drop: bit 2 clears (-> 0x1B) after
+            # BmsStaleMs while modules 0/1/3/4 stay fresh. Poll rather than
+            # single-read so we don't race the freshness derivation.
             window_ms = (int(ams_profile.get("bms_stale_ms", 1500))
-                         + int(ams_profile["tx_telemetry_period_ms"]) + 500)
-            wait_for_state(M.FsmState.ERROR, timeout_ms=window_ms)
+                         + int(ams_profile["tx_telemetry_period_ms"]) + 1000)
+            deadline = time.monotonic() + window_ms / 1000.0
+            saw_1b = False
+            last_mask = None
+            while time.monotonic() < deadline:
+                f = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
+                if f is not None:
+                    last_mask = M.decode_telem_status(f.data)["module_online_mask"]
+                    if last_mask == 0x1B:
+                        saw_1b = True
+                        break
+                time.sleep(0.05)
+            last_str = f"0x{last_mask:02X}" if last_mask is not None else "n/a"
+            assert saw_1b, (
+                f"module_online_mask never reached 0x1B (last = {last_str}). "
+                "Expected bit 2 cleared (modules 0/1/3/4 fresh). Either the "
+                "Pico's per-module silence mapping is off or AMS's freshness "
+                "derivation regressed.")
 
-            # Confirm the mask drop pattern: bit 2 should be the only
-            # bit cleared. Per #250 the mask reflects current freshness,
-            # so the other 4 modules still report fresh.
-            f = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
-            assert f is not None, "no 0x4A0 after Error transition"
-            mask = M.decode_telem_status(f.data)["module_online_mask"]
-            assert mask == 0x1B, (
-                f"module_online_mask = 0x{mask:02X}, expected 0x1B "
-                "(bit 2 cleared, modules 0/1/3/4 still fresh). "
-                "Either the Pico's per-module silence mapping is "
-                "off or AMS's freshness derivation regressed.")
+            # The supervisor must trip Error on the partial mask (!= AllModules).
+            wait_for_state(
+                M.FsmState.ERROR,
+                timeout_ms=int(ams_profile["tx_telemetry_period_ms"]) + 500)
         finally:
             pico_emu.resume_all()
 
