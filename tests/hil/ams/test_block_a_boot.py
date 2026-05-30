@@ -503,12 +503,28 @@ class TestA012FdCan1RejectsExtendedIds:
     traffic).
     """
 
-    def test_a012(self, fresh_boot, observe_acu, acu_heartbeat,
+    def test_a012(self, fresh_boot, observe_acu, acu_heartbeat, tsms, dash_chg,
                   wait_for_state, ams_profile):
         import subprocess, threading
 
-        # Establish baseline: FSM in Start with standard heartbeat.
+        if tsms is None or dash_chg is None:
+            pytest.skip("tsms/dash_chg required: #304 makes VcuStale Car-only, "
+                        "so the filter's stale-VCU consequence is only "
+                        "observable from a Car-locked state.")
+
+        # Baseline: FSM in Start with the standard heartbeat.
         assert fresh_boot["first_frame"]["state"] == M.FsmState.START
+
+        # #304: VcuStale is Car-only. Lock Car first (TSMS held + a DASH_CHG
+        # press) with the standard heartbeat still fresh, so a stale VCU
+        # actually faults. VcuStaleMs (200 ms) trips well before the 5 s
+        # precharge timeout, so Error here means "VCU went stale", not
+        # "precharge timed out".
+        tsms.assert_()
+        dash_chg.press()
+        wait_for_state(
+            M.FsmState.PRECHARGE,
+            timeout_ms=int(ams_profile["state_transition_window_ms"]) + 50)
 
         # Pause the standard heartbeat and drive an extended-ID
         # equivalent on can0. cansend's 8-digit-hex form picks
@@ -546,6 +562,7 @@ class TestA012FdCan1RejectsExtendedIds:
             stop_evt.set()
             t.join(timeout=1.0)
             acu_heartbeat["resume"]()
+            tsms.deassert()
 
 
 # ---------------------------------------------------------------------------
