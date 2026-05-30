@@ -58,9 +58,10 @@ def _require_inputs(tsms, dash_chg):
 
 
 def _drive_to_precharge(tsms, dash_chg, wait_for_state, ams_profile):
-    """Assert both inputs -> Start -> Precharge.  Returns Precharge snapshot."""
-    tsms.assert_()
-    dash_chg.assert_()
+    """TSMS held + a DASH_CHG press -> Start -> Precharge (#316 edge model).
+    Returns the Precharge snapshot."""
+    tsms.assert_()          # held master switch
+    dash_chg.press()        # momentary rising edge fires the transition
     return wait_for_state(
         M.FsmState.PRECHARGE,
         timeout_ms=int(ams_profile["state_transition_window_ms"]) + 50)
@@ -100,6 +101,32 @@ def _drive_to_run(tsms, dash_chg, acu_heartbeat, wait_for_state, ams_profile):
         timeout_ms=hold_ms + int(ams_profile["state_transition_window_ms"]) + 100)
 
 
+def _drive_to_charge(tsms, dash_chg, acu_heartbeat, charger_0x101,
+                     wait_for_state, ams_profile):
+    """Charger-mode Start -> ... -> Charge. VCU silent (> VcuFreshMs) with
+    a fresh 0x101 charge-request, then TSMS held + a DASH_CHG press. The
+    charger one-button proceed (fresh 0x101, no dc_bus gate, no dwell --
+    #312/#316) carries Precharge -> Transition -> Charge within a few
+    safety ticks, so those two are transient (sub-telemetry-cycle): we
+    wait for the stable Charge state. mode_locked latches Charger at the
+    (transient) Precharge and is retained into Charge. Returns the Charge
+    snapshot.
+
+    The `charger_0x101` fixture emits 0x101 from setup; `resume()` is
+    defensive in case an earlier step paused it. Charger is selected only
+    when, at the lock, the VCU 0x100 is absent AND 0x101 is fresh (#304 /
+    #316); VcuStale is Car-only (#304) so the lock is reachable.
+    """
+    acu_heartbeat["pause"]()             # VCU absent
+    charger_0x101["resume"]()            # 0x101 live + fresh
+    time.sleep(1.2)                      # > VcuFreshMs (1 s): VCU reads absent
+    tsms.assert_()
+    dash_chg.press()
+    return wait_for_state(
+        M.FsmState.CHARGE,
+        timeout_ms=int(ams_profile["state_transition_window_ms"]) + 1500)
+
+
 # ---------------------------------------------------------------------------
 # C-020 -- Start stays put with only one of the two inputs
 # ---------------------------------------------------------------------------
@@ -122,9 +149,9 @@ class TestC030C031GateRequiresBoth:
             if f is not None:
                 state = M.decode_telem_status(f.data)["state"]
                 assert state == M.FsmState.START, (
-                    f"FSM left Start with only TSMS asserted (now in "
-                    f"{M.FsmState.name(state)}). Both TSMS and DASH_CHG "
-                    f"must be high to fire the gate.")
+                    f"FSM left Start with only TSMS held, no DASH_CHG press "
+                    f"(now in {M.FsmState.name(state)}). The gate needs TSMS "
+                    f"held AND a DASH_CHG rising edge.")
             time.sleep(0.02)
 
     def test_c031_dash_chg_only(self, fresh_boot, tsms, dash_chg, wait_for_state,
@@ -133,7 +160,7 @@ class TestC030C031GateRequiresBoth:
         assert fresh_boot["first_frame"]["state"] == M.FsmState.START
 
         tsms.deassert()
-        dash_chg.assert_()
+        dash_chg.press()       # a press with no TSMS held must fire nothing
 
         window_ms = int(ams_profile["state_transition_window_ms"]) + 100
         deadline = time.monotonic() + window_ms / 1000.0
@@ -142,8 +169,8 @@ class TestC030C031GateRequiresBoth:
             if f is not None:
                 state = M.decode_telem_status(f.data)["state"]
                 assert state == M.FsmState.START, (
-                    f"FSM left Start with only DASH_CHG asserted (now in "
-                    f"{M.FsmState.name(state)}).")
+                    f"FSM left Start with a DASH_CHG press but no TSMS held "
+                    f"(now in {M.FsmState.name(state)}).")
             time.sleep(0.02)
 
 
@@ -159,7 +186,7 @@ class TestC032StartToPrecharge:
         assert fresh_boot["first_frame"]["state"] == M.FsmState.START
 
         tsms.assert_()
-        dash_chg.assert_()
+        dash_chg.press()       # momentary press (rising edge), not a held level
         snap = wait_for_state(
             M.FsmState.PRECHARGE,
             timeout_ms=int(ams_profile["state_transition_window_ms"]) + 50)
@@ -179,6 +206,72 @@ class TestC032StartToPrecharge:
             f"0x6C0[1] mode_locked = {mode_locked} after Start→Precharge; "
             "expected 1 (Car). VCU 0x100 was fresh during the transition "
             "so the latch should have caught Car mode.")
+
+
+# ---------------------------------------------------------------------------
+# C-032b -- a DASH_CHG level held from before boot fires no edge  (#316)
+# ---------------------------------------------------------------------------
+
+class TestC032bHeldLineNoFire:
+    """#316: SafetyTask seeds its DASH_CHG edge-detector from the *live*
+    level at init. A line held HIGH continuously from before boot
+    therefore presents no low->high edge and must NOT trigger
+    Start->Precharge, even with TSMS held. Only a fresh release->press
+    edge fires the gate.
+
+    This needs a boot with DASH_CHG already HIGH -- the opposite of
+    `fresh_boot`, which deasserts both cockpit pins before power-on. So
+    the power-cycle is driven by hand here, holding both lines high
+    across the relay close.
+    """
+
+    def test_c032b_held_dash_does_not_fire(
+        self, mlc_powered, acu_heartbeat, current_heartbeat, observe_acu,
+        tsms, dash_chg, wait_for_state, ams_profile):
+        _require_inputs(tsms, dash_chg)
+        import os
+        from broker.server import BrokerClient
+        client = BrokerClient(os.environ.get("HIL_BROKER_SOCKET",
+                                             "/run/hil-broker/broker.sock"))
+        relay_bit = mlc_powered["relay_bit"]
+        try:
+            # Power off, then assert BOTH cockpit lines HIGH *before* the
+            # relay closes so the app boots seeing DASH already high.
+            client.call("tca.write_pin", addr=0x20, port=0, pin=relay_bit,
+                        value=False)
+            time.sleep(2.0)
+            tsms.assert_()
+            dash_chg.assert_()        # held HIGH through boot -> no edge
+            observe_acu.clear()
+            client.call("tca.write_pin", addr=0x20, port=0, pin=relay_bit,
+                        value=True)
+        finally:
+            client.close()
+
+        # App must boot to Start and STAY there: the held DASH presents no
+        # edge. Watch through boot grace + a couple of telemetry cycles.
+        first = wait_for_state(M.FsmState.START, timeout_ms=5000)
+        assert first["state"] == M.FsmState.START
+
+        window_ms = (int(ams_profile["boot_grace_ms"])
+                     + int(ams_profile["tx_telemetry_period_ms"]) * 2 + 500)
+        deadline = time.monotonic() + window_ms / 1000.0
+        while time.monotonic() < deadline:
+            f = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
+            if f is not None:
+                state = M.decode_telem_status(f.data)["state"]
+                assert state == M.FsmState.START, (
+                    f"FSM left Start to {M.FsmState.name(state)} with "
+                    "DASH_CHG held HIGH from boot. A held level must fire no "
+                    "edge (#316); only a release->press does.")
+            time.sleep(0.05)
+
+        # Prove the gate still works: a genuine release->press edge (TSMS
+        # still held) must now fire Start -> Precharge.
+        dash_chg.press()
+        wait_for_state(
+            M.FsmState.PRECHARGE,
+            timeout_ms=int(ams_profile["state_transition_window_ms"]) + 50)
 
 
 # ---------------------------------------------------------------------------
@@ -212,32 +305,60 @@ class TestC033PrechargeToTransition:
 
 
 # ---------------------------------------------------------------------------
-# C-034 / C-035 -- REMOVED in #245 per AMS PR #244
+# C-034 -- Car precharge timeout -> Error (FsmError)   (#307, re-added)
 # ---------------------------------------------------------------------------
-# Both PrechargeMaxMs and TransitionHoldMs were deleted in #244:
-#   - Precharge holds indefinitely until precharge_target_reached
-#     fires OR a safety predicate trips. No more 1.5 s timeout to
-#     Error -- the deletion was the point of #244.
-#   - Transition is now a one-FSM-step passthrough (Precharge ->
-#     Transition -> Run within a single 10 ms safety tick), so there's
-#     no observable hold interval to time.
-# The old test_c023 (Transition -> Run after hold) and test_c024
-# (Precharge timeout) covered behaviour the firmware no longer
-# exhibits. Deleted here rather than skipped because they'd be
-# misleading regression signal (would always fail or always pass for
-# the wrong reason). See #245 Block C table.
+# History: PrechargeMaxMs was deleted in #244 (Precharge held
+# indefinitely), then RE-ADDED in #307 as a 5 s safety timeout. #309's
+# *time-based dwell* was reverted in #312 -- a timeout (give up -> Error)
+# is not a dwell (minimum hold), so this row is valid and the revert
+# doesn't touch it. C-035 (old TransitionHold) stays gone: Transition is
+# still a single-tick passthrough (#244).
+
+class TestC034CarPrechargeTimeout:
+    """#307: in Car mode, if the injected DC bus never reaches the 95 %
+    target, Precharge must not hold the precharge resistor closed
+    forever -- it latches Error at PrechargeMaxMs (5 s) with
+    `0x6C0[6]` == 12 (FsmError)."""
+
+    def test_c034_car_precharge_timeout(
+        self, fresh_boot, tsms, dash_chg, acu_heartbeat, wait_for_state,
+        pit_diag, ams_profile):
+        _require_inputs(tsms, dash_chg)
+
+        # Lock Car and enter Precharge, but leave the DC bus at the
+        # quiescent 0 V (acu_heartbeat default) -- precharge_target_reached
+        # never fires. The heartbeat keeps emitting (VCU fresh), so the
+        # only failing predicate is the precharge timeout, not VcuStale.
+        _drive_to_precharge(tsms, dash_chg, wait_for_state, ams_profile)
+
+        # Hold ~PrechargeMaxMs + a telemetry cycle; Error must latch.
+        wait_for_state(
+            M.FsmState.ERROR,
+            timeout_ms=int(ams_profile["precharge_max_ms"])
+                       + int(ams_profile["tx_telemetry_period_ms"]) + 800)
+
+        # Fault reason must be FsmError (12) -- the precharge-timeout path,
+        # not a stale/predicate trip beating it to the latch.
+        pit_diag.wait_for_scan()
+        fsm_status = pit_diag.wait_for(M.ID_PIT_DIAG_FSM_STATUS)
+        fault_reason = fsm_status[6]
+        assert fault_reason == 12, (
+            f"0x6C0[6] fault_reason = {fault_reason} after the Car precharge "
+            "timeout; expected 12 (FsmError). A different reason means a "
+            "predicate (VcuStale/current) tripped before the 5 s timeout.")
 
 # ---------------------------------------------------------------------------
-# C-038 -- Run -> Error (latched) on TSMS drop
+# C-039a -- Run -> Error (latched) on TSMS drop
 # ---------------------------------------------------------------------------
 # Operator chose conservative semantics in PR #187: every AIR-open event
 # is a sticky fault requiring power-cycle. Run / Charge no longer have
-# a "clean shutdown back to Start" path.
+# a "clean shutdown back to Start" path. TSMS (the held master switch) is
+# the ONLY thing that ends Run -- releasing DASH_CHG does not (C-039b).
 
-class TestC038RunToErrorOnTsmsDrop:
+class TestC039aRunToErrorOnTsmsDrop:
 
-    def test_c038_tsms_drop(self, fresh_boot, tsms, dash_chg, acu_heartbeat,
-                            wait_for_state, ams_profile):
+    def test_c039a_tsms_drop(self, fresh_boot, tsms, dash_chg, acu_heartbeat,
+                             wait_for_state, ams_profile):
         _require_inputs(tsms, dash_chg)
         _drive_to_run(tsms, dash_chg, acu_heartbeat, wait_for_state,
                       ams_profile)
@@ -249,81 +370,223 @@ class TestC038RunToErrorOnTsmsDrop:
 
 
 # ---------------------------------------------------------------------------
-# C-026 -- Transition -> Charge in charger mode (VCU heartbeat paused)
+# C-037 -- Charger entry: VCU absent + 0x101 fresh -> Precharge (Charger)
 # ---------------------------------------------------------------------------
-# Car-vs-charger is captured at Start -> Precharge from VCU 0x100
-# heartbeat freshness. Pause the heartbeat first, wait > kVcuFreshMs,
-# then assert TSMS+DASH_CHG -> mode locks to Charger. After the lock
-# fires the heartbeat can resume (or a oneshot bump) so precharge
-# actually completes; the locked mode does NOT re-evaluate.
+# Charger-vs-car is captured at the Start->Precharge lock. Under #304/#316
+# Charger requires BOTH the VCU 0x100 absent (> VcuFreshMs) AND the
+# operator charge-request 0x101 fresh (>= 2 Hz, magic 'CHRG'). #304 makes
+# VcuStale Car-only so the charger lock is actually reachable (the old
+# pre-emption that filed #302). VcuFreshMs absent alone is no longer
+# enough -- without 0x101 it defaults to Car (see C-038).
 
-class TestC037ChargerModeFsm:
+class TestC037ChargerEntry:
 
-    def test_c037(self, fresh_boot, tsms, dash_chg, acu_heartbeat,
-                  wait_for_state, pit_diag, ams_profile):
+    def test_c037_charger_entry(
+        self, fresh_boot, tsms, dash_chg, acu_heartbeat, charger_0x101,
+        wait_for_state, pit_diag, ams_profile):
         _require_inputs(tsms, dash_chg)
+        snap = _drive_to_charge(tsms, dash_chg, acu_heartbeat,
+                                charger_0x101, wait_for_state, ams_profile)
+        assert snap["state"] == M.FsmState.CHARGE
 
-        # Silence the VCU heartbeat for > kVcuFreshMs (1 s in firmware).
-        acu_heartbeat["pause"]()
-        time.sleep(1.2)
-
-        # Assert both inputs -> Start->Precharge with mode_locked = Charger.
-        tsms.assert_()
-        dash_chg.assert_()
-        wait_for_state(
-            M.FsmState.PRECHARGE,
-            timeout_ms=int(ams_profile["state_transition_window_ms"]) + 50)
-
-        # Per AMS #272 C-037: with VCU stale at the Start→Precharge
-        # edge, mode_locked must latch Charger (= 2) not Car. Read via
-        # pit-diag 0x6C0[1] — wait for a fresh scan so we don't get
-        # the pre-transition cached frame (same staleness fix as C-032).
+        # Reaching Charge proves the Charger lock fired -- Charge is
+        # unreachable except via a Charger-mode Precharge. mode_locked is
+        # retained from the (transient) lock; confirm it reads Charger (2).
         pit_diag.wait_for_scan()
         fsm_status = pit_diag.wait_for(M.ID_PIT_DIAG_FSM_STATUS)
         mode_locked = fsm_status[1]
         assert mode_locked == 2, (
-            f"0x6C0[1] mode_locked = {mode_locked} after Charger-mode "
-            "Start→Precharge; expected 2 (Charger). VCU was stale "
-            f"(paused 1.2 s > VcuFreshMs {ams_profile.get('vcu_fresh_ms', 1000)} ms) "
-            "so the latch should have caught Charger mode.")
-
-        # Mode already locked; safe to drive DC bus high so precharge
-        # completes. Transition is a single-tick passthrough (#244) so
-        # the 20 ms test poll can't catch it; wait for Charge directly
-        # (Charger mode's analog of Run; both are unreachable from
-        # Precharge without going through Transition).
-        #
-        # Resume heartbeat + ramp bus to full pack. mode_locked is
-        # already latched to Charger, so the resumed heartbeat won't
-        # re-evaluate Car. Target = pack (not 96 %) so we have margin
-        # against pack jitter — see `_drive_to_run` for reasoning.
-        pack_V = int(ams_profile["stub_expected_pack_mV"]) // 1000
-        acu_heartbeat["resume"]()
-        acu_heartbeat["ramp_to"](pack_V)
-
-        # Hold elapses -> Charge (not Run, because mode_locked = Charger).
-        hold_ms = int(ams_profile["transition_hold_ms"])
-        wait_for_state(
-            M.FsmState.CHARGE,
-            timeout_ms=hold_ms + int(ams_profile["state_transition_window_ms"]) + 100)
+            f"0x6C0[1] mode_locked = {mode_locked} after a VCU-absent + "
+            "fresh-0x101 charger Charge; expected 2 (Charger). #304 makes "
+            "VcuStale Car-only so the charger lock is reachable (was #302).")
 
 
 # ---------------------------------------------------------------------------
-# C-027 -- Error sticky within a boot
+# C-037b -- Charger one-button proceed: fresh 0x101 -> Charge (no dc_bus)
+# ---------------------------------------------------------------------------
+
+class TestC037bChargerOneButtonProceed:
+    """#316: in Charger mode the proceed Precharge -> Transition -> Charge
+    is gated by a still-fresh 0x101 (the connected charger), NOT by a
+    dc_bus voltage gate and NOT by a second button press. With 0x101 kept
+    fresh and no dc_bus injected, the FSM reaches Charge on its own."""
+
+    def test_c037b_charger_proceeds_to_charge(
+        self, fresh_boot, tsms, dash_chg, acu_heartbeat, charger_0x101,
+        wait_for_state, ams_profile):
+        _require_inputs(tsms, dash_chg)
+        # No dc_bus is ever injected: the proceed is gated by a still-fresh
+        # 0x101 alone (one button, no second press, no voltage gate).
+        # Reaching Charge is the assertion.
+        snap = _drive_to_charge(tsms, dash_chg, acu_heartbeat,
+                                charger_0x101, wait_for_state, ams_profile)
+        assert snap["state"] == M.FsmState.CHARGE
+
+
+# ---------------------------------------------------------------------------
+# C-037c -- Charger stale-0x101 timeout: charger unplugged -> Error
+# ---------------------------------------------------------------------------
+
+class TestC037cChargerStaleRequestTimeout:
+    """#316: AIR+ must never close into a disconnected charger. Enter
+    Charger Precharge, then STOP the 0x101 charge-request (charger
+    unplugged). Precharge must hold (not proceed to Charge) and latch
+    Error at PrechargeMaxMs (5 s); VcuStale stays Car-only (#304) so the
+    only thing that trips is the precharge timeout."""
+
+    def test_c037c_charger_stale_request_times_out(
+        self, fresh_boot, tsms, dash_chg, acu_heartbeat, charger_0x101,
+        wait_for_state, observe_acu, pit_diag, ams_profile):
+        _require_inputs(tsms, dash_chg)
+        # Lock Charger with a fresh 0x101, then "unplug" the charger the
+        # instant the press fires. If the proceed to Charge requires 0x101
+        # to stay fresh through precharge, AIR+ must NOT close: Precharge
+        # holds and times out to Error at PrechargeMaxMs.
+        acu_heartbeat["pause"]()
+        charger_0x101["resume"]()
+        time.sleep(1.2)
+        tsms.assert_()
+        dash_chg.press()
+        charger_0x101["pause"]()         # charger unplugged at the lock
+
+        # The charger proceed has no dwell (#312) and 0x101's freshness
+        # window may outlast the proceed latency. If Charge is reached
+        # before the stop bites, the bench simply can't hold Precharge this
+        # way -- skip with a precise reason rather than emit a misleading
+        # 5 s Error timeout. Watch ~1.5 s for a Charge breakthrough.
+        deadline = time.monotonic() + 1.5
+        while time.monotonic() < deadline:
+            f = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
+            if f is not None and \
+                    M.decode_telem_status(f.data)["state"] == M.FsmState.CHARGE:
+                pytest.skip(
+                    "Charger reached Charge before the post-press 0x101 stop "
+                    "took effect. With no precharge dwell (#312) and a 0x101 "
+                    "freshness window wider than the proceed latency, the "
+                    "bench cannot hold Precharge by stopping 0x101 after the "
+                    "press. C-037c needs a firmware test-hook (a forced "
+                    "precharge dwell, or 0x101-fresh re-checked at AIR+ "
+                    "close) to be benchable -- flag to the AMS team.")
+            time.sleep(0.05)
+
+        # Precharge held (no Charge breakthrough) -> must time out to Error.
+        wait_for_state(
+            M.FsmState.ERROR,
+            timeout_ms=int(ams_profile["precharge_max_ms"])
+                       + int(ams_profile["tx_telemetry_period_ms"]) + 800)
+        pit_diag.wait_for_scan()
+        fsm_status = pit_diag.wait_for(M.ID_PIT_DIAG_FSM_STATUS)
+        fault_reason = fsm_status[6]
+        assert fault_reason == 12, (
+            f"0x6C0[6] fault_reason = {fault_reason} after the charger "
+            "stale-0x101 timeout; expected 12 (FsmError). AIR+ must never "
+            "close into a disconnected charger.")
+
+
+# ---------------------------------------------------------------------------
+# C-038 -- Dead VCU + no 0x101 locks Car (not Charger) -> VcuStale  (#311)
+# ---------------------------------------------------------------------------
+
+class TestC038DeadVcuLocksCarNotCharger:
+    """#311/#316: VCU silent AND no 0x101 on the bus must lock **Car**
+    (the safe default), not Charger. A Car lock arms VcuStale (#304), so
+    the chip faults to Error rather than silently energising a charge path
+    with no supervising VCU and no charger handshake."""
+
+    def test_c038_dead_vcu_no_request_locks_car(
+        self, fresh_boot, tsms, dash_chg, acu_heartbeat, wait_for_state,
+        pit_diag, ams_profile):
+        _require_inputs(tsms, dash_chg)
+
+        # VCU silent > VcuFreshMs. Crucially NO charger_0x101 fixture here,
+        # so 0x101 is absent and Charger is NOT eligible.
+        acu_heartbeat["pause"]()
+        time.sleep(1.2)
+
+        tsms.assert_()
+        dash_chg.press()
+        # The Car lock arms VcuStale immediately (VCU already stale), so
+        # Precharge may be a single-tick passthrough to Error. Wait for
+        # Error directly; mode_locked is retained through the trip (C-041).
+        wait_for_state(
+            M.FsmState.ERROR,
+            timeout_ms=int(ams_profile["vcu_stale_ms"])
+                       + int(ams_profile["state_transition_window_ms"])
+                       + int(ams_profile["tx_telemetry_period_ms"]) + 500)
+
+        pit_diag.wait_for_scan()
+        fsm_status = pit_diag.wait_for(M.ID_PIT_DIAG_FSM_STATUS)
+        mode_locked = fsm_status[1]
+        fault_reason = fsm_status[6]
+        assert mode_locked == 1, (
+            f"0x6C0[1] mode_locked = {mode_locked} with VCU silent and no "
+            "0x101; expected 1 (Car, the safe default). A Charger lock here "
+            "would energise a charge path with no VCU and no charger.")
+        assert fault_reason == 11, (
+            f"0x6C0[6] fault_reason = {fault_reason}; expected 11 (VcuStale) "
+            "-- the Car lock must arm VcuStale and fault, not proceed.")
+
+
+# ---------------------------------------------------------------------------
+# C-039c -- Charge SURVIVES a DASH_CHG release; exits only on TSMS drop
+# ---------------------------------------------------------------------------
+
+class TestC039cChargeSurvivesDashRelease:
+    """#316: like Run, Charge is sustained by TSMS alone. Releasing or
+    re-pressing DASH_CHG in Charge must NOT fault; only a TSMS drop ends
+    Charge."""
+
+    def test_c039c_charge_survives_dash_release(
+        self, fresh_boot, tsms, dash_chg, acu_heartbeat, charger_0x101,
+        observe_acu, wait_for_state, ams_profile):
+        _require_inputs(tsms, dash_chg)
+        snap = _drive_to_charge(tsms, dash_chg, acu_heartbeat,
+                                charger_0x101, wait_for_state, ams_profile)
+        assert snap["state"] == M.FsmState.CHARGE
+
+        # Release + spurious re-press of DASH must not end Charge.
+        dash_chg.deassert()
+        dash_chg.press()
+        window_ms = int(ams_profile["tx_telemetry_period_ms"]) * 2 + 300
+        deadline = time.monotonic() + window_ms / 1000.0
+        while time.monotonic() < deadline:
+            f = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
+            if f is not None:
+                state = M.decode_telem_status(f.data)["state"]
+                assert state == M.FsmState.CHARGE, (
+                    f"Charge did not survive a DASH_CHG release/press: now "
+                    f"in {M.FsmState.name(state)}. Charge is sustained by "
+                    "TSMS alone (#316).")
+            time.sleep(0.05)
+
+        # And a TSMS drop DOES end Charge -> Error (the only exit).
+        tsms.deassert()
+        wait_for_state(
+            M.FsmState.ERROR,
+            timeout_ms=int(ams_profile["state_transition_window_ms"]) + 100)
+
+
+# ---------------------------------------------------------------------------
+# C-043 -- Error sticky within a boot
 # ---------------------------------------------------------------------------
 
 class TestC043ErrorSticky:
 
-    def test_c043(self, fresh_boot, acu_heartbeat, wait_for_state,
-                  observe_acu, ams_profile):
-        # Trip Error via VCU staleness (same path as B-017). Other fault
-        # paths (current overlimit) need PF7 stim we don't have.
-        time.sleep(int(ams_profile["boot_grace_ms"]) / 1000.0 + 0.2)
+    def test_c043(self, fresh_boot, tsms, dash_chg, acu_heartbeat,
+                  wait_for_state, observe_acu, ams_profile):
+        _require_inputs(tsms, dash_chg)
+        # Under #304 VcuStale is Car-only, so the trip must happen in a
+        # Car-locked state -- pausing the VCU in pre-lock Start no longer
+        # faults (B-027). Drive to Run (locks Car) first, THEN trip Error
+        # via VCU staleness, which is a *removable* cause (resume the
+        # heartbeat) -- exactly what a stickiness test needs.
+        _drive_to_run(tsms, dash_chg, acu_heartbeat, wait_for_state,
+                      ams_profile)
 
         acu_heartbeat["pause"]()
         try:
             window_ms = (int(ams_profile["vcu_stale_ms"]) +
-                         int(ams_profile["tx_telemetry_period_ms"]) + 200)
+                         int(ams_profile["tx_telemetry_period_ms"]) + 300)
             wait_for_state(M.FsmState.ERROR, timeout_ms=window_ms)
         finally:
             acu_heartbeat["resume"]()
@@ -353,29 +616,42 @@ class TestC043ErrorSticky:
 # under "scaffolding gap" if the stim path ever lands.
 
 # ---------------------------------------------------------------------------
-# C-039 — Run → Error (latched) on DASH_CHG drop  (AMS #272 row)
+# C-039b — Run SURVIVES a DASH_CHG release  (#316 — REPLACES old C-039)
 # ---------------------------------------------------------------------------
+# The old C-039 ("Run → Error on DASH_CHG drop") is INVERTED under #316.
+# DASH_CHG is a momentary press: by the time Run is reached the line is
+# already released, and Run is sustained by TSMS alone. Releasing or
+# re-pressing DASH_CHG in Run must NOT fault. (#317 warns a strict-xfail
+# on the old row would xpass for the wrong reason — hence a real,
+# inverted assertion here.)
 
-class TestC039RunToErrorOnDashChgDrop:
-    """Sibling to C-038 (TSMS drop). Run → Error must also fire when
-    DASH_CHG (cockpit) drops, mirroring the operator-intent semantics."""
+class TestC039bRunSurvivesDashRelease:
 
-    def test_c039_dash_chg_drop(self, fresh_boot, tsms, dash_chg,
-                                 acu_heartbeat, wait_for_state, ams_profile):
+    def test_c039b_run_survives_dash_release(
+        self, fresh_boot, tsms, dash_chg, acu_heartbeat, observe_acu,
+        wait_for_state, ams_profile):
         _require_inputs(tsms, dash_chg)
-        run = _drive_to_run(tsms, dash_chg, acu_heartbeat,
-                            wait_for_state, ams_profile)
+        run = _drive_to_run(tsms, dash_chg, acu_heartbeat, wait_for_state,
+                            ams_profile)
         assert run["state"] == M.FsmState.RUN
 
+        # DASH is already low after the press that drove Start->Precharge.
+        # Explicitly release, then fire a fresh spurious press: neither is
+        # an exit condition in Run. State must stay Run across ~2 telemetry
+        # cycles (TSMS stays held throughout).
         dash_chg.deassert()
-        wait_for_state(
-            M.FsmState.ERROR,
-            timeout_ms=int(ams_profile["state_transition_window_ms"]) + 100)
-
-
-# C-040 (Charge → Error on input drop) dropped per AMS #272 — needs
-# a _drive_to_charge helper symmetric to _drive_to_run. File under
-# "scaffolding gap" if the helper ever lands.
+        dash_chg.press()
+        window_ms = int(ams_profile["tx_telemetry_period_ms"]) * 2 + 300
+        deadline = time.monotonic() + window_ms / 1000.0
+        while time.monotonic() < deadline:
+            f = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
+            if f is not None:
+                state = M.decode_telem_status(f.data)["state"]
+                assert state == M.FsmState.RUN, (
+                    f"Run did not survive a DASH_CHG release/press: now in "
+                    f"{M.FsmState.name(state)}. Under #316 Run is sustained "
+                    "by TSMS alone; DASH_CHG edges must be ignored in Run.")
+            time.sleep(0.05)
 
 
 # ---------------------------------------------------------------------------
@@ -505,10 +781,29 @@ class TestC042CockpitByteAcrossStates:
             assert observed[state]["mode"] == 1, (
                 f"{state} should retain mode=Car (1), got {observed[state]}")
 
-        # TSMS bit follows the fixture state.
+        # TSMS bit follows the fixture (held) state.
         assert observed["Start"]["tsms"] is False
         assert observed["Precharge"]["tsms"] is True
         assert observed["Error"]["tsms"] is False    # we dropped it
+
+        # DASH_CHG bit 0 is the LIVE GPIO level (#316/#317), NOT the
+        # consumed edge. We drive via momentary press(), so the line is
+        # released (LOW) by the time each state is sampled.
+        for state in ("Start", "Precharge", "Run", "Error"):
+            assert observed[state]["dash"] is False, (
+                f"{state} cockpit dash bit = {observed[state]['dash']}, "
+                "expected False -- DASH is momentary and released after the "
+                "press; bit 0 tracks the live level, not the consumed edge.")
+
+        # Prove bit 0 tracks the LIVE level: hold DASH high while Error is
+        # latched (sticky) -- the live readback must flip True even though
+        # no transition consumes the edge.
+        dash_chg.assert_()
+        live = _decode(_cockpit_now())
+        dash_chg.deassert()
+        assert live["dash"] is True, (
+            f"cockpit dash bit stayed {live['dash']} with DASH held HIGH in "
+            "Error; bit 0 must mirror the live GPIO level.")
 
 
 # ---------------------------------------------------------------------------
@@ -562,3 +857,89 @@ class TestC045StartStaysWithNoCockpitInputs:
             "may have regressed: PF9 / PF10 are floating to HIGH and "
             "the firmware is reading them as asserted."
         )
+
+
+# ===========================================================================
+# Block C-AMS_OK -- SDC enable drive (PB4 / 0x6C0[3])   (NEW per #301 / #317)
+# ===========================================================================
+# AMS_OK was never firmware-driven before #301 (floating/decaying on the
+# external SDC leg -- see #299). #301 added Relays::set_ams_ok() so PB4 is
+# actively HIGH only when past boot grace AND no Error is latched. The
+# bench samples PB4 through MCP3208 (relays_readback.ams_ok). #317 marks
+# AMS_OK HIGH during grace OR while Error is latched as a HARD fail.
+
+
+class TestC046AmsOkLowInGrace:
+    """#301: AMS_OK (PB4 -> external SDC enable) reads LOW during boot
+    grace (< SafetyBootGraceMs). HIGH during grace is a #317 hard-fail."""
+
+    def test_c046_ams_ok_low_in_grace(self, fresh_boot, relays_readback,
+                                       ams_profile):
+        if relays_readback is None:
+            pytest.skip("relays_readback disabled (no ams_ok_adc_* keys)")
+        # fresh_boot returns at the first 0x4A0, well inside the LOW window:
+        # AMS_OK holds LOW through grace AND until the first full BMS poll
+        # (~4.4 s post-boot per #301). Sample immediately -- must be LOW.
+        since_boot = time.monotonic() - fresh_boot["t_power_on"]
+        state = relays_readback.read()
+        volts = relays_readback.read_volts()
+        assert state["ams_ok"] is False, (
+            f"AMS_OK HIGH {since_boot:.2f} s after power-on (PB4 = "
+            f"{volts['ams_ok']:.2f} V). It must stay LOW through boot grace "
+            f"({int(ams_profile['boot_grace_ms'])} ms) -- #317 hard-fail.")
+
+
+class TestC047AmsOkHighHealthy:
+    """#301: once past boot grace with no Error latched (healthy Start),
+    AMS_OK reads HIGH -- the external SDC leg is actively driven, not
+    floating/decaying. Settles ~4.4 s after boot (grace + first full
+    BMS poll)."""
+
+    def test_c047_ams_ok_high_when_healthy(self, fresh_boot, relays_readback,
+                                           ams_profile):
+        if relays_readback is None:
+            pytest.skip("relays_readback disabled (no ams_ok_adc_* keys)")
+        s = relays_readback.poll_for(lambda x: x["ams_ok"], timeout_s=8.0)
+        assert s is not None and s["ams_ok"], (
+            "AMS_OK never went HIGH within 8 s of boot in a healthy Start "
+            "(cells nominal, VCU fresh). #301 drives PB4 HIGH past grace + "
+            "first full poll (~4.4 s); stuck-LOW means the SDC enable isn't "
+            "being driven.")
+
+
+class TestC048AmsOkLowOnError:
+    """#301: AMS_OK drops LOW within one safety tick (10 ms) of any Error
+    latch and stays LOW for the sticky-Error session. AMS_OK HIGH while
+    Error is latched is a #317 hard-fail."""
+
+    def test_c048_ams_ok_drops_on_error(
+        self, fresh_boot, tsms, dash_chg, acu_heartbeat, relays_readback,
+        wait_for_state, ams_profile):
+        _require_inputs(tsms, dash_chg)
+        if relays_readback is None:
+            pytest.skip("relays_readback disabled (no ams_ok_adc_* keys)")
+
+        # Healthy Run -> AMS_OK HIGH.
+        _drive_to_run(tsms, dash_chg, acu_heartbeat, wait_for_state,
+                      ams_profile)
+        high = relays_readback.poll_for(lambda x: x["ams_ok"], timeout_s=6.0)
+        assert high is not None, "AMS_OK never HIGH in healthy Run (pre-trip)"
+
+        # Trip Error via TSMS drop (sticky AIR-open fault, C-039a).
+        tsms.deassert()
+        wait_for_state(
+            M.FsmState.ERROR,
+            timeout_ms=int(ams_profile["state_transition_window_ms"]) + 100)
+
+        # AMS_OK must drop LOW promptly (10 ms firmware contract; allow a
+        # telemetry cycle of bench + ADC latency) and then STAY low.
+        low = relays_readback.poll_for(lambda x: not x["ams_ok"], timeout_s=1.0)
+        assert low is not None, (
+            "AMS_OK stayed HIGH after the FSM latched Error -- #301 must pull "
+            "PB4 LOW within one safety tick. #317 hard-fail.")
+
+        # Sticky: AMS_OK must NOT recover HIGH while Error is still latched.
+        held = relays_readback.poll_for(lambda x: x["ams_ok"], timeout_s=3.0)
+        assert held is None, (
+            "AMS_OK went back HIGH while Error was still latched -- the SDC "
+            "enable must stay LOW for the sticky-Error session.")
