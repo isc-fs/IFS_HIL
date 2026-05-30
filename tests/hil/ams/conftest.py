@@ -627,9 +627,19 @@ def pico_emu():
         yield client
     finally:
         # Best-effort cleanup so the next test sees nominal-healthy seed.
+        # NB: reset_state() only drops the STOP_REPLY mask -- it does NOT
+        # clear cell/temp injections. Without the set_all_* below, B-026's
+        # inject_cell_* persists in the Pico and poisons later tests,
+        # including ones that don't request pico_emu (fresh_boot power-
+        # cycles the AMS chip, not the Pico). Force every cell and temp
+        # back to the nominal-healthy seed.
         try: client.resume_all()
         except Exception: pass
         try: client.reset_state()
+        except Exception: pass
+        try: client.set_all_cells(3750)   # nominal cell, A-005
+        except Exception: pass
+        try: client.set_all_temps(250)    # 25.0 C (deci-degC), A-007
         except Exception: pass
         client.close()
 
