@@ -93,6 +93,15 @@ dash_chg_tca_addr:        0x21
 dash_chg_tca_port:        1
 dash_chg_tca_pin:         1          # P11 -> PF10
 
+# -- charger_0x101 (operator charge-request emitter, AMS #311 / #316) --
+# A connected charger broadcasts 0x101 with magic 'CHRG' (0x43485247) at
+# >= 2 Hz on the ACU bus (can0); the `charger_0x101` fixture emits it.
+# Gates Charger-mode selection (VCU absent + 0x101 fresh) and the
+# one-button Precharge->Transition proceed. pause() = charger disconnect.
+charger_0x101_id:         0x101
+charger_0x101_payload:    "4348524700000000"   # 'CHRG' + 4 zero bytes
+charger_0x101_period_ms:  200                  # 5 Hz, well above the 2 Hz floor
+
 # -- Relay-readback (AMS GPIO outputs sampled by bench ADC3 / MCP3208) -
 # Per the bench wiring spec: SLOT2 connector taps PB4..PB7 to ADC3
 # (silk: ADC3, broker idx 2) channels 0..3. The conftest fixture
