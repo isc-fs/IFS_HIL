@@ -101,6 +101,32 @@ def _drive_to_run(tsms, dash_chg, acu_heartbeat, wait_for_state, ams_profile):
         timeout_ms=hold_ms + int(ams_profile["state_transition_window_ms"]) + 100)
 
 
+def _drive_to_charge(tsms, dash_chg, acu_heartbeat, charger_0x101,
+                     wait_for_state, ams_profile):
+    """Charger-mode Start -> ... -> Charge. VCU silent (> VcuFreshMs) with
+    a fresh 0x101 charge-request, then TSMS held + a DASH_CHG press. The
+    charger one-button proceed (fresh 0x101, no dc_bus gate, no dwell --
+    #312/#316) carries Precharge -> Transition -> Charge within a few
+    safety ticks, so those two are transient (sub-telemetry-cycle): we
+    wait for the stable Charge state. mode_locked latches Charger at the
+    (transient) Precharge and is retained into Charge. Returns the Charge
+    snapshot.
+
+    The `charger_0x101` fixture emits 0x101 from setup; `resume()` is
+    defensive in case an earlier step paused it. Charger is selected only
+    when, at the lock, the VCU 0x100 is absent AND 0x101 is fresh (#304 /
+    #316); VcuStale is Car-only (#304) so the lock is reachable.
+    """
+    acu_heartbeat["pause"]()             # VCU absent
+    charger_0x101["resume"]()            # 0x101 live + fresh
+    time.sleep(1.2)                      # > VcuFreshMs (1 s): VCU reads absent
+    tsms.assert_()
+    dash_chg.press()
+    return wait_for_state(
+        M.FsmState.CHARGE,
+        timeout_ms=int(ams_profile["state_transition_window_ms"]) + 1500)
+
+
 # ---------------------------------------------------------------------------
 # C-020 -- Start stays put with only one of the two inputs
 # ---------------------------------------------------------------------------
@@ -344,63 +370,200 @@ class TestC039aRunToErrorOnTsmsDrop:
 
 
 # ---------------------------------------------------------------------------
-# C-026 -- Transition -> Charge in charger mode (VCU heartbeat paused)
+# C-037 -- Charger entry: VCU absent + 0x101 fresh -> Precharge (Charger)
 # ---------------------------------------------------------------------------
-# Car-vs-charger is captured at Start -> Precharge from VCU 0x100
-# heartbeat freshness. Pause the heartbeat first, wait > kVcuFreshMs,
-# then assert TSMS+DASH_CHG -> mode locks to Charger. After the lock
-# fires the heartbeat can resume (or a oneshot bump) so precharge
-# actually completes; the locked mode does NOT re-evaluate.
+# Charger-vs-car is captured at the Start->Precharge lock. Under #304/#316
+# Charger requires BOTH the VCU 0x100 absent (> VcuFreshMs) AND the
+# operator charge-request 0x101 fresh (>= 2 Hz, magic 'CHRG'). #304 makes
+# VcuStale Car-only so the charger lock is actually reachable (the old
+# pre-emption that filed #302). VcuFreshMs absent alone is no longer
+# enough -- without 0x101 it defaults to Car (see C-038).
 
-class TestC037ChargerModeFsm:
+class TestC037ChargerEntry:
 
-    def test_c037(self, fresh_boot, tsms, dash_chg, acu_heartbeat,
-                  wait_for_state, pit_diag, ams_profile):
+    def test_c037_charger_entry(
+        self, fresh_boot, tsms, dash_chg, acu_heartbeat, charger_0x101,
+        wait_for_state, pit_diag, ams_profile):
         _require_inputs(tsms, dash_chg)
+        snap = _drive_to_charge(tsms, dash_chg, acu_heartbeat,
+                                charger_0x101, wait_for_state, ams_profile)
+        assert snap["state"] == M.FsmState.CHARGE
 
-        # Silence the VCU heartbeat for > kVcuFreshMs (1 s in firmware).
-        acu_heartbeat["pause"]()
-        time.sleep(1.2)
-
-        # Assert both inputs -> Start->Precharge with mode_locked = Charger.
-        tsms.assert_()
-        dash_chg.assert_()
-        wait_for_state(
-            M.FsmState.PRECHARGE,
-            timeout_ms=int(ams_profile["state_transition_window_ms"]) + 50)
-
-        # Per AMS #272 C-037: with VCU stale at the Start→Precharge
-        # edge, mode_locked must latch Charger (= 2) not Car. Read via
-        # pit-diag 0x6C0[1] — wait for a fresh scan so we don't get
-        # the pre-transition cached frame (same staleness fix as C-032).
+        # Reaching Charge proves the Charger lock fired -- Charge is
+        # unreachable except via a Charger-mode Precharge. mode_locked is
+        # retained from the (transient) lock; confirm it reads Charger (2).
         pit_diag.wait_for_scan()
         fsm_status = pit_diag.wait_for(M.ID_PIT_DIAG_FSM_STATUS)
         mode_locked = fsm_status[1]
         assert mode_locked == 2, (
-            f"0x6C0[1] mode_locked = {mode_locked} after Charger-mode "
-            "Start→Precharge; expected 2 (Charger). VCU was stale "
-            f"(paused 1.2 s > VcuFreshMs {ams_profile.get('vcu_fresh_ms', 1000)} ms) "
-            "so the latch should have caught Charger mode.")
+            f"0x6C0[1] mode_locked = {mode_locked} after a VCU-absent + "
+            "fresh-0x101 charger Charge; expected 2 (Charger). #304 makes "
+            "VcuStale Car-only so the charger lock is reachable (was #302).")
 
-        # Mode already locked; safe to drive DC bus high so precharge
-        # completes. Transition is a single-tick passthrough (#244) so
-        # the 20 ms test poll can't catch it; wait for Charge directly
-        # (Charger mode's analog of Run; both are unreachable from
-        # Precharge without going through Transition).
-        #
-        # Resume heartbeat + ramp bus to full pack. mode_locked is
-        # already latched to Charger, so the resumed heartbeat won't
-        # re-evaluate Car. Target = pack (not 96 %) so we have margin
-        # against pack jitter — see `_drive_to_run` for reasoning.
-        pack_V = int(ams_profile["stub_expected_pack_mV"]) // 1000
-        acu_heartbeat["resume"]()
-        acu_heartbeat["ramp_to"](pack_V)
 
-        # Hold elapses -> Charge (not Run, because mode_locked = Charger).
-        hold_ms = int(ams_profile["transition_hold_ms"])
+# ---------------------------------------------------------------------------
+# C-037b -- Charger one-button proceed: fresh 0x101 -> Charge (no dc_bus)
+# ---------------------------------------------------------------------------
+
+class TestC037bChargerOneButtonProceed:
+    """#316: in Charger mode the proceed Precharge -> Transition -> Charge
+    is gated by a still-fresh 0x101 (the connected charger), NOT by a
+    dc_bus voltage gate and NOT by a second button press. With 0x101 kept
+    fresh and no dc_bus injected, the FSM reaches Charge on its own."""
+
+    def test_c037b_charger_proceeds_to_charge(
+        self, fresh_boot, tsms, dash_chg, acu_heartbeat, charger_0x101,
+        wait_for_state, ams_profile):
+        _require_inputs(tsms, dash_chg)
+        # No dc_bus is ever injected: the proceed is gated by a still-fresh
+        # 0x101 alone (one button, no second press, no voltage gate).
+        # Reaching Charge is the assertion.
+        snap = _drive_to_charge(tsms, dash_chg, acu_heartbeat,
+                                charger_0x101, wait_for_state, ams_profile)
+        assert snap["state"] == M.FsmState.CHARGE
+
+
+# ---------------------------------------------------------------------------
+# C-037c -- Charger stale-0x101 timeout: charger unplugged -> Error
+# ---------------------------------------------------------------------------
+
+class TestC037cChargerStaleRequestTimeout:
+    """#316: AIR+ must never close into a disconnected charger. Enter
+    Charger Precharge, then STOP the 0x101 charge-request (charger
+    unplugged). Precharge must hold (not proceed to Charge) and latch
+    Error at PrechargeMaxMs (5 s); VcuStale stays Car-only (#304) so the
+    only thing that trips is the precharge timeout."""
+
+    def test_c037c_charger_stale_request_times_out(
+        self, fresh_boot, tsms, dash_chg, acu_heartbeat, charger_0x101,
+        wait_for_state, observe_acu, pit_diag, ams_profile):
+        _require_inputs(tsms, dash_chg)
+        # Lock Charger with a fresh 0x101, then "unplug" the charger the
+        # instant the press fires. If the proceed to Charge requires 0x101
+        # to stay fresh through precharge, AIR+ must NOT close: Precharge
+        # holds and times out to Error at PrechargeMaxMs.
+        acu_heartbeat["pause"]()
+        charger_0x101["resume"]()
+        time.sleep(1.2)
+        tsms.assert_()
+        dash_chg.press()
+        charger_0x101["pause"]()         # charger unplugged at the lock
+
+        # The charger proceed has no dwell (#312) and 0x101's freshness
+        # window may outlast the proceed latency. If Charge is reached
+        # before the stop bites, the bench simply can't hold Precharge this
+        # way -- skip with a precise reason rather than emit a misleading
+        # 5 s Error timeout. Watch ~1.5 s for a Charge breakthrough.
+        deadline = time.monotonic() + 1.5
+        while time.monotonic() < deadline:
+            f = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
+            if f is not None and \
+                    M.decode_telem_status(f.data)["state"] == M.FsmState.CHARGE:
+                pytest.skip(
+                    "Charger reached Charge before the post-press 0x101 stop "
+                    "took effect. With no precharge dwell (#312) and a 0x101 "
+                    "freshness window wider than the proceed latency, the "
+                    "bench cannot hold Precharge by stopping 0x101 after the "
+                    "press. C-037c needs a firmware test-hook (a forced "
+                    "precharge dwell, or 0x101-fresh re-checked at AIR+ "
+                    "close) to be benchable -- flag to the AMS team.")
+            time.sleep(0.05)
+
+        # Precharge held (no Charge breakthrough) -> must time out to Error.
         wait_for_state(
-            M.FsmState.CHARGE,
-            timeout_ms=hold_ms + int(ams_profile["state_transition_window_ms"]) + 100)
+            M.FsmState.ERROR,
+            timeout_ms=int(ams_profile["precharge_max_ms"])
+                       + int(ams_profile["tx_telemetry_period_ms"]) + 800)
+        pit_diag.wait_for_scan()
+        fsm_status = pit_diag.wait_for(M.ID_PIT_DIAG_FSM_STATUS)
+        fault_reason = fsm_status[6]
+        assert fault_reason == 12, (
+            f"0x6C0[6] fault_reason = {fault_reason} after the charger "
+            "stale-0x101 timeout; expected 12 (FsmError). AIR+ must never "
+            "close into a disconnected charger.")
+
+
+# ---------------------------------------------------------------------------
+# C-038 -- Dead VCU + no 0x101 locks Car (not Charger) -> VcuStale  (#311)
+# ---------------------------------------------------------------------------
+
+class TestC038DeadVcuLocksCarNotCharger:
+    """#311/#316: VCU silent AND no 0x101 on the bus must lock **Car**
+    (the safe default), not Charger. A Car lock arms VcuStale (#304), so
+    the chip faults to Error rather than silently energising a charge path
+    with no supervising VCU and no charger handshake."""
+
+    def test_c038_dead_vcu_no_request_locks_car(
+        self, fresh_boot, tsms, dash_chg, acu_heartbeat, wait_for_state,
+        pit_diag, ams_profile):
+        _require_inputs(tsms, dash_chg)
+
+        # VCU silent > VcuFreshMs. Crucially NO charger_0x101 fixture here,
+        # so 0x101 is absent and Charger is NOT eligible.
+        acu_heartbeat["pause"]()
+        time.sleep(1.2)
+
+        tsms.assert_()
+        dash_chg.press()
+        # The Car lock arms VcuStale immediately (VCU already stale), so
+        # Precharge may be a single-tick passthrough to Error. Wait for
+        # Error directly; mode_locked is retained through the trip (C-041).
+        wait_for_state(
+            M.FsmState.ERROR,
+            timeout_ms=int(ams_profile["vcu_stale_ms"])
+                       + int(ams_profile["state_transition_window_ms"])
+                       + int(ams_profile["tx_telemetry_period_ms"]) + 500)
+
+        pit_diag.wait_for_scan()
+        fsm_status = pit_diag.wait_for(M.ID_PIT_DIAG_FSM_STATUS)
+        mode_locked = fsm_status[1]
+        fault_reason = fsm_status[6]
+        assert mode_locked == 1, (
+            f"0x6C0[1] mode_locked = {mode_locked} with VCU silent and no "
+            "0x101; expected 1 (Car, the safe default). A Charger lock here "
+            "would energise a charge path with no VCU and no charger.")
+        assert fault_reason == 11, (
+            f"0x6C0[6] fault_reason = {fault_reason}; expected 11 (VcuStale) "
+            "-- the Car lock must arm VcuStale and fault, not proceed.")
+
+
+# ---------------------------------------------------------------------------
+# C-039c -- Charge SURVIVES a DASH_CHG release; exits only on TSMS drop
+# ---------------------------------------------------------------------------
+
+class TestC039cChargeSurvivesDashRelease:
+    """#316: like Run, Charge is sustained by TSMS alone. Releasing or
+    re-pressing DASH_CHG in Charge must NOT fault; only a TSMS drop ends
+    Charge."""
+
+    def test_c039c_charge_survives_dash_release(
+        self, fresh_boot, tsms, dash_chg, acu_heartbeat, charger_0x101,
+        observe_acu, wait_for_state, ams_profile):
+        _require_inputs(tsms, dash_chg)
+        snap = _drive_to_charge(tsms, dash_chg, acu_heartbeat,
+                                charger_0x101, wait_for_state, ams_profile)
+        assert snap["state"] == M.FsmState.CHARGE
+
+        # Release + spurious re-press of DASH must not end Charge.
+        dash_chg.deassert()
+        dash_chg.press()
+        window_ms = int(ams_profile["tx_telemetry_period_ms"]) * 2 + 300
+        deadline = time.monotonic() + window_ms / 1000.0
+        while time.monotonic() < deadline:
+            f = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
+            if f is not None:
+                state = M.decode_telem_status(f.data)["state"]
+                assert state == M.FsmState.CHARGE, (
+                    f"Charge did not survive a DASH_CHG release/press: now "
+                    f"in {M.FsmState.name(state)}. Charge is sustained by "
+                    "TSMS alone (#316).")
+            time.sleep(0.05)
+
+        # And a TSMS drop DOES end Charge -> Error (the only exit).
+        tsms.deassert()
+        wait_for_state(
+            M.FsmState.ERROR,
+            timeout_ms=int(ams_profile["state_transition_window_ms"]) + 100)
 
 
 # ---------------------------------------------------------------------------
