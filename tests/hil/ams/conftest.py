@@ -424,6 +424,8 @@ def wait_for_settled(observe_acu, ams_profile):
     Poll for a 0x4A0 where min_cell == the stub seed AND AMS_OK is high,
     so tests read a steady-state frame instead of racing the boot.
     """
+    from tools.firmware_test.ams import can_map as M
+
     def _wait(timeout_s: float = 8.0) -> dict:
         stub_mv = int(ams_profile["stub_cell_mV"])
         deadline = time.monotonic() + timeout_s
