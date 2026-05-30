@@ -47,7 +47,10 @@ state_transition_window_ms: 700       # observable window for FSM transitions.
                                      # the new state is up to a full
                                      # telemetry-cycle later. Window must
                                      # cover one cycle + slack.
-precharge_max_ms:         1500       # kPrechargeMaxMs (timeout → Error)
+precharge_max_ms:         5000       # kPrechargeMaxMs — deleted in #244,
+                                     # RE-ADDED in #307 as a 5 s safety
+                                     # timeout (Precharge → Error / FsmError).
+                                     # NOT the #309 dwell (reverted in #312).
 transition_hold_ms:       100        # kTransitionHoldMs (DC bus held → Run)
 vcu_stale_ms:             200        # kVcuStaleMs
 i_stale_ms:               200        # kIStaleMs
