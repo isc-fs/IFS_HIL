@@ -163,9 +163,15 @@ class TestF063AmsOkFollowsFsm:
         if tsms is None or dash_chg is None:
             pytest.skip("tsms/dash_chg fixture unavailable")
 
-        # Start: AMS_OK HIGH
-        assert relays_readback.read()["ams_ok"], (
-            f"AMS_OK LOW at fresh-boot Start. Voltages: {relays_readback.read_volts()}")
+        # Start: AMS_OK HIGH. The firmware (AMS #299/#301) asserts the
+        # SDC-enable only after the boot grace *and* the first full BMS
+        # poll confirm health -- ~4.4 s post-boot on the bench -- so it's
+        # LOW for a beat after `fresh_boot` returns. Poll for the rise
+        # rather than reading immediately, or we race the settle.
+        s = relays_readback.poll_for(lambda x: x["ams_ok"], timeout_s=6.0)
+        assert s is not None, (
+            f"AMS_OK never went HIGH in Start within 6 s. "
+            f"Voltages: {relays_readback.read_volts()}")
 
         # Trip Error via TSMS drop after reaching Run
         _drive_to_run(tsms, dash_chg, acu_heartbeat, wait_for_state, ams_profile)
