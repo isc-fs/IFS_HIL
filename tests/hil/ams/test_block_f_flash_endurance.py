@@ -16,7 +16,7 @@ the variant rows.
 | F-074 | Bus-busy flash (heartbeat + noise during flash)    |  20    | implemented |
 | F-075 | Mixed-version round-trip (semver A → B → A)        |  10    | implemented (needs AMS_FIRMWARE_BIN_B) |
 | F-076 | Stale-latch flash (TSMS-drop fault stim, no SWD)   | 5×2    | HIL_CLEAR impl; flight variant needs flight build |
-| F-077 | Interrupted-flash recovery (yank VBUS mid-flash)   |  10    | scaffolded — needs precise mid-flash power yank |
+| F-077 | Interrupted-flash recovery (yank VBUS mid-flash)   |  10    | implemented (coarse relay yank; recovery soak) |
 | F-078 | Power-off duration sweep ({1, 5, 30, 60, 300} s)   | 5×5    | implemented |
 | F-079 | DISCOVER latency long-soak                         | 1000   | implemented |
 | F-080 | Trigger-from-Error (TSMS-drop → Error → trigger)  |  20    | implemented |
@@ -58,12 +58,6 @@ SCAFFOLD_PENDING = (
     "Scaffold — implement once Block F soak budget is approved. "
     "Wire to tools/flash_ams_via_trigger.py and bump kpi_plugin "
     "counters per cycle. See docs/ams-hil/test-plan-v1.5.0.md §1."
-)
-
-INTERRUPT_FLASH_PENDING = (
-    "Blocked on programmable PSU control (TCA relay K_n alone is too "
-    "coarse-grained -- need to yank between two FLASH_WRITE frames, "
-    "not at sector boundaries) or a precise relay-yank fixture."
 )
 
 FLIGHT_BUILD_VARIANT_PENDING = (
@@ -705,14 +699,149 @@ class TestF076StaleLatchFlash:
 # ---------------------------------------------------------------------------
 
 class TestF077InterruptedFlashRecovery:
+    """Yank carrier power mid-flash, 10x, and prove the unit always
+    recovers: after an interrupted flash the BL must stay reachable and a
+    clean image must boot afterwards. An interrupted flash must never brick
+    the BL or strand an unrecoverable half-flashed app.
+
+    Caveat (why this isn't the literal #245 F-077): the relay K_n yank is
+    coarse -- it lands *somewhere* in the multi-second flash, not between
+    two specific FLASH_WRITE frames -- so it can't probe partial-sector
+    write atomicity. PR #127 Test A already covers the single-shot "never
+    jump a half-flashed image" invariant (host loss); this is the soak that
+    the *recovery* path survives repeated power loss mid-write. The
+    interrupting flash uses --no-diff so it always writes every sector
+    (a same-image diff-flash would finish before the cut).
+
+    10 cycles scaled by --soak-cycle-scale.
+    """
+
     @pytest.mark.soak
-    @pytest.mark.skip(reason=INTERRUPT_FLASH_PENDING)
-    def test_f077_interrupted_flash_recovery(self):
-        # Sketch: yank VBUS between two FLASH_WRITE frames; power back
-        # up; verify next BL cycle either re-flashes successfully or
-        # reports NO_VALID_APP and stays in BL (NEVER jumps to a
-        # half-flashed image).
-        pass
+    def test_f077_interrupted_flash_recovery(self, mlc_powered, observe_acu,
+                                             ams_profile, soak_scale):
+        import os
+        import threading
+        from broker.server import BrokerClient
+        from tools import flash_ams_via_trigger as fl
+        from tests.hil.ams import kpi_plugin
+
+        img = os.environ.get("AMS_FIRMWARE_BIN", "/tmp/AMS.bin")
+        if not os.path.exists(img):
+            pytest.skip(f"AMS image not staged at {img}")
+        exp = _fwid_from_bin(img)
+        cycles = _cycles(10, soak_scale)
+        client = BrokerClient(os.environ.get("HIL_BROKER_SOCKET",
+                                             "/run/hil-broker/broker.sock"))
+        relay_bit = mlc_powered["relay_bit"]
+        off_s = float(ams_profile["power_cycle_off_s"])
+        telem_budget_s = (int(ams_profile["boot_grace_ms"])
+                          + int(ams_profile["tx_telemetry_period_ms"])
+                          + 2500) / 1000.0
+
+        def _relay(on: bool):
+            client.call("tca.write_pin", addr=0x20, port=0,
+                        pin=relay_bit, value=on)
+
+        def _reach_bl() -> bool:
+            """Get the unit into a flashable BL after an interrupted flash.
+            BL already up (half-flashed app failed its validity check) ->
+            done. Else the app is intact and running -> trigger it back.
+            Else a clean power-cycle (a half/hung app can't auto-jump, so
+            the BL stays)."""
+            if fl.discover_bl():
+                return True
+            fl.send_trigger()
+            time.sleep(2.0)
+            if fl.discover_bl():
+                return True
+            _relay(False)
+            time.sleep(off_s)
+            _relay(True)
+            time.sleep(1.0)
+            return fl.discover_bl()
+
+        failures: list[tuple[int, str]] = []
+        try:
+            for i in range(cycles):
+                # 1) Into BL, start a full-sector flash, then yank mid-write.
+                fl.send_trigger()
+                time.sleep(2.0)
+                if not fl.discover_bl():
+                    failures.append((i, "pre-yank: BL not reachable"))
+                    continue
+                kpi_plugin.bump_bl_trigger()
+
+                holder: dict = {}
+
+                def _do_flash():
+                    holder["r"] = fl.flash(img, jump=False, force_all=True,
+                                           timeout_ms=4000)
+
+                th = threading.Thread(target=_do_flash, daemon=True)
+                th.start()
+
+                # Vary the cut point across the soak so it lands at different
+                # places in the write (1.2 .. 3.2 s in).
+                time.sleep(1.2 + 0.5 * (i % 5))
+                _relay(False)                 # power gone mid-write
+                kpi_plugin.bump_power_cycle()
+                # Flasher errors out on the dead bus (power is OFF the whole
+                # time, so no zombie flasher survives into recovery).
+                th.join(timeout=30.0)
+                time.sleep(off_s)
+                observe_acu.clear()
+                _relay(True)
+
+                # 2) Recover: reach the BL and flash a known-good image.
+                if not _reach_bl():
+                    failures.append(
+                        (i, "UNRECOVERABLE: BL unreachable after interrupted "
+                            "flash + power-cycle -- unit bricked"))
+                    continue
+                # Recovery: force every sector (a --diff flash would diff
+                # against the half-written/garbage chip and might skip a
+                # sector it wrongly thinks already matches). Do NOT warm
+                # --jump: an immediate jump after a force-write doesn't
+                # reliably boot the app on this BL, but a cold power-cycle
+                # always does (F-070/078), so write-then-cold-boot.
+                r = fl.flash(img, jump=True, force_all=True)
+                if r.returncode != 0:
+                    failures.append((i, f"recovery flash rc={r.returncode}: "
+                                        f"{(r.stderr or '')[-100:]}"))
+                    continue
+                kpi_plugin.bump_flash_cycle()
+                # Boot the freshly written app. Try the warm --jump first --
+                # this ALSO lets the flash/metadata commit settle, so we never
+                # cut power the instant the flasher returns (doing so lands
+                # mid-commit and corrupts the validity marker). If the warm
+                # jump didn't boot, the commit is settled by now, so a clean
+                # power-cycle cold-boots it reliably.
+                observe_acu.clear()
+                first = _wait_first_telem(observe_acu, telem_budget_s + 1.0)
+                if first is None:
+                    _relay(False)
+                    time.sleep(off_s)
+                    observe_acu.clear()
+                    _relay(True)
+                    first = _wait_first_telem(observe_acu, telem_budget_s + 1.0)
+                if first is None:
+                    tail = (r.stdout or "")[-160:].replace(chr(10), " | ")
+                    failures.append((i, f"no 0x4A0 after recovery (warm jump "
+                                        f"+ cold boot) [flash said: {tail}]"))
+                    continue
+                # 3) Recovered identity intact (no lingering half-image).
+                fwid = _enable_and_read_fwid(observe_acu, ams_profile)
+                if exp is not None and fwid is not None and fwid != exp:
+                    failures.append((i, f"post-recovery 0x6C6={fwid.hex()} != "
+                                        f"embedded {exp.hex()}"))
+                    continue
+                kpi_plugin.bump_block_f_cycle()
+        finally:
+            client.close()
+
+        assert not failures, (
+            f"{len(failures)} of {cycles} interrupted-flash cycles failed to "
+            f"recover cleanly. First few: {failures[:5]}")
 
 
 # ---------------------------------------------------------------------------
