@@ -54,12 +54,6 @@ def _cycles(n: int, scale: float) -> int:
     return max(1, int(n * scale))
 
 
-SCAFFOLD_PENDING = (
-    "Scaffold — implement once Block F soak budget is approved. "
-    "Wire to tools/flash_ams_via_trigger.py and bump kpi_plugin "
-    "counters per cycle. See docs/ams-hil/test-plan-v1.5.0.md §1."
-)
-
 FLIGHT_BUILD_VARIANT_PENDING = (
     "Blocked on a flight-build (AMS_HIL_CLEAR_ERROR_LATCH=0) artifact "
     "fixture. Either add the build to the bench's CI matrix or ship "
