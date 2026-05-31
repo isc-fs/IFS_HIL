@@ -9,18 +9,18 @@ the variant rows.
 
 | Test  | What it checks                                     | Cycles | Status      |
 |-------|----------------------------------------------------|--------|-------------|
-| F-070 | Cold soak: power-cycle → BL → app jump → first 4A0 | 100    | scaffolded  |
-| F-071 | CAN-trigger soak: trigger → BL → flash → jump      | 100    | scaffolded  |
-| F-072 | Cross-trigger mix: alternate cold + CAN reboots    | 100    | scaffolded  |
-| F-073 | CRC integrity per cycle (can-flasher readback-CRC) | 100    | scaffolded  |
-| F-074 | Bus-busy flash (heartbeat + noise during flash)    |  20    | scaffolded  |
-| F-075 | Mixed-version round-trip (v1.5 → v1.4-eol → v1.5)  |  10    | scaffolded — needs v1.4-eol image fixture |
+| F-070 | Cold soak: power-cycle → BL → app jump → first 4A0 | 100    | implemented |
+| F-071 | CAN-trigger soak: trigger → BL → flash → jump      | 100    | implemented |
+| F-072 | Cross-trigger mix: alternate cold + CAN reboots    | 100    | implemented |
+| F-073 | CRC integrity per cycle (can-flasher readback-CRC) | 100    | implemented |
+| F-074 | Bus-busy flash (heartbeat + noise during flash)    |  20    | implemented |
+| F-075 | Mixed-version round-trip (semver A → B → A)        |  10    | scaffolded — needs a 2nd-version .bin fixture |
 | F-076 | Stale-latch flash (TSMS-drop fault stim, no SWD)   | 5×2    | HIL_CLEAR impl; flight variant needs flight build |
-| F-077 | Interrupted-flash recovery (yank VBUS mid-flash)   |  10    | scaffolded — needs programmable PSU or relay yank |
-| F-078 | Power-off duration sweep ({1, 5, 30, 60, 300} s)   | 5×5    | scaffolded  |
-| F-079 | DISCOVER latency long-soak                         | 1000   | scaffolded  |
-| F-080 | Trigger-from-Error (HIL_CLEAR=0)                   |  20    | scaffolded — needs flight build variant |
-| F-081 | Bench-noise immunity (200 std-ID/s + valid trigger)|  60 s  | scaffolded  |
+| F-077 | Interrupted-flash recovery (yank VBUS mid-flash)   |  10    | scaffolded — needs precise mid-flash power yank |
+| F-078 | Power-off duration sweep ({1, 5, 30, 60, 300} s)   | 5×5    | implemented |
+| F-079 | DISCOVER latency long-soak                         | 1000   | implemented |
+| F-080 | Trigger-from-Error (TSMS-drop → Error → trigger)  |  20    | implemented |
+| F-081 | Bench-noise immunity (200 std-ID/s + valid trigger)|  60 s  | implemented |
 
 All rows are marked with `@pytest.mark.soak` so the default suite
 stays fast — opt-in via `pytest -m soak`. Cycle counts can be
@@ -91,6 +91,55 @@ def _ams_bin_path() -> str:
         pytest.skip(f"AMS app .bin not found at {p} -- set AMS_FIRMWARE_BIN "
                     "or stage /tmp/AMS.bin.")
     return str(p)
+
+
+def _wait_first_telem(observe_acu, budget_s: float):
+    """Poll for the first `0x4A0` status frame within `budget_s`; return the
+    CapturedFrame or None. The caller is responsible for clearing the
+    observer first so a stale pre-event frame isn't returned."""
+    deadline = time.monotonic() + budget_s
+    while time.monotonic() < deadline:
+        f = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
+        if f is not None:
+            return f
+        time.sleep(0.02)
+    return None
+
+
+def _bus_noise(channel: str, stop, *, base_id: int = 0x500,
+               rate_hz: float = 200.0) -> None:
+    """Flood `channel` with filler standard-ID frames until `stop` (a
+    threading.Event) is set. IDs sweep 0x500..0x5FF -- deliberately clear
+    of every ID the AMS app or BL parses (0x002 trigger, 0x100 VCU, 0x101
+    charger, 0x4A0/0x4A2 telemetry, 0x6C0/0x6C6 diag, 0x01N BL node) -- and
+    never carry the B0 07 AD 11 trigger payload. So nothing is
+    *protocol*-poked; the stressor is raw bus load: arbitration pressure
+    plus RX-filter churn on the AMS. Runs best-effort -- any send error is
+    swallowed so a transient bus hiccup can't crash the soak."""
+    from tools.firmware_test.acu_stim import AcuStim
+    try:
+        stim = AcuStim(channel=channel)
+        stim.start()
+    except Exception:
+        return
+    period = 1.0 / rate_hz
+    n = 0
+    try:
+        while not stop.is_set():
+            try:
+                stim.send_raw(base_id + (n & 0xFF),
+                              bytes([n & 0xFF, 0x11, 0x22, 0x33,
+                                     0x44, 0x55, 0x66, 0x77]),
+                              is_extended_id=False)
+            except Exception:
+                pass
+            n += 1
+            time.sleep(period)
+    finally:
+        try:
+            stim.stop()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -375,13 +424,75 @@ class TestF073CrcIntegrity:
 # ---------------------------------------------------------------------------
 
 class TestF074BusBusyFlash:
+    """The F-071 trigger-flash flow, but the flash bus is never idle: a
+    filler thread floods can2 at ~200 frames/s for the whole flash. In a
+    car the carrier bus carries other MLC traffic during a reflash, so the
+    BL's flash protocol must be robust to RX churn -- the flash and the
+    post-jump app boot must both still succeed.
+
+    The can0 heartbeat is *paused* across the flash window: while the app
+    is in the BL it listens on can2 only, so 0x100 frames on can0 go
+    un-ACKed and would bus-off the stim socket (F-080 lesson). It resumes
+    once the app is back up and ACKing can0.
+    """
+
     @pytest.mark.soak
-    @pytest.mark.skip(reason=SCAFFOLD_PENDING)
-    def test_f074_bus_busy_flash(self):
-        # Sketch: run F-071 while acu_heartbeat injects 0x100#6801 at
-        # 20 Hz AND a noise thread sends 0x002-adjacent IDs. BL flash
-        # + app boot must still succeed.
-        pass
+    def test_f074_bus_busy_flash(self, mlc_powered, observe_acu,
+                                 ams_profile, soak_scale, acu_heartbeat):
+        import threading
+        from tools import flash_ams_via_trigger as fl
+        from tests.hil.ams import kpi_plugin
+
+        n_cycles = _cycles(20, soak_scale)
+        bin_path = _ams_bin_path()
+        flash_bus = ams_profile["bus_bms_bl"]
+        telem_budget_s = (int(ams_profile["boot_grace_ms"])
+                          + int(ams_profile["tx_telemetry_period_ms"])
+                          + 2500) / 1000.0
+        failures: list[tuple[int, str]] = []
+        for i in range(n_cycles):
+            fl.send_trigger()
+            time.sleep(2.0)
+            if not fl.discover_bl():
+                failures.append((i, "BL not reachable after 002 trigger"))
+                continue
+            kpi_plugin.bump_bl_trigger()
+
+            # App is in the BL now (RX on can2). Quiet the can0 heartbeat,
+            # flood the flash bus, flash + jump under load.
+            acu_heartbeat["pause"]()
+            stop = threading.Event()
+            noise = threading.Thread(
+                target=_bus_noise, args=(flash_bus, stop),
+                kwargs={"rate_hz": 200.0}, daemon=True)
+            noise.start()
+            observe_acu.clear()
+            try:
+                r = fl.flash(bin_path, jump=True)
+            finally:
+                stop.set()
+                noise.join(timeout=2.0)
+            if r.returncode != 0:
+                failures.append((i, f"flash under bus load rc={r.returncode}: "
+                                    f"{(r.stderr or '')[-120:]}"))
+                acu_heartbeat["resume"]()
+                continue
+            kpi_plugin.bump_flash_cycle()
+
+            first = _wait_first_telem(observe_acu, telem_budget_s + 1.0)
+            acu_heartbeat["resume"]()
+            if first is None:
+                failures.append((i, "no 0x4A0 after busy-bus flash"))
+                continue
+            st = M.decode_telem_status(first.data)["state"]
+            if st not in (M.FsmState.START, M.FsmState.ERROR):
+                failures.append((i, f"first state={M.FsmState.name(st)}"))
+            kpi_plugin.bump_block_f_cycle()
+
+        assert not failures, (
+            f"{len(failures)} of {n_cycles} bus-busy flash cycles failed "
+            "(flash + boot must survive a loaded flash bus). "
+            f"First few: {failures[:5]}")
 
 
 # ---------------------------------------------------------------------------
@@ -504,14 +615,57 @@ class TestF077InterruptedFlashRecovery:
 # ---------------------------------------------------------------------------
 
 class TestF078PowerOffDurationSweep:
+    """F-070's cold-boot invariant swept across power-off durations. A
+    too-short off window (bus caps not fully discharged, BL sees a warm
+    reset) is a classic source of a confused boot; a very long one shakes
+    out any RTC-backed / brown-out-latch assumption. Every duration must
+    still yield a clean first 0x4A0 in Start/Error.
+
+    5 cycles per duration (scaled by --soak-cycle-scale). NB the 300 s
+    point is deliberately long -- at full scale this row alone parks the
+    bench for ~30 min on the 300 s case.
+    """
+
     @pytest.mark.soak
     @pytest.mark.parametrize("off_s", [1, 5, 30, 60, 300])
-    @pytest.mark.skip(reason=SCAFFOLD_PENDING)
-    def test_f078_power_off_duration(self, off_s):
-        # Sketch: F-070 but with mlc_power_off_s varying. Post-#226
-        # HIL build clears the latch every boot regardless of duration;
-        # flight build retains it.
-        pass
+    def test_f078_power_off_duration(self, off_s, mlc_powered, observe_acu,
+                                     ams_profile, soak_scale):
+        import os
+        from broker.server import BrokerClient
+        from tests.hil.ams import kpi_plugin
+
+        cycles = _cycles(5, soak_scale)
+        client = BrokerClient(os.environ.get("HIL_BROKER_SOCKET",
+                                             "/run/hil-broker/broker.sock"))
+        relay_bit = mlc_powered["relay_bit"]
+        telem_budget_s = (int(ams_profile["boot_grace_ms"])
+                          + int(ams_profile["tx_telemetry_period_ms"])
+                          + 2500) / 1000.0
+        failures: list[tuple[int, str]] = []
+        try:
+            for i in range(cycles):
+                client.call("tca.write_pin", addr=0x20, port=0,
+                            pin=relay_bit, value=False)
+                time.sleep(off_s)
+                observe_acu.clear()
+                client.call("tca.write_pin", addr=0x20, port=0,
+                            pin=relay_bit, value=True)
+                kpi_plugin.bump_power_cycle()
+                first = _wait_first_telem(observe_acu, telem_budget_s + 1.0)
+                if first is None:
+                    failures.append((i, f"off={off_s}s: no 0x4A0 within budget"))
+                    continue
+                st = M.decode_telem_status(first.data)["state"]
+                if st not in (M.FsmState.START, M.FsmState.ERROR):
+                    failures.append(
+                        (i, f"off={off_s}s: first state={M.FsmState.name(st)}"))
+                kpi_plugin.bump_block_f_cycle()
+        finally:
+            client.close()
+
+        assert not failures, (
+            f"off={off_s}s: {len(failures)} of {cycles} cold-boot cycles "
+            f"failed. First few: {failures[:5]}")
 
 
 # ---------------------------------------------------------------------------
@@ -519,13 +673,94 @@ class TestF078PowerOffDurationSweep:
 # ---------------------------------------------------------------------------
 
 class TestF079DiscoverLatencyLongSoak:
+    """1000× boot → reach BL → time a DISCOVER. Each cycle cold-boots the
+    carrier, lets the app come up, then fires the 0x002 trigger to park the
+    BL (a bare power-cycle won't sit in BL -- with a valid app the BL
+    auto-jumps; the trigger's BKP magic is what holds it) and times the
+    DISCOVER.
+
+    Hard gate: zero missed responses across the whole soak -- DISCOVER is
+    the operator's confirmation the BL is reachable before a flash, so it
+    must never silently drop. Soft gate: DISCOVER latency must not drift
+    upward over the soak (p99 within 1.5x median).
+
+    NB the recorded latency is wall-time around `discover_bl()`, so it
+    includes the can-flasher *process* startup (~hundreds of ms) on top of
+    the on-wire BL response -- it's a soak-drift metric, not an absolute
+    on-wire number. mlc_boot_settle_s (0.5 s) is the relay-settle delay,
+    not a DISCOVER budget, so it is not asserted against.
+    """
+
     @pytest.mark.soak
-    @pytest.mark.skip(reason=SCAFFOLD_PENDING)
-    def test_f079_discover_latency_long_soak(self):
-        # Sketch: 1000× BL DISCOVER (no app re-flash). Each cycle:
-        # power-cycle, time DISCOVER, record_bl_discover_latency_ms.
-        # Assert p99 < mlc_boot_settle_s, zero missed responses.
-        pass
+    def test_f079_discover_latency_long_soak(self, mlc_powered, observe_acu,
+                                             ams_profile, soak_scale):
+        import os
+        import statistics
+        from broker.server import BrokerClient
+        from tools import flash_ams_via_trigger as fl
+        from tests.hil.ams import kpi_plugin
+
+        n_cycles = _cycles(1000, soak_scale)
+        client = BrokerClient(os.environ.get("HIL_BROKER_SOCKET",
+                                             "/run/hil-broker/broker.sock"))
+        relay_bit = mlc_powered["relay_bit"]
+        off_s = float(ams_profile["power_cycle_off_s"])
+        telem_budget_s = (int(ams_profile["boot_grace_ms"])
+                          + int(ams_profile["tx_telemetry_period_ms"])
+                          + 2500) / 1000.0
+        lat_ms: list[float] = []
+        misses: list[tuple[int, str]] = []
+        try:
+            for i in range(n_cycles):
+                # Cold-boot so each DISCOVER starts from a fresh BL.
+                client.call("tca.write_pin", addr=0x20, port=0,
+                            pin=relay_bit, value=False)
+                time.sleep(off_s)
+                observe_acu.clear()
+                client.call("tca.write_pin", addr=0x20, port=0,
+                            pin=relay_bit, value=True)
+                kpi_plugin.bump_power_cycle()
+                if _wait_first_telem(observe_acu, telem_budget_s + 1.0) is None:
+                    misses.append((i, "app never booted (no 0x4A0 pre-trigger)"))
+                    continue
+
+                # Trigger into the BL and park it, then time the DISCOVER.
+                fl.send_trigger()
+                time.sleep(2.0)
+                kpi_plugin.bump_bl_trigger()
+                t0 = time.monotonic()
+                ok = fl.discover_bl()
+                dt_ms = (time.monotonic() - t0) * 1000.0
+                if not ok:
+                    misses.append((i, f"DISCOVER missed (waited {dt_ms:.0f} ms)"))
+                    continue
+                lat_ms.append(dt_ms)
+                kpi_plugin.record_bl_discover_latency_ms(dt_ms)
+                kpi_plugin.bump_block_f_cycle()
+
+            # The final DISCOVER leaves the BL parked (no jump). Boot the app
+            # back so the next row doesn't start stranded in the BL.
+            _bin = os.environ.get("AMS_FIRMWARE_BIN", "/tmp/AMS.bin")
+            if os.path.exists(_bin):
+                try:
+                    fl.flash(_bin, jump=True)
+                except Exception:
+                    pass
+        finally:
+            client.close()
+
+        assert not misses, (
+            f"{len(misses)} of {n_cycles} boot->BL DISCOVER cycles missed the "
+            f"response (DISCOVER must never silently drop). "
+            f"First few: {misses[:5]}")
+        if len(lat_ms) >= 10:
+            ls = sorted(lat_ms)
+            med = statistics.median(ls)
+            p99 = ls[min(len(ls) - 1, int(round(0.99 * (len(ls) - 1))))]
+            assert p99 <= med * 1.5, (
+                f"DISCOVER latency drifting over the soak: median={med:.0f} ms, "
+                f"p99={p99:.0f} ms across {len(lat_ms)} cycles "
+                "-- the BL discovery path is degrading.")
 
 
 # ---------------------------------------------------------------------------
@@ -640,11 +875,81 @@ class TestF080TriggerFromError:
 # ---------------------------------------------------------------------------
 
 class TestF081BenchNoiseImmunity:
+    """Flood can0 (the trigger bus) with ~200 filler standard-ID frames/s
+    while the app runs, then check two invariants:
+
+      1. zero spurious reboots -- 0x4A0 telemetry never gaps beyond a boot
+         cycle (worst inter-frame period stays under 0.75 x boot_grace), so
+         no filler frame was mistaken for a reset/trigger; and
+      2. a *valid* 0x002 trigger still reaches the BL right after the noise
+         window -- the RX filter rejected the noise without going deaf to
+         the real trigger.
+
+    Duration is 60 s at full scale, floored at 5 s and scaled by
+    --soak-cycle-scale. Leaves the bench running: it reflashes + jumps the
+    app back after the trigger check.
+    """
+
     @pytest.mark.soak
-    @pytest.mark.skip(reason=SCAFFOLD_PENDING)
-    def test_f081_bench_noise_immunity(self):
-        # Sketch: spawn a thread sending 200 random standard-ID
-        # frames/s on can0 (none of which match the trigger payload).
-        # Confirm: zero spurious reboots; valid trigger still works
-        # at the end of the window.
-        pass
+    def test_f081_bench_noise_immunity(self, mlc_powered, observe_acu,
+                                       acu_heartbeat, ams_profile, soak_scale):
+        import threading
+        from tools import flash_ams_via_trigger as fl
+        from tests.hil.ams import kpi_plugin
+
+        bus = ams_profile["bus_acu"]
+        telem_period = int(ams_profile["tx_telemetry_period_ms"])
+        boot_grace = int(ams_profile["boot_grace_ms"])
+        dur_s = max(5.0, 60.0 * float(soak_scale))
+        telem_budget_s = (boot_grace + telem_period + 2500) / 1000.0
+
+        # App must already be streaming telemetry before we can judge a
+        # "spurious reboot" against a baseline of steady 0x4A0.
+        if _wait_first_telem(observe_acu, telem_budget_s) is None:
+            pytest.skip("app not streaming 0x4A0 -- can't run noise-immunity")
+
+        # Flood can0 with filler for the window.
+        stop = threading.Event()
+        noise = threading.Thread(target=_bus_noise, args=(bus, stop),
+                                 kwargs={"base_id": 0x500, "rate_hz": 200.0},
+                                 daemon=True)
+        observe_acu.clear()
+        t_start = time.time()
+        noise.start()
+        try:
+            time.sleep(dur_s)
+        finally:
+            stop.set()
+            noise.join(timeout=2.0)
+
+        # (1) No reboot: normal cadence is telem_period (500 ms); a reboot
+        # silences 0x4A0 for >= boot_grace (2 s). 0.75 x boot_grace (1500 ms)
+        # cleanly separates jittered-normal from a reset.
+        n_seen = observe_acu.count(M.ID_TELEM_STATUS, extended=False,
+                                   since=t_start)
+        worst_gap = observe_acu.max_period_ms(M.ID_TELEM_STATUS,
+                                              extended=False, since=t_start)
+        gap_ceiling = boot_grace * 0.75
+        assert n_seen >= 2, (
+            f"only {n_seen} 0x4A0 frames during the {dur_s:.0f}s noise window "
+            "-- telemetry stalled (possible reboot or bus saturation).")
+        assert worst_gap is not None and worst_gap <= gap_ceiling, (
+            f"0x4A0 gapped {worst_gap:.0f} ms during noise (ceiling "
+            f"{gap_ceiling:.0f} ms) -- a spurious reboot or telemetry stall "
+            "under bench noise.")
+
+        # (2) Valid trigger still works after the noise.
+        fl.send_trigger()
+        time.sleep(2.0)
+        assert fl.discover_bl(), (
+            "valid 0x002 trigger ignored after the noise window -- the RX "
+            "filter may be wedged by sustained bench noise.")
+        kpi_plugin.bump_bl_trigger()
+
+        # Leave the bench in a running state: reflash + jump back to the app.
+        r = fl.flash(_ams_bin_path(), jump=True)
+        assert r.returncode == 0, (
+            f"post-noise restore flash failed rc={r.returncode}: "
+            f"{(r.stderr or '')[-120:]}")
+        kpi_plugin.bump_flash_cycle()
+        kpi_plugin.bump_block_f_cycle()
