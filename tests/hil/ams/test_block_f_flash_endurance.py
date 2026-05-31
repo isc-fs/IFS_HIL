@@ -364,6 +364,11 @@ class TestF080TriggerFromError:
                 observe_acu.clear()
                 client.call("tca.write_pin", addr=0x20, port=0,
                             pin=relay_bit, value=True)
+                # Reset dc_bus to quiescent before resuming: a value left
+                # ramped at pack from the previous cycle pre-satisfies
+                # precharge, so the next drive blows past Precharge (or
+                # stalls) -- _drive_to_run expects to ramp up from 0.
+                acu_heartbeat["set_volts"](0)
                 acu_heartbeat["resume"]()
 
                 # Wait for the app to boot + emit telemetry before driving --
