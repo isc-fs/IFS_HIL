@@ -364,15 +364,16 @@ class TestF080TriggerFromError:
                 observe_acu.clear()
                 client.call("tca.write_pin", addr=0x20, port=0,
                             pin=relay_bit, value=True)
-                # Reset dc_bus to quiescent before resuming: a value left
-                # ramped at pack from the previous cycle pre-satisfies
-                # precharge, so the next drive blows past Precharge (or
-                # stalls) -- _drive_to_run expects to ramp up from 0.
+                # Reset dc_bus to quiescent: a value left ramped at pack from
+                # the previous cycle pre-satisfies precharge, so the next
+                # drive blows past Precharge -- _drive_to_run ramps from 0.
                 acu_heartbeat["set_volts"](0)
-                acu_heartbeat["resume"]()
 
-                # Wait for the app to boot + emit telemetry before driving --
-                # the #316 press edge is lost if fired before the app is
+                # Wait for the app to boot (heartbeat stays PAUSED -- RX works
+                # regardless; resuming into BL/boot fills the can0 TX buffer
+                # and breaks the heartbeat thread for good -> VCU goes stale
+                # -> the drive below faults to Error instead of reaching Run).
+                # The #316 press edge is also lost if fired before the app is
                 # ready (0x4A0 is grace-gated to ~boot_grace + first poll).
                 booted = False
                 bd = time.monotonic() + 5.0
@@ -384,6 +385,7 @@ class TestF080TriggerFromError:
                 if not booted:
                     failures.append((i, "no telemetry within 5 s of power-on"))
                     continue
+                acu_heartbeat["resume"]()   # app up + ACKing -> safe to send
 
                 # 2) Drive into Run, then TSMS drop → Error.
                 try:
