@@ -79,6 +79,20 @@ FLIGHT_BUILD_VARIANT_PENDING = (
 )
 
 
+def _ams_bin_path() -> str:
+    """Path to the AMS app .bin to (re)flash in the trigger-flash soak
+    rows. Default /tmp/AMS.bin; override with AMS_FIRMWARE_BIN. Skips the
+    row if the image isn't staged (mirrors A-003's ams_firmware_bin, but
+    module-local so the F-block doesn't depend on a Block-A fixture)."""
+    import os
+    from pathlib import Path
+    p = Path(os.environ.get("AMS_FIRMWARE_BIN", "/tmp/AMS.bin"))
+    if not p.exists():
+        pytest.skip(f"AMS app .bin not found at {p} -- set AMS_FIRMWARE_BIN "
+                    "or stage /tmp/AMS.bin.")
+    return str(p)
+
+
 # ---------------------------------------------------------------------------
 # F-070 — Cold soak (100×)
 # ---------------------------------------------------------------------------
@@ -170,12 +184,57 @@ class TestF071CanTriggerSoak:
     """
 
     @pytest.mark.soak
-    @pytest.mark.skip(reason=SCAFFOLD_PENDING)
-    def test_f071_can_trigger_soak(self):
-        # Sketch: drives tools/flash_ams_via_trigger.py per cycle;
-        # bumps kpi_plugin.bump_bl_trigger() + bump_flash_cycle() +
-        # bump_block_f_cycle().
-        pass
+    def test_f071_can_trigger_soak(self, mlc_powered,
+                                   observe_acu, ams_profile, soak_scale):
+        from tools import flash_ams_via_trigger as fl
+        from tests.hil.ams import kpi_plugin
+
+        n_cycles = _cycles(100, soak_scale)
+        bin_path = _ams_bin_path()
+        telem_budget_s = (int(ams_profile["boot_grace_ms"])
+                          + int(ams_profile["tx_telemetry_period_ms"])
+                          + 2500) / 1000.0
+        failures: list[tuple[int, str]] = []
+        for i in range(n_cycles):
+            # 1) Trigger the running app into the BL (002 on FDCAN1). If the
+            #    chip is already in BL the trigger is a no-op -- discover
+            #    confirms BL either way.
+            fl.send_trigger()
+            time.sleep(2.0)
+            if not fl.discover_bl():
+                failures.append((i, "BL not reachable after 002 trigger"))
+                continue
+            kpi_plugin.bump_bl_trigger()
+
+            # 2) Flash a fresh image + jump.
+            observe_acu.clear()
+            r = fl.flash(bin_path, jump=True)
+            if r.returncode != 0:
+                failures.append((i, f"flash rc={r.returncode}: "
+                                    f"{(r.stderr or '')[-120:]}"))
+                continue
+            kpi_plugin.bump_flash_cycle()
+
+            # 3) App boots after the jump -> first 0x4A0.
+            first = None
+            deadline = time.monotonic() + telem_budget_s + 1.0
+            while time.monotonic() < deadline:
+                f = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
+                if f is not None:
+                    first = f
+                    break
+                time.sleep(0.02)
+            if first is None:
+                failures.append((i, "no 0x4A0 after flash+jump"))
+                continue
+            st = M.decode_telem_status(first.data)["state"]
+            if st not in (M.FsmState.START, M.FsmState.ERROR):
+                failures.append((i, f"first state={M.FsmState.name(st)}"))
+            kpi_plugin.bump_block_f_cycle()
+
+        assert not failures, (
+            f"{len(failures)} of {n_cycles} CAN-trigger flash cycles failed. "
+            f"First few: {failures[:5]}")
 
 
 # ---------------------------------------------------------------------------
@@ -184,11 +243,77 @@ class TestF071CanTriggerSoak:
 
 class TestF072CrossTriggerMix:
     @pytest.mark.soak
-    @pytest.mark.skip(reason=SCAFFOLD_PENDING)
-    def test_f072_cross_trigger_mix(self):
-        # Sketch: alternate F-070 and F-071 over 100 cycles. Both
-        # reset paths must produce a clean boot.
-        pass
+    def test_f072_cross_trigger_mix(self, mlc_powered,
+                                    observe_acu, ams_profile, soak_scale):
+        import os
+        from broker.server import BrokerClient
+        from tools import flash_ams_via_trigger as fl
+        from tests.hil.ams import kpi_plugin
+
+        n_cycles = _cycles(100, soak_scale)
+        bin_path = _ams_bin_path()
+        client = BrokerClient(os.environ.get("HIL_BROKER_SOCKET",
+                                             "/run/hil-broker/broker.sock"))
+        relay_bit = mlc_powered["relay_bit"]
+        off_s = float(ams_profile["power_cycle_off_s"])
+        telem_budget_s = (int(ams_profile["boot_grace_ms"])
+                          + int(ams_profile["tx_telemetry_period_ms"])
+                          + 2500) / 1000.0
+        failures: list[tuple[int, str]] = []
+
+        def _wait_telem():
+            deadline = time.monotonic() + telem_budget_s + 1.0
+            while time.monotonic() < deadline:
+                f = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
+                if f is not None:
+                    return f
+                time.sleep(0.02)
+            return None
+
+        try:
+            for i in range(n_cycles):
+                if i % 2 == 0:
+                    # Even cycle: cold power-cycle (F-070 path).
+                    client.call("tca.write_pin", addr=0x20, port=0,
+                                pin=relay_bit, value=False)
+                    time.sleep(off_s)
+                    observe_acu.clear()
+                    client.call("tca.write_pin", addr=0x20, port=0,
+                                pin=relay_bit, value=True)
+                    kpi_plugin.bump_power_cycle()
+                    first = _wait_telem()
+                    if first is None:
+                        failures.append((i, "cold-boot: no 0x4A0"))
+                        continue
+                else:
+                    # Odd cycle: CAN-trigger reflash (F-071 path).
+                    fl.send_trigger()
+                    time.sleep(2.0)
+                    if not fl.discover_bl():
+                        failures.append((i, "trigger: BL not reachable"))
+                        continue
+                    kpi_plugin.bump_bl_trigger()
+                    observe_acu.clear()
+                    r = fl.flash(bin_path, jump=True)
+                    if r.returncode != 0:
+                        failures.append((i, f"trigger: flash rc={r.returncode}"))
+                        continue
+                    kpi_plugin.bump_flash_cycle()
+                    first = _wait_telem()
+                    if first is None:
+                        failures.append((i, "trigger: no 0x4A0"))
+                        continue
+                st = M.decode_telem_status(first.data)["state"]
+                if st not in (M.FsmState.START, M.FsmState.ERROR):
+                    failures.append((i, f"first state={M.FsmState.name(st)}"))
+                kpi_plugin.bump_block_f_cycle()
+        finally:
+            client.close()
+
+        assert not failures, (
+            f"{len(failures)} of {n_cycles} cross-trigger cycles failed "
+            "(both reset paths must boot clean). "
+            f"First few: {failures[:5]}")
 
 
 # ---------------------------------------------------------------------------
@@ -197,15 +322,52 @@ class TestF072CrossTriggerMix:
 
 class TestF073CrcIntegrity:
     @pytest.mark.soak
-    @pytest.mark.skip(reason=SCAFFOLD_PENDING)
-    def test_f073_crc_integrity(self):
-        # After each F-071 cycle, CRC-compare 0x08020000..0x080DFFFF
-        # against the source image via `can-flasher verify` (or
-        # `flash --verify-after`, a readback-CRC over CAN through the
-        # BL's FlashReadCrc/FlashVerify ops — no SWD). The trigger soak
-        # flasher runs --no-verify-after for speed; F-073 is the row
-        # that turns the readback-CRC back on. Zero mismatches / 100.
-        pass
+    def test_f073_crc_integrity(self, mlc_powered,
+                                observe_acu, ams_profile, soak_scale):
+        from tools import flash_ams_via_trigger as fl
+        from tests.hil.ams import kpi_plugin
+
+        n_cycles = _cycles(100, soak_scale)
+        bin_path = _ams_bin_path()
+        telem_budget_s = (int(ams_profile["boot_grace_ms"])
+                          + int(ams_profile["tx_telemetry_period_ms"])
+                          + 2500) / 1000.0
+        failures: list[tuple[int, str]] = []
+        for i in range(n_cycles):
+            fl.send_trigger()
+            time.sleep(2.0)
+            if not fl.discover_bl():
+                failures.append((i, "BL not reachable after 002 trigger"))
+                continue
+            kpi_plugin.bump_bl_trigger()
+
+            # verify_after=True turns the readback-CRC back on (the BL's
+            # FlashReadCrc/FlashVerify ops over CAN, no SWD). A CRC mismatch
+            # makes can-flasher exit non-zero -- that's the F-073 signal.
+            observe_acu.clear()
+            r = fl.flash(bin_path, jump=True, verify_after=True)
+            if r.returncode != 0:
+                failures.append((i, f"flash/verify rc={r.returncode}: "
+                                    f"{(r.stderr or '')[-120:]}"))
+                continue
+            kpi_plugin.bump_flash_cycle()
+
+            first = None
+            deadline = time.monotonic() + telem_budget_s + 1.0
+            while time.monotonic() < deadline:
+                f = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
+                if f is not None:
+                    first = f
+                    break
+                time.sleep(0.02)
+            if first is None:
+                failures.append((i, "no 0x4A0 after verified flash"))
+                continue
+            kpi_plugin.bump_block_f_cycle()
+
+        assert not failures, (
+            f"{len(failures)} of {n_cycles} CRC-verified flash cycles failed "
+            f"(any readback-CRC mismatch counts). First few: {failures[:5]}")
 
 
 # ---------------------------------------------------------------------------
