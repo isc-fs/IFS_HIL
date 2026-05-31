@@ -1137,10 +1137,27 @@ class TestF081BenchNoiseImmunity:
         dur_s = max(5.0, 60.0 * float(soak_scale))
         telem_budget_s = (boot_grace + telem_period + 2500) / 1000.0
 
-        # App must already be streaming telemetry before we can judge a
-        # "spurious reboot" against a baseline of steady 0x4A0.
+        # App must be streaming telemetry to baseline "no spurious reboot".
+        # A prior soak row may have parked the unit in the BL (F-079 and
+        # F-080 both end there), so cold-boot once if there's no telemetry.
         if _wait_first_telem(observe_acu, telem_budget_s) is None:
-            pytest.skip("app not streaming 0x4A0 -- can't run noise-immunity")
+            import os
+            from broker.server import BrokerClient
+            client = BrokerClient(os.environ.get("HIL_BROKER_SOCKET",
+                                                 "/run/hil-broker/broker.sock"))
+            try:
+                relay_bit = mlc_powered["relay_bit"]
+                client.call("tca.write_pin", addr=0x20, port=0,
+                            pin=relay_bit, value=False)
+                time.sleep(float(ams_profile["power_cycle_off_s"]))
+                observe_acu.clear()
+                client.call("tca.write_pin", addr=0x20, port=0,
+                            pin=relay_bit, value=True)
+            finally:
+                client.close()
+            if _wait_first_telem(observe_acu, telem_budget_s + 1.0) is None:
+                pytest.skip("app not streaming 0x4A0 even after a cold boot "
+                            "-- can't run noise-immunity")
 
         # Flood can0 with filler for the window.
         stop = threading.Event()
