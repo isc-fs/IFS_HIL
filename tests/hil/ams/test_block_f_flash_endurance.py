@@ -14,7 +14,7 @@ the variant rows.
 | F-072 | Cross-trigger mix: alternate cold + CAN reboots    | 100    | implemented |
 | F-073 | CRC integrity per cycle (can-flasher readback-CRC) | 100    | implemented |
 | F-074 | Bus-busy flash (heartbeat + noise during flash)    |  20    | implemented |
-| F-075 | Mixed-version round-trip (semver A → B → A)        |  10    | scaffolded — needs a 2nd-version .bin fixture |
+| F-075 | Mixed-version round-trip (semver A → B → A)        |  10    | implemented (needs AMS_FIRMWARE_BIN_B) |
 | F-076 | Stale-latch flash (TSMS-drop fault stim, no SWD)   | 5×2    | HIL_CLEAR impl; flight variant needs flight build |
 | F-077 | Interrupted-flash recovery (yank VBUS mid-flash)   |  10    | scaffolded — needs precise mid-flash power yank |
 | F-078 | Power-off duration sweep ({1, 5, 30, 60, 300} s)   | 5×5    | implemented |
@@ -58,12 +58,6 @@ SCAFFOLD_PENDING = (
     "Scaffold — implement once Block F soak budget is approved. "
     "Wire to tools/flash_ams_via_trigger.py and bump kpi_plugin "
     "counters per cycle. See docs/ams-hil/test-plan-v1.5.0.md §1."
-)
-
-V1_4_EOL_IMAGE_PENDING = (
-    "Blocked on a checked-in v1.4.0-eol .bin fixture under "
-    "tests/hil/ams/fixtures/. Add once the AMS team publishes a "
-    "frozen v1.4 image."
 )
 
 INTERRUPT_FLASH_PENDING = (
@@ -140,6 +134,45 @@ def _bus_noise(channel: str, stop, *, base_id: int = 0x500,
             stim.stop()
         except Exception:
             pass
+
+
+def _fwid_from_bin(path: str):
+    """Derive the 8-byte on-wire 0x6C6 firmware-ID from a flashed image's
+    embedded `bl_fwinfo_t` record (app-relative offset 0x400, the same
+    record A-009/D-043 check). Semver bytes are LE u32s at rec+0x08/0x0C/
+    0x10 (major/minor/patch), the git hash is 4 bytes at rec+0x18, the node
+    id is the low byte at rec+0x38. Packed the way the firmware builds the
+    0x6C6 payload -> the bench can assert the chip reports exactly what was
+    flashed. Returns None if the record isn't present."""
+    from pathlib import Path
+    data = Path(path).read_bytes()
+    rec = data[0x400:0x440]
+    if len(rec) < 0x40:
+        return None
+    semver = bytes([rec[0x08], rec[0x0C], rec[0x10]])
+    git = bytes(rec[0x18:0x1C])
+    node = rec[0x38]
+    return semver + git + bytes([node])
+
+
+def _enable_and_read_fwid(observe_acu, ams_profile, timeout_s: float = 3.0):
+    """Re-enable the pit-diag burst (a reflashed app boots with it OFF) and
+    return the 8-byte 0x6C6 firmware-ID, or None on timeout. Mirrors the
+    `pit_diag` fixture's enable (0xDEADBEEF -> 0x7F0) but per-cycle, since
+    F-075 reboots the app on every flash."""
+    import subprocess
+    bus = ams_profile["bus_acu"]
+    magic = M.PIT_DIAG_ENABLE_MAGIC.hex().upper()
+    subprocess.run(["cansend", bus, f"{M.ID_PIT_DIAG_CMD:03X}#{magic}"],
+                   check=False, timeout=2.0)
+    observe_acu.clear()
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        f = observe_acu.last(M.ID_PIT_DIAG_FW_ID, extended=False)
+        if f is not None:
+            return bytes(f.data[: f.dlc])
+        time.sleep(0.02)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -500,14 +533,86 @@ class TestF074BusBusyFlash:
 # ---------------------------------------------------------------------------
 
 class TestF075MixedVersionRoundTrip:
+    """Round-trip between two firmware versions and confirm the on-wire
+    firmware-ID (pit-diag 0x6C6) exactly matches whichever image is
+    currently flashed -- a reflash must never leave a stale identity.
+
+    Image A defaults to the bench image (AMS_FIRMWARE_BIN / /tmp/AMS.bin);
+    image B is a second version staged at AMS_FIRMWARE_BIN_B (default
+    /tmp/AMS_v161.bin), built from the same source with a bumped VERSION +
+    a distinct -DGIT_HASH. The expected 0x6C6 for each is *derived from the
+    image's own embedded bl_fwinfo_t record*, so the assertion is "the chip
+    reports exactly what we flashed," not a hard-coded constant. Skips
+    cleanly if image B isn't staged.
+
+    10 round-trips (B then A) scaled by --soak-cycle-scale.
+    """
+
     @pytest.mark.soak
-    @pytest.mark.skip(reason=V1_4_EOL_IMAGE_PENDING)
-    def test_f075_mixed_version_round_trip(self):
-        # Sketch: flash v1.5.0, verify firmware_info, flash v1.4.0-eol,
-        # verify firmware_info, flash v1.5.0 again, verify. 10 round
-        # trips. firmware_info.fw_version_* must read correctly each
-        # time and the unit boots cleanly.
-        pass
+    def test_f075_mixed_version_round_trip(self, mlc_powered, observe_acu,
+                                           ams_profile, soak_scale):
+        import os
+        from tools import flash_ams_via_trigger as fl
+        from tests.hil.ams import kpi_plugin
+
+        img_a = os.environ.get("AMS_FIRMWARE_BIN", "/tmp/AMS.bin")
+        img_b = os.environ.get("AMS_FIRMWARE_BIN_B", "/tmp/AMS_v161.bin")
+        if not os.path.exists(img_a):
+            pytest.skip(f"image A not staged at {img_a}")
+        if not os.path.exists(img_b):
+            pytest.skip(f"image B (2nd version) not staged at {img_b} -- set "
+                        "AMS_FIRMWARE_BIN_B; build from a VERSION bump + a "
+                        "distinct -DGIT_HASH.")
+        exp_a = _fwid_from_bin(img_a)
+        exp_b = _fwid_from_bin(img_b)
+        if exp_a is None or exp_b is None:
+            pytest.skip("could not read a firmware_info record from an image")
+        if exp_a[:3] == exp_b[:3]:
+            pytest.skip(f"images are the same version (A semver="
+                        f"{tuple(exp_a[:3])} == B) -- F-075 needs two distinct.")
+
+        telem_budget_s = (int(ams_profile["boot_grace_ms"])
+                          + int(ams_profile["tx_telemetry_period_ms"])
+                          + 2500) / 1000.0
+        cycles = _cycles(10, soak_scale)
+
+        def _flash_and_fwid(img):
+            fl.send_trigger()
+            time.sleep(2.0)
+            if not fl.discover_bl():
+                return None, "BL not reachable after 002 trigger"
+            kpi_plugin.bump_bl_trigger()
+            observe_acu.clear()
+            r = fl.flash(img, jump=True)
+            if r.returncode != 0:
+                return None, f"flash rc={r.returncode}: {(r.stderr or '')[-100:]}"
+            kpi_plugin.bump_flash_cycle()
+            if _wait_first_telem(observe_acu, telem_budget_s + 1.0) is None:
+                return None, "no 0x4A0 after flash+jump"
+            fwid = _enable_and_read_fwid(observe_acu, ams_profile)
+            if fwid is None:
+                return None, "no 0x6C6 firmware-ID after flash"
+            return fwid, None
+
+        failures: list[tuple[int, str]] = []
+        # Round-trip B -> A each cycle; the on-wire ID must match the flashed
+        # image's embedded record every single time.
+        for i in range(cycles):
+            for label, img, exp in (("B", img_b, exp_b), ("A", img_a, exp_a)):
+                fwid, err = _flash_and_fwid(img)
+                if err is not None:
+                    failures.append((i, f"{label}: {err}"))
+                    continue
+                if fwid != exp:
+                    failures.append(
+                        (i, f"{label}: 0x6C6={fwid.hex()} != embedded "
+                            f"{exp.hex()} (stale/wrong firmware-ID)"))
+                    continue
+                kpi_plugin.bump_block_f_cycle()
+
+        assert not failures, (
+            f"{len(failures)} of {cycles} B<->A round-trips reported a "
+            f"wrong/stale firmware-ID. First few: {failures[:5]}")
 
 
 # ---------------------------------------------------------------------------
