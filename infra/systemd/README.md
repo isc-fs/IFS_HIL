@@ -26,7 +26,7 @@ sudo systemctl enable --now hil-psu-on.service
 
 ## `hil-can-up.service`
 
-Brings `can0`, `can1`, `can2` up at 500 kbps with `txqueuelen=1000`
+Brings `can0`, `can1`, `can2` up at 1 Mbps with `txqueuelen=1000`
 and `restart-ms=200`. The queue-length default of 10 overflows during
 `can-flasher flash` and returns `ENOBUFS` mid-sector; 1000 comfortably
 sustains a full-speed flash write. `restart-ms=200` enables the
