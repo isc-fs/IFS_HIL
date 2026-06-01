@@ -21,8 +21,8 @@ C-044 as scaffolding-gap or flight-build-only):
 | C-032   | Start → Precharge on TSMS && DASH_CHG (mode locks Car)         | implemented |
 | C-033   | Precharge → Transition once DC bus hits 95 % of pack           | implemented |
 | C-037   | Charger mode FSM: VCU paused → Start→Precharge→Transition→Charge | implemented |
-| C-038   | Run → Error (sticky) on TSMS drop                              | implemented |
-| C-039   | Run → Error (sticky) on DASH_CHG drop                          | implemented |
+| C-039a  | Run → Start (non-latching) on TSMS drop, then re-arm (#327)    | implemented |
+| C-039c  | Charge → Start (non-latching) on TSMS drop (#327)              | implemented |
 | C-041   | mode_locked retained mid-Run when VCU killed                   | implemented (post-#251) |
 | C-042   | 0x4A2[5] cockpit byte across all 6 FSM states                  | implemented (post-#251) |
 | C-043   | Error sticky ≥ 5 s after heartbeat resumes                     | implemented |
@@ -32,6 +32,12 @@ All TSMS/DASH_CHG-driven tests skip cleanly when either fixture is
 unavailable (`tsms_*` / `dash_chg_*` keys absent from
 `ams_profile.yaml` -- happens until the bench wires PF9/PF10 through
 the TCA9555).
+
+Reworked for AMS dev @ f414c436 (#327 + #330): a TSMS drop is now a
+NON-latching de-energise to Start (C-039a Run, C-039c Charge), not a
+sticky Error -- so C-042/C-048 induce Error via cell-UV (inject_cell_v)
+instead. New Block C-330 rows C-049/C-050 cover the DC-bus-collapse
+de-energise (Run -> Start, debounced, non-latching).
 """
 
 from __future__ import annotations
@@ -348,25 +354,53 @@ class TestC034CarPrechargeTimeout:
             "predicate (VcuStale/current) tripped before the 5 s timeout.")
 
 # ---------------------------------------------------------------------------
-# C-039a -- Run -> Error (latched) on TSMS drop
+# C-039a -- Run -> Start (non-latching de-energise) on TSMS drop  (#327)
 # ---------------------------------------------------------------------------
-# Operator chose conservative semantics in PR #187: every AIR-open event
-# is a sticky fault requiring power-cycle. Run / Charge no longer have
-# a "clean shutdown back to Start" path. TSMS (the held master switch) is
-# the ONLY thing that ends Run -- releasing DASH_CHG does not (C-039b).
+# #327 (SAFETY, inverts the old PR #187 semantics): a TSMS drop is a NORMAL
+# operator de-energise, NOT a fault. AMS_OK is the AMS's own SDC relay
+# UPSTREAM of TSMS; latching on a TSMS drop would drop AMS_OK and leave the
+# loop unrecloseable without a power-cycle, violating the cockpit
+# stop/restart-unaided rule. So TSMS off -> AIRs open -> FSM returns to
+# Start (AMS_OK stays health-only/HIGH), and the driver re-arms with a
+# DASH_CHG press -- no reset. Mirrors host SIL test_sil_tsms_drop_in_run_rearms.
 
-class TestC039aRunToErrorOnTsmsDrop:
+class TestC039aRunToStartOnTsmsDrop:
 
-    def test_c039a_tsms_drop(self, fresh_boot, tsms, dash_chg, acu_heartbeat,
-                             wait_for_state, ams_profile):
+    def test_c039a_tsms_drop_rearms(self, fresh_boot, tsms, dash_chg,
+                                    acu_heartbeat, wait_for_state, observe_acu,
+                                    pit_diag, ams_profile):
         _require_inputs(tsms, dash_chg)
         _drive_to_run(tsms, dash_chg, acu_heartbeat, wait_for_state,
                       ams_profile)
 
+        # TSMS drop -> non-latching de-energise back to Start (NOT Error).
         tsms.deassert()
         wait_for_state(
-            M.FsmState.ERROR,
-            timeout_ms=int(ams_profile["state_transition_window_ms"]) + 50)
+            M.FsmState.START,
+            timeout_ms=int(ams_profile["state_transition_window_ms"]) + 100)
+
+        # Non-latching: no fault_reason, mode latch released to Undecided,
+        # AMS_OK stays HIGH (it never dropped -- health-only, not Error-driven).
+        pit_diag.wait_for_scan()
+        fsm_status = pit_diag.wait_for(M.ID_PIT_DIAG_FSM_STATUS)
+        assert fsm_status[6] == 0, (
+            f"0x6C0[6] fault_reason = {fsm_status[6]} after a TSMS drop in "
+            "Run; expected 0 (None). #327: a TSMS drop must NOT latch Error.")
+        assert fsm_status[1] == 0, (
+            f"0x6C0[1] mode_locked = {fsm_status[1]} after de-energise to "
+            "Start; expected 0 (Undecided) -- the mode latch releases so a "
+            "re-arm re-locks it.")
+        assert fsm_status[3] == 1, (
+            f"0x6C0[3] AMS_OK = {fsm_status[3]} after a TSMS drop; expected 1 "
+            "(HIGH). A non-latching de-energise keeps AMS_OK health-only.")
+
+        # Re-arm WITHOUT a reset: bus back to quiescent, then TSMS held + a
+        # fresh DASH_CHG press drives Start -> Precharge -> Run again
+        # (_drive_to_run re-asserts TSMS, presses, ramps, and waits for Run).
+        acu_heartbeat["set_volts"](0)
+        observe_acu.clear()
+        _drive_to_run(tsms, dash_chg, acu_heartbeat, wait_for_state,
+                      ams_profile)
 
 
 # ---------------------------------------------------------------------------
@@ -559,10 +593,12 @@ class TestC039cChargeSurvivesDashRelease:
                     "TSMS alone (#316).")
             time.sleep(0.05)
 
-        # And a TSMS drop DOES end Charge -> Error (the only exit).
+        # And a TSMS drop de-energises Charge back to Start (non-latching,
+        # #327) -- not Error. Like Run, a TSMS drop in Charge is an operator
+        # stop, not a fault.
         tsms.deassert()
         wait_for_state(
-            M.FsmState.ERROR,
+            M.FsmState.START,
             timeout_ms=int(ams_profile["state_transition_window_ms"]) + 100)
 
 
@@ -725,7 +761,7 @@ class TestC042CockpitByteAcrossStates:
 
     def test_c042_cockpit_byte_per_state(
         self, fresh_boot, observe_acu, tsms, dash_chg, acu_heartbeat,
-        wait_for_state, ams_profile
+        pico_emu, wait_for_state, ams_profile
     ):
         _require_inputs(tsms, dash_chg)
 
@@ -763,11 +799,13 @@ class TestC042CockpitByteAcrossStates:
                                   + 200)
         observed["Run"] = _decode(_cockpit_now())
 
-        # 4. Run → Error via TSMS drop.
-        tsms.deassert()
+        # 4. Run → Error via a real latched fault (cell under-voltage). A
+        #    TSMS drop is now a non-latching de-energise (#327); keep TSMS
+        #    held and trip a genuine predicate to reach the Error state.
+        pico_emu.inject_cell_v(module=0, cell=10, mV=2500)  # < 2800 -> UV
         wait_for_state(M.FsmState.ERROR,
-                       timeout_ms=int(ams_profile["state_transition_window_ms"])
-                                  + 200)
+                       timeout_ms=int(ams_profile["tx_telemetry_period_ms"]) * 2
+                                  + 500)
         observed["Error"] = _decode(_cockpit_now())
 
         # Assertions: sentinel always set; mode_locked = Car (1) once
@@ -784,7 +822,7 @@ class TestC042CockpitByteAcrossStates:
         # TSMS bit follows the fixture (held) state.
         assert observed["Start"]["tsms"] is False
         assert observed["Precharge"]["tsms"] is True
-        assert observed["Error"]["tsms"] is False    # we dropped it
+        assert observed["Error"]["tsms"] is True     # TSMS still held (cell-UV trip)
 
         # DASH_CHG bit 0 is the LIVE GPIO level (#316/#317), NOT the
         # consumed edge. We drive via momentary press(), so the line is
@@ -913,8 +951,8 @@ class TestC048AmsOkLowOnError:
     Error is latched is a #317 hard-fail."""
 
     def test_c048_ams_ok_drops_on_error(
-        self, fresh_boot, tsms, dash_chg, acu_heartbeat, relays_readback,
-        wait_for_state, ams_profile):
+        self, fresh_boot, tsms, dash_chg, acu_heartbeat, pico_emu,
+        relays_readback, wait_for_state, ams_profile):
         _require_inputs(tsms, dash_chg)
         if relays_readback is None:
             pytest.skip("relays_readback disabled (no ams_ok_adc_* keys)")
@@ -925,11 +963,13 @@ class TestC048AmsOkLowOnError:
         high = relays_readback.poll_for(lambda x: x["ams_ok"], timeout_s=6.0)
         assert high is not None, "AMS_OK never HIGH in healthy Run (pre-trip)"
 
-        # Trip Error via TSMS drop (sticky AIR-open fault, C-039a).
-        tsms.deassert()
+        # Trip a REAL latched Error: cell under-voltage. A TSMS drop is now a
+        # non-latching de-energise (#327) that keeps AMS_OK HIGH, so only a
+        # genuine predicate fault exercises the AMS_OK-drops-on-Error contract.
+        pico_emu.inject_cell_v(module=0, cell=10, mV=2500)  # < 2800 -> UV
         wait_for_state(
             M.FsmState.ERROR,
-            timeout_ms=int(ams_profile["state_transition_window_ms"]) + 100)
+            timeout_ms=int(ams_profile["tx_telemetry_period_ms"]) * 2 + 500)
 
         # AMS_OK must drop LOW promptly (10 ms firmware contract; allow a
         # telemetry cycle of bench + ADC latency) and then STAY low.
@@ -943,3 +983,100 @@ class TestC048AmsOkLowOnError:
         assert held is None, (
             "AMS_OK went back HIGH while Error was still latched -- the SDC "
             "enable must stay LOW for the sticky-Error session.")
+
+
+# ===========================================================================
+# Block C-330 -- DC-bus collapse de-energises Run/Charge  (NEW per #330)
+# ===========================================================================
+# #330 (SAFETY): the cockpit SDC can pull the AIRs open without the AMS
+# sensing it directly, but the VCU keeps reporting dc_bus_V. A sustained
+# collapse of that bus while we think we're in Run means AIR+ would be
+# reclosing onto a dead bus on the operator's release. The FSM treats a
+# debounced collapse as a NON-LATCHING de-energise back to Start (like a
+# TSMS drop, #327) so a re-arm re-runs precharge rather than reclosing AIR+.
+
+
+class TestC049BusCollapseDeEnergises:
+    """#330: in Run (Car), drive the VCU-reported DC bus below
+    BusCollapsePercent of pack for longer than BusCollapseConfirmTicks ->
+    FSM de-energises to Start (non-latching), AMS_OK stays HIGH, no fault
+    reason; then restore the bus and re-arm -> Precharge -> Run, precharge
+    re-runs, no reset.
+
+    NB BusCollapsePercent / BusCollapseConfirmTicks are COMMISSION
+    placeholders (50 % / ~200 ms); the collapse target here is half the
+    threshold so it stays valid if the percent is retuned downward.
+    """
+
+    def test_c049_bus_collapse_to_start_rearms(
+        self, fresh_boot, tsms, dash_chg, acu_heartbeat, wait_for_state,
+        observe_acu, pit_diag, ams_profile):
+        _require_inputs(tsms, dash_chg)
+        _drive_to_run(tsms, dash_chg, acu_heartbeat, wait_for_state,
+                      ams_profile)
+
+        # Collapse the VCU dc_bus to half the threshold (well under
+        # BusCollapsePercent of pack), sustained past the debounce.
+        pack_V = int(ams_profile["stub_expected_pack_mV"]) // 1000
+        collapse_V = (pack_V * int(ams_profile["bus_collapse_percent"])
+                      // 100) // 2
+        acu_heartbeat["set_volts"](collapse_V)
+        wait_for_state(
+            M.FsmState.START,
+            timeout_ms=int(ams_profile["bus_collapse_confirm_ms"])
+                       + int(ams_profile["state_transition_window_ms"])
+                       + int(ams_profile["tx_telemetry_period_ms"]) + 400)
+
+        # Non-latching: no fault reason, AMS_OK stays HIGH.
+        pit_diag.wait_for_scan()
+        fsm_status = pit_diag.wait_for(M.ID_PIT_DIAG_FSM_STATUS)
+        assert fsm_status[6] == 0, (
+            f"0x6C0[6] fault_reason = {fsm_status[6]} after a DC-bus collapse "
+            "in Run; expected 0 (None). #330 de-energises, it must NOT latch "
+            "Error.")
+        assert fsm_status[3] == 1, (
+            f"0x6C0[3] AMS_OK = {fsm_status[3]} after a bus collapse; expected "
+            "1 (HIGH) -- a non-latching de-energise keeps AMS_OK health-only.")
+
+        # Restore the bus + re-arm WITHOUT a reset: Start -> Precharge -> Run,
+        # precharge re-runs (_drive_to_run ramps from 0).
+        acu_heartbeat["set_volts"](0)
+        observe_acu.clear()
+        _drive_to_run(tsms, dash_chg, acu_heartbeat, wait_for_state,
+                      ams_profile)
+
+
+class TestC050BriefDipNoFalseTrip:
+    """#330: a DC-bus dip SHORTER than BusCollapseConfirmTicks must NOT trip
+    the de-energise -- the collapse is debounced so transient VCU-reported
+    sag (a single dropped 0x100, inverter ripple) doesn't bounce Run."""
+
+    def test_c050_brief_dip_stays_run(
+        self, fresh_boot, tsms, dash_chg, acu_heartbeat, wait_for_state,
+        observe_acu, ams_profile):
+        _require_inputs(tsms, dash_chg)
+        _drive_to_run(tsms, dash_chg, acu_heartbeat, wait_for_state,
+                      ams_profile)
+
+        pack_V = int(ams_profile["stub_expected_pack_mV"]) // 1000
+        collapse_V = (pack_V * int(ams_profile["bus_collapse_percent"])
+                      // 100) // 2
+        # Dip for half the confirm time (< debounce), then restore.
+        dip_ms = int(ams_profile["bus_collapse_confirm_ms"]) // 2
+        acu_heartbeat["set_volts"](collapse_V)
+        time.sleep(dip_ms / 1000.0)
+        acu_heartbeat["set_volts"](pack_V)
+
+        # State must stay Run across the next couple telemetry cycles.
+        window_ms = int(ams_profile["tx_telemetry_period_ms"]) * 2 + 300
+        deadline = time.monotonic() + window_ms / 1000.0
+        while time.monotonic() < deadline:
+            f = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
+            if f is not None:
+                state = M.decode_telem_status(f.data)["state"]
+                assert state == M.FsmState.RUN, (
+                    f"a sub-debounce DC-bus dip tripped the FSM to "
+                    f"{M.FsmState.name(state)}; #330 must debounce "
+                    f"{int(ams_profile['bus_collapse_confirm_ms'])} ms before "
+                    "de-energising.")
+            time.sleep(0.05)

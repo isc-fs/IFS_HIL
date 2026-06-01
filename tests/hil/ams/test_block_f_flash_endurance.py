@@ -15,11 +15,11 @@ the variant rows.
 | F-073 | CRC integrity per cycle (can-flasher readback-CRC) | 100    | implemented |
 | F-074 | Bus-busy flash (heartbeat + noise during flash)    |  20    | implemented |
 | F-075 | Mixed-version round-trip (semver A → B → A)        |  10    | implemented (needs AMS_FIRMWARE_BIN_B) |
-| F-076 | Stale-latch flash (TSMS-drop fault stim, no SWD)   | 5×2    | HIL_CLEAR impl; flight variant needs flight build |
+| F-076 | Stale-latch (cell-UV stim, warm-reset persist #324)| 1×2    | implemented (flight leg needs AMS_FLIGHT_BIN) |
 | F-077 | Interrupted-flash recovery (yank VBUS mid-flash)   |  10    | implemented (coarse relay yank; recovery soak) |
 | F-078 | Power-off duration sweep ({1, 5, 30, 60, 300} s)   | 5×5    | implemented |
 | F-079 | DISCOVER latency long-soak                         | 1000   | implemented |
-| F-080 | Trigger-from-Error (TSMS-drop → Error → trigger)  |  20    | implemented |
+| F-080 | Trigger-from-Error (cell-UV → Error → trigger)    |  20    | implemented |
 | F-081 | Bench-noise immunity (200 std-ID/s + valid trigger)|  60 s  | implemented |
 
 All rows are marked with `@pytest.mark.soak` so the default suite
@@ -52,13 +52,6 @@ from tools.firmware_test.ams import can_map as M
 # `--soak-cycle-scale` (default 1.0).
 def _cycles(n: int, scale: float) -> int:
     return max(1, int(n * scale))
-
-
-FLIGHT_BUILD_VARIANT_PENDING = (
-    "Blocked on a flight-build (AMS_HIL_CLEAR_ERROR_LATCH=0) artifact "
-    "fixture. Either add the build to the bench's CI matrix or ship "
-    "a checked-in flight-mode AMS.bin alongside the HIL one."
-)
 
 
 def _ams_bin_path() -> str:
@@ -161,6 +154,90 @@ def _enable_and_read_fwid(observe_acu, ams_profile, timeout_s: float = 3.0):
             return bytes(f.data[: f.dlc])
         time.sleep(0.02)
     return None
+
+
+def _flash_and_coldboot(fl, img, observe_acu, telem_budget_s):
+    """Flash `img` (all sectors, no jump) via the trigger path, then
+    cold-boot it. A warm jump right after a force-write doesn't reliably
+    boot this BL (F-077), so write then power-cycle. Returns the first
+    post-boot FSM state, or None."""
+    fl.send_trigger()
+    time.sleep(2.0)
+    if not fl.discover_bl():
+        return None
+    r = fl.flash(img, jump=False, force_all=True)
+    if r.returncode != 0:
+        return None
+    observe_acu.clear()
+    fl.power_cycle(slot=2)
+    f = _wait_first_telem(observe_acu, telem_budget_s)
+    return None if f is None else M.decode_telem_status(f.data)["state"]
+
+
+def _f076_warm_reset(fl, img, observe_acu, telem_budget_s):
+    """WARM reset that PRESERVES the RTC backup domain (BKP1R): the 0x002
+    trigger does NVIC_SystemReset, the BL leaves BKP1R untouched, and a
+    no-write jump (`img` already flashed -> diff skips) re-runs the app warm.
+    A relay power-cycle would drop the (no-VBAT, #324) backup domain and wipe
+    the latch regardless of build, so it can't test latch persistence.
+    Returns the first post-reset FSM state, or None."""
+    fl.send_trigger()
+    time.sleep(2.0)
+    if not fl.discover_bl():
+        return None
+    observe_acu.clear()
+    r = fl.flash(img, jump=True)   # diff -> skip -> warm jump
+    if r.returncode != 0:
+        return None
+    f = _wait_first_telem(observe_acu, telem_budget_s)
+    return None if f is None else M.decode_telem_status(f.data)["state"]
+
+
+def _f076_diag(observe_acu, ams_profile, timeout_s=3.0):
+    """Diagnostic: enable pit-diag and return fault_reason (0x6C0[6]), state
+    (0x6C0[0]), ams_ok (0x6C0[3]), jump_reason (0x6C4[0:4] LE; 0 = cold POR),
+    app_init_progress (0x6C4[4]; 2 = post-ErrorLatch::clear)."""
+    import subprocess
+    bus = ams_profile["bus_acu"]
+    subprocess.run(["cansend", bus,
+                    f"{M.ID_PIT_DIAG_CMD:03X}#{M.PIT_DIAG_ENABLE_MAGIC.hex().upper()}"],
+                   check=False, timeout=2.0)
+    observe_acu.clear()
+    out: dict = {}
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        a = observe_acu.last(0x6C0, extended=False)
+        b = observe_acu.last(0x6C4, extended=False)
+        if a is not None and len(a.data) >= 8:
+            out["state"] = a.data[0]
+            out["ams_ok"] = a.data[3]
+            out["fault_reason"] = a.data[6]
+        if b is not None and len(b.data) >= 8:
+            out["jump_reason"] = int.from_bytes(bytes(b.data[0:4]), "little")
+            out["progress"] = b.data[4]
+        if "fault_reason" in out and "progress" in out:
+            break
+        time.sleep(0.05)
+    return out
+
+
+def _f076_clear_cells_and_settle(pico_emu, observe_acu, ams_profile,
+                                 timeout_s=4.0):
+    """Fully clear a cell-V injection -- resume_all() drops the per-cell
+    override, set_all_cells() restores the nominal base (BOTH are needed,
+    per the pico_emu teardown) -- and wait until telemetry confirms min_cell
+    is nominal again. A warm reset that follows then reflects ONLY the latch,
+    not a still-present cell fault that would re-trip Error on every build."""
+    stub = int(ams_profile["stub_cell_mV"])
+    pico_emu.resume_all()
+    pico_emu.set_all_cells(stub)
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        f = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
+        if f is not None and M.decode_telem_status(f.data)["min_cell_mV"] == stub:
+            return True
+        time.sleep(0.05)
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -608,84 +685,95 @@ class TestF075MixedVersionRoundTrip:
 # ---------------------------------------------------------------------------
 
 class TestF076StaleLatchFlash:
-    """Per AMS #272 F-076 (rewritten): drive the FSM to Error via a
-    TSMS drop in Run (no SWD / no BKP poking) — that latches BKP1R via
-    safety_task.cpp → ErrorLatch::set(). Then power-cycle and verify
-    the latch-clear behaviour matches the build flag:
+    """Per AMS #317 (warm-reset respec, #324): the ErrorLatch is RTC-backed
+    (BKP1R) but the MLC carrier -- and flight HW (#324) -- have NO VBAT, so
+    the latch only survives a WARM reset (NVIC_SystemReset), never a
+    power-cycle (which drops the backup domain regardless of build flag).
+    The bench therefore exercises latch persistence with the 0x002 trigger
+    (warm reset -> BL -> no-write jump), which preserves BKP1R.
 
-      HIL_CLEAR build:  next boot reads Start within SafetyBootGraceMs
-                        (App_InitTask::ErrorLatch::clear() wipes the
-                        latch; #226 contract).
-      Flight build:     boot reads Error and stays (latch survives).
+    A latched Error is induced with a REMOVABLE cell under-voltage and
+    CLEARED before the reset (a TSMS drop no longer latches -- #327), so the
+    post-reset state reflects ONLY the build's latch-clear behaviour:
 
-    Only the HIL_CLEAR variant runs against this bench's build (the
-    sync target is always built with AMS_HIL_CLEAR_ERROR_LATCH=ON).
-    The flight variant stays skipped until a flight .bin lands in the
-    bench's artifact pipeline.
+      Flight build:     no clear -> the latch survives -> comes up Error
+                        (fault_reason 0, restored). This safety-critical
+                        RETAIN is what the flight leg validates.
+      HIL_CLEAR build:  the clear-on-boot leg is SKIPPED -- bench-confirmed
+                        the BL-jump-back isn't a true warm reset (App_InitTask
+                        completes + calls clear() but BKP1R stays set), and on
+                        the no-VBAT bench a power-cycle clears the latch anyway,
+                        so HIL_CLEAR is both un-exercisable and moot here.
+                        Host-SIL-covered. See #317.
+
+    The flight leg needs a flight build (AMS_HIL_CLEAR_ERROR_LATCH=OFF)
+    staged at AMS_FLIGHT_BIN; it flashes it, runs the assertion, then
+    restores the HIL build. The flight leg skips cleanly without that image.
     """
 
     @pytest.mark.soak
-    def test_f076_hil_clear_set(
-        self, fresh_boot, mlc_powered, tsms, dash_chg, acu_heartbeat,
-        wait_for_state, observe_acu, ams_profile,
-    ):
-        import os
-        from broker.server import BrokerClient
-
-        # Skip cleanly if the cockpit fixtures aren't wired (consistent
-        # with Block C behaviour for the same dependency).
-        if tsms is None or dash_chg is None:
-            pytest.skip("tsms / dash_chg fixture unavailable")
-
-        # Step 1: drive FSM to Error via TSMS drop in Run. This writes
-        # BKP1R = 0xA115EE51 inside safety_task::trip_error.
-        from tests.hil.ams.test_block_c_fsm import _drive_to_run
-        _drive_to_run(tsms, dash_chg, acu_heartbeat, wait_for_state, ams_profile)
-        tsms.deassert()
-        wait_for_state(
-            M.FsmState.ERROR,
-            timeout_ms=int(ams_profile["state_transition_window_ms"]) + 200)
-
-        # Step 2: power-cycle MLC2.
-        client = BrokerClient(os.environ.get("HIL_BROKER_SOCKET",
-                                             "/run/hil-broker/broker.sock"))
-        try:
-            relay_bit = mlc_powered["relay_bit"]
-            client.call("tca.write_pin", addr=0x20, port=0,
-                        pin=relay_bit, value=False)
-            time.sleep(float(ams_profile["power_cycle_off_s"]))
-            observe_acu.clear()
-            client.call("tca.write_pin", addr=0x20, port=0,
-                        pin=relay_bit, value=True)
-        finally:
-            client.close()
-
-        # Step 3: HIL_CLEAR build must clear the latch and come up Start
-        # within SafetyBootGraceMs (= 2 s) + boot+telemetry slack.
-        boot_grace_ms = int(ams_profile.get("boot_grace_ms", 2000))
-        budget_ms = boot_grace_ms + 3000   # BL + first-telem slack
-        deadline = time.monotonic() + budget_ms / 1000.0
-        last = None
-        while time.monotonic() < deadline:
-            f = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
-            if f is not None:
-                last = M.decode_telem_status(f.data)["state"]
-                if last == M.FsmState.START:
-                    return  # PASS — latch was cleared
-            time.sleep(0.05)
-        raise AssertionError(
-            f"After TSMS-drop → Error → power-cycle, first 0x4A0 within "
-            f"{budget_ms} ms was state={last}; expected Start. "
-            "AMS_HIL_CLEAR_ERROR_LATCH may not be wiping BKP1R on boot.")
+    def test_f076_hil_clear_set(self):
+        # HIL_CLEAR's clear-on-boot is NOT benchable. The only CAN reset (the
+        # 0x002 trigger) parks the BL, and the BL-jump-back doesn't reproduce
+        # a true app->app warm reset: bench-confirmed the warm-jumped HIL build
+        # runs App_InitTask to completion (0x6C4[4] progress=7, so clear() is
+        # called) yet still comes up Error with fault_reason 0 (BKP1R latch
+        # *restored*, not wiped) -- identical to the flight build. So a warm
+        # reset can't distinguish the clear, and on the no-VBAT bench a
+        # power-cycle wipes the latch anyway, making the feature moot here.
+        # The clear-on-boot is host-SIL-covered. See #317.
+        pytest.skip("HIL_CLEAR clear-on-boot not benchable (BL-jump != true "
+                    "warm reset; bench-confirmed clear() runs but BKP1R stays "
+                    "set) -- SIL-covered, see #317.")
 
     @pytest.mark.soak
-    @pytest.mark.skip(reason=FLIGHT_BUILD_VARIANT_PENDING)
-    def test_f076_hil_clear_unset(self):
-        # Flight variant: build with AMS_HIL_CLEAR_ERROR_LATCH=0, repeat
-        # the TSMS-drop fault stim, power-cycle, assert chip comes up
-        # Error and stays. Skipped until a flight .bin lands in the
-        # bench artifact pipeline.
-        pass
+    def test_f076_hil_clear_unset(
+        self, fresh_boot, pico_emu, wait_for_settled, wait_for_state,
+        observe_acu, ams_profile,
+    ):
+        import os
+        from tools import flash_ams_via_trigger as fl
+        flight = os.environ.get("AMS_FLIGHT_BIN", "/tmp/AMS_flight.bin")
+        hil = os.environ.get("AMS_FIRMWARE_BIN", "/tmp/AMS.bin")
+        if not os.path.exists(flight):
+            pytest.skip(f"flight build (AMS_HIL_CLEAR_ERROR_LATCH=OFF) not "
+                        f"staged at {flight}")
+        telem_budget_s = (int(ams_profile["boot_grace_ms"])
+                          + int(ams_profile["tx_telemetry_period_ms"])
+                          + 2500) / 1000.0 + 1.0
+        try:
+            # Put the flight build on the chip + cold-boot it (Start, nominal).
+            st = _flash_and_coldboot(fl, flight, observe_acu, telem_budget_s)
+            assert st == M.FsmState.START, (
+                "flight build first boot came up "
+                f"{M.FsmState.name(st) if st is not None else 'no-telem'}; "
+                "expected Start.")
+            wait_for_settled()
+
+            # Same removable cell-UV Error, cleared, then warm reset. The
+            # flight build must RETAIN the latch -> Error.
+            pico_emu.inject_cell_v(module=0, cell=10, mV=2500)
+            wait_for_state(
+                M.FsmState.ERROR,
+                timeout_ms=int(ams_profile["tx_telemetry_period_ms"]) * 2 + 500)
+            _f076_clear_cells_and_settle(pico_emu, observe_acu, ams_profile)
+            st = _f076_warm_reset(fl, flight, observe_acu, telem_budget_s)
+            diag = _f076_diag(observe_acu, ams_profile)
+            assert st == M.FsmState.ERROR and diag.get("fault_reason") == 0, (
+                "After cell-UV Error (cleared) -> warm reset, the flight build "
+                f"came up state="
+                f"{M.FsmState.name(st) if st is not None else 'no-telem'} "
+                f"(diag={diag}); expected Error with fault_reason 0 -- the "
+                "BKP1R latch RESTORED (not a fresh fault, the cell-UV was "
+                "cleared). With no HIL_CLEAR the latch must survive the warm "
+                "reboot (#324 sticky-latch contract).")
+        finally:
+            # Restore the HIL build (its first boot wipes the latch).
+            if os.path.exists(hil):
+                try:
+                    _flash_and_coldboot(fl, hil, observe_acu, telem_budget_s)
+                except Exception:
+                    pass
 
 
 # ---------------------------------------------------------------------------
@@ -996,100 +1084,79 @@ class TestF079DiscoverLatencyLongSoak:
 # ---------------------------------------------------------------------------
 
 class TestF080TriggerFromError:
-    """Per AMS #272 F-080 (rewritten): force Error via TSMS drop in Run
-    (no SWD / no GDB), then issue the BL trigger. The trigger handler
-    in AcuCanTask must remain reachable regardless of FSM state —
-    especially Error, since that's the state where a fix-and-reflash
-    is most needed.
+    """Per AMS #317 (post-#327): force a latched Error via cell under-voltage
+    (a TSMS drop is now a non-latching de-energise, #327, so it can't induce
+    a latched Error), then issue the BL trigger. The trigger handler in
+    AcuCanTask must remain reachable regardless of FSM state -- especially
+    Error, since that's the state where a fix-and-reflash is most needed.
 
-    Same fault-stim path as F-076, but the assertion is "BL trigger
-    still works" rather than "latch clears on boot". Sibling test to
-    D-051b but specifically a regression net for the post-#243
-    trigger-from-Error path under soak.
-
-    Default 20 cycles per #272. Scaled by `--soak-cycle-scale`.
+    Sibling to D-051b but a soak regression net for the post-#243
+    trigger-from-Error path. Default 20 cycles per #272; scaled by
+    `--soak-cycle-scale`.
     """
 
     @pytest.mark.soak
     def test_f080_trigger_from_error(
-        self, mlc_powered, tsms, dash_chg, acu_heartbeat,
-        wait_for_state, observe_acu, ams_profile, soak_scale,
+        self, mlc_powered, pico_emu, observe_acu, wait_for_settled,
+        wait_for_state, ams_profile, soak_scale,
     ):
+        import os
         import subprocess
-        # Same TSMS-drop fault-stim helpers as F-076.
-        if tsms is None or dash_chg is None:
-            pytest.skip("tsms / dash_chg fixture unavailable")
-        from tests.hil.ams.test_block_c_fsm import _drive_to_run
+        from broker.server import BrokerClient
         from tests.hil.ams.test_block_d_bootloader import _trigger_rebooted_to_bl
+        from tests.hil.ams import kpi_plugin
 
         cycles = _cycles(20, soak_scale)
+        telem_budget_s = (int(ams_profile["boot_grace_ms"])
+                          + int(ams_profile["tx_telemetry_period_ms"])
+                          + 2500) / 1000.0
         failures: list[tuple[int, str]] = []
-        from broker.server import BrokerClient
-        import os
         client = BrokerClient(os.environ.get("HIL_BROKER_SOCKET",
                                              "/run/hil-broker/broker.sock"))
+        relay_bit = mlc_powered["relay_bit"]
         try:
             for i in range(cycles):
-                # 1) Cold-boot via K_n cycle so each iteration starts from a
-                #    known-good state. Pause the heartbeat across the off
-                #    window (sending 0x100 to a dead carrier breaks the
-                #    heartbeat thread + congests can0 on recovery).
-                relay_bit = mlc_powered["relay_bit"]
-                acu_heartbeat["pause"]()
+                # 1) Cold-boot to a known-good state each cycle.
                 client.call("tca.write_pin", addr=0x20, port=0,
                             pin=relay_bit, value=False)
                 time.sleep(float(ams_profile["power_cycle_off_s"]))
                 observe_acu.clear()
                 client.call("tca.write_pin", addr=0x20, port=0,
                             pin=relay_bit, value=True)
-                # Reset dc_bus to quiescent: a value left ramped at pack from
-                # the previous cycle pre-satisfies precharge, so the next
-                # drive blows past Precharge -- _drive_to_run ramps from 0.
-                acu_heartbeat["set_volts"](0)
-
-                # Wait for the app to boot (heartbeat stays PAUSED -- RX works
-                # regardless; resuming into BL/boot fills the can0 TX buffer
-                # and breaks the heartbeat thread for good -> VCU goes stale
-                # -> the drive below faults to Error instead of reaching Run).
-                # The #316 press edge is also lost if fired before the app is
-                # ready (0x4A0 is grace-gated to ~boot_grace + first poll).
-                booted = False
-                bd = time.monotonic() + 5.0
-                while time.monotonic() < bd:
-                    if observe_acu.last(M.ID_TELEM_STATUS, extended=False) is not None:
-                        booted = True
-                        break
-                    time.sleep(0.05)
-                if not booted:
-                    failures.append((i, "no telemetry within 5 s of power-on"))
+                if _wait_first_telem(observe_acu, telem_budget_s + 1.0) is None:
+                    failures.append((i, "no telemetry within budget of power-on"))
                     continue
-                acu_heartbeat["resume"]()   # app up + ACKing -> safe to send
 
-                # 2) Drive into Run, then TSMS drop → Error.
+                # 2) Induce a real latched Error via cell under-voltage. Settle
+                #    first so the BMS poll is live, then drive a cell < 2800 mV.
                 try:
-                    _drive_to_run(tsms, dash_chg, acu_heartbeat,
-                                  wait_for_state, ams_profile)
-                except Exception as e:
-                    failures.append((i, f"drive_to_run failed: {e}"))
-                    continue
-                tsms.deassert()
-                try:
+                    wait_for_settled()
+                    pico_emu.inject_cell_v(module=0, cell=10, mV=2500)
                     wait_for_state(
                         M.FsmState.ERROR,
-                        timeout_ms=int(ams_profile["state_transition_window_ms"]) + 200)
+                        timeout_ms=int(ams_profile["tx_telemetry_period_ms"]) * 2
+                                   + 500)
                 except Exception as e:
-                    failures.append((i, f"TSMS-drop didn't trip Error: {e}"))
+                    failures.append((i, f"cell-UV didn't latch Error: {e}"))
+                    pico_emu.resume_all()
                     continue
 
-                # 3) Trigger BL from Error.
+                # 3) Trigger BL from Error -- the handler must stay reachable in
+                #    Error (where a fix-and-reflash is most needed).
                 subprocess.run(
                     ["cansend", ams_profile["bus_acu"], "002#B007AD11"],
                     check=False, timeout=2)
-                if not _trigger_rebooted_to_bl(observe_acu, ams_profile):
+                rebooted = _trigger_rebooted_to_bl(observe_acu, ams_profile)
+                pico_emu.resume_all()   # clear injection before the next cold-boot
+                pico_emu.set_all_cells(int(ams_profile["stub_cell_mV"]))
+                if not rebooted:
                     failures.append(
-                        (i, "BL trigger ignored while FSM in Error — "
-                            "SAFETY-CRITICAL: app becomes unreflashable "
-                            "from the cockpit fault path"))
+                        (i, "BL trigger ignored while FSM in Error -- "
+                            "SAFETY-CRITICAL: app becomes unreflashable from "
+                            "the fault path"))
+                    continue
+                kpi_plugin.bump_bl_trigger()
+                kpi_plugin.bump_block_f_cycle()
         finally:
             client.close()
 

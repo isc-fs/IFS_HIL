@@ -55,6 +55,12 @@ transition_hold_ms:       100        # kTransitionHoldMs (DC bus held → Run)
 vcu_stale_ms:             200        # kVcuStaleMs
 i_stale_ms:               200        # kIStaleMs
 i_max_mA:                 200000     # kImaxMa (200 A)
+bus_collapse_percent:     50         # kBusCollapsePercent — COMMISSION (% of
+                                     # pack cell-sum). VCU dc_bus_V below this
+                                     # for bus_collapse_confirm_ms in Run/Charge
+                                     # de-energises to Start, non-latching (#330)
+bus_collapse_confirm_ms:  200        # kBusCollapseConfirmTicks (20 @ 10 ms) —
+                                     # COMMISSION debounce before de-energise
 
 # -- ACU heartbeat (bench → AMS, simulates VCU 0x100) ----------------
 acu_heartbeat_period_ms:  50         # 20 Hz, well under kVcuStaleMs = 200
