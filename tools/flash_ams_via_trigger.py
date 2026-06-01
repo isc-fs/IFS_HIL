@@ -71,13 +71,19 @@ def discover_bl(channel: str = FLASH_CHANNEL,
 
 
 def flash(bin_path: str, channel: str = FLASH_CHANNEL,
-          jump: bool = True, timeout_ms: int = 15000):
+          jump: bool = True, verify_after: bool = False,
+          force_all: bool = False, timeout_ms: int = 15000):
     cmd = ["can-flasher",
            "--interface", "socketcan", "--channel", channel,
            "--bitrate", BITRATE, "--node-id", NODE_ID,
            "--timeout", str(timeout_ms),
            "flash", bin_path, "--address", APP_ADDRESS,
-           "--no-verify-after"]
+           "--verify-after" if verify_after else "--no-verify-after"]
+    if force_all:
+        # Force every sector (skip the changed-sector diff) so the flash
+        # always does real writes -- used by F-077 so a same-image reflash
+        # still takes seconds to interrupt mid-write.
+        cmd.append("--no-diff")
     if jump:
         cmd.append("--jump")
     return subprocess.run(cmd, capture_output=True, text=True,
