@@ -202,7 +202,7 @@ class MCP2515:
     def reset(self) -> None:
         _call("can.reset", idx=self._idx)
 
-    def init(self, bitrate: int = 500_000) -> bool:
+    def init(self, bitrate: int = 1_000_000) -> bool:
         return _call("can.init", idx=self._idx, bitrate=bitrate)
 
     def loopback_test(self, can_id: int = 0x123,

@@ -37,7 +37,7 @@ TRIGGER_FRAME   = "002#B007AD11"
 FLASH_CHANNEL   = "can2"
 NODE_ID         = "0x1"
 APP_ADDRESS     = "0x08020000"
-BITRATE         = "500000"
+BITRATE         = "1000000"
 
 # MLC slot wiring on BACKPLANE_HIL: K1..K4 = TCA 0x20 port0 pins 0..3.
 DEFAULT_TCA_ADDR = 0x20
