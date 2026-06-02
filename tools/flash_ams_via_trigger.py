@@ -10,7 +10,7 @@ Precharge, Run, Charge, Error -- per IFS08-CE-AMS
 Bootloader::matches_trigger semantics.
 
 Trigger contract (mirror in any pit-tool / can-flasher wrapper):
-  - bus     : FDCAN1 (= Pi-side can0, PCB CAN3)
+  - bus     : FDCAN1 (= Pi-side can2, PCB CAN1; v1.6.0 fleet cutover)
   - id      : 0x002 (11-bit standard)
   - dlc     : 4
   - payload : B0 07 AD 11   (== ams::config::BlBootReqPayload)
@@ -32,7 +32,7 @@ import subprocess
 import sys
 import time
 
-TRIGGER_CHANNEL = "can0"
+TRIGGER_CHANNEL = "can2"   # AMS FDCAN1 = Pi can2 (v1.6.0 fleet cutover; was can0)
 TRIGGER_FRAME   = "002#B007AD11"
 FLASH_CHANNEL   = "can2"
 NODE_ID         = "0x1"
