@@ -491,78 +491,67 @@ class TestA011EcuTxMatrixDlcs:
 # ---------------------------------------------------------------------------
 
 class TestA012FdCan1RejectsExtendedIds:
-    """The AMS configures FDCAN1's global filter to REJECT extended
-    frames at the hardware gate (PR #236). If that ever regresses,
-    an extended-format 0x100 heartbeat would update `dc_bus_V` and
-    keep the VCU-stale predicate fresh -- masking real bus issues.
+    """The AMS configures FDCAN1's global filter to REJECT extended frames at
+    the hardware gate (PR #236). Proven *directly* on the RX path: a STANDARD
+    0x100 updates `dc_bus_V` (0x4A2[3..4]); an EXTENDED-format 0x100 must NOT
+    -- the filter drops it before the firmware ever sees it. If this regresses,
+    an extended 0x100 would update dc_bus and keep the VCU-stale predicate
+    fresh, masking real bus loss.
 
-    Method: stop the standard heartbeat, send an *extended* 0x100
-    heartbeat at the same cadence, then verify FSM goes to Error
-    via VcuStaleMs (= filter dropped the extended frames, so VCU
-    really is stale even though the wire has 20 Hz of 0x100
-    traffic).
+    Bitrate-independent: a direct RX-filter observation with no FSM/VcuStale
+    timing dependency. (The earlier method drove to Precharge and waited for a
+    VcuStale->Error trip, but with the heartbeat paused the FSM holds Precharge
+    to its 5 s timeout rather than tripping Error inside the 200 ms VcuStale
+    window -- so the indirect method was fragile and failed at 1 Mbps.)
     """
 
-    def test_a012(self, fresh_boot, observe_acu, acu_heartbeat, tsms, dash_chg,
-                  wait_for_state, ams_profile):
-        import subprocess, threading
+    def test_a012(self, fresh_boot, observe_acu, ams_profile):
+        import time
+        from tools.firmware_test.acu_stim import AcuStim
 
-        if tsms is None or dash_chg is None:
-            pytest.skip("tsms/dash_chg required: #304 makes VcuStale Car-only, "
-                        "so the filter's stale-VCU consequence is only "
-                        "observable from a Car-locked state.")
-
-        # Baseline: FSM in Start with the standard heartbeat.
-        assert fresh_boot["first_frame"]["state"] == M.FsmState.START
-
-        # #304: VcuStale is Car-only. Lock Car first (TSMS held + a DASH_CHG
-        # press) with the standard heartbeat still fresh, so a stale VCU
-        # actually faults. VcuStaleMs (200 ms) trips well before the 5 s
-        # precharge timeout, so Error here means "VCU went stale", not
-        # "precharge timed out".
-        tsms.assert_()
-        dash_chg.press()
-        wait_for_state(
-            M.FsmState.PRECHARGE,
-            timeout_ms=int(ams_profile["state_transition_window_ms"]) + 50)
-
-        # Pause the standard heartbeat and drive an extended-ID
-        # equivalent on can0. cansend's 8-digit-hex form picks
-        # extended automatically.
-        acu_heartbeat["pause"]()
-        stop_evt = threading.Event()
-
-        def _send_extended():
-            while not stop_evt.is_set():
-                try:
-                    subprocess.run(
-                        ["cansend", ams_profile["bus_acu"],
-                         "00000100#6801"],
-                        check=False, timeout=1,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL)
-                except Exception:
-                    pass
-                stop_evt.wait(0.05)
-
-        t = threading.Thread(target=_send_extended,
-                             name="a012-ext-100", daemon=True)
-        t.start()
+        std_val = 100   # 0x0064
+        ext_val = 222   # 0x00DE -- clearly distinct from std_val and from 0
+        stim = AcuStim(channel=ams_profile["bus_acu"])
+        stim.start()
         try:
-            # Within (VcuStaleMs + one telemetry cycle + slack), FSM
-            # MUST trip to Error -- proves the extended frames are
-            # being dropped at the filter, not seen as fresh VCU
-            # updates by the firmware.
-            wait_for_state(
-                M.FsmState.ERROR,
-                timeout_ms=int(ams_profile["vcu_stale_ms"])
-                           + int(ams_profile["tx_telemetry_period_ms"])
-                           + 300)
+            # Positive control: a STANDARD 0x100 DOES update dc_bus (0x4A2[3:5]),
+            # so RX of the VCU heartbeat works and the filter test is meaningful.
+            observe_acu.clear()
+            got_std = False
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                stim.send_raw(M.ID_DC_BUS_VOLTAGE,
+                              std_val.to_bytes(2, "little"), is_extended_id=False)
+                f = observe_acu.last(M.ID_TELEM_TEMPS, extended=False)
+                if f is not None and \
+                        int.from_bytes(bytes(f.data)[3:5], "little") == std_val:
+                    got_std = True
+                    break
+                time.sleep(0.05)
+            assert got_std, (
+                f"a STANDARD 0x100={std_val} never updated dc_bus (0x4A2[3:5]) "
+                "-- RX of the VCU heartbeat is broken, can't test the filter.")
+
+            # The check: an EXTENDED-ID 0x100 carrying a different value must
+            # NOT update dc_bus -- the FDCAN1 global filter rejects extended
+            # frames at the HW gate, so the firmware never sees this value.
+            observe_acu.clear()
+            seen = set()
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                stim.send_raw(M.ID_DC_BUS_VOLTAGE,
+                              ext_val.to_bytes(2, "little"), is_extended_id=True)
+                f = observe_acu.last(M.ID_TELEM_TEMPS, extended=False)
+                if f is not None:
+                    seen.add(int.from_bytes(bytes(f.data)[3:5], "little"))
+                time.sleep(0.05)
+            assert ext_val not in seen, (
+                f"dc_bus took {ext_val} from an EXTENDED-ID 0x100 -- the FDCAN1 "
+                "filter is NOT rejecting extended frames (#236 regressed). "
+                f"dc_bus values seen while only the extended frame flowed: "
+                f"{sorted(seen)}.")
         finally:
-            stop_evt.set()
-            t.join(timeout=1.0)
-            acu_heartbeat["resume"]()
-            tsms.deassert()
+            stim.stop()
 
 
 # ---------------------------------------------------------------------------
