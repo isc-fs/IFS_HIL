@@ -13,8 +13,10 @@ mlc_boot_settle_s:        0.5        # delay after relay close before discover
                                      # short enough to catch BL before auto-jump
 
 # -- CAN buses --------------------------------------------------------
-bus_acu:                  can0       # FDCAN1 of the firmware (telemetry + ACU stim)
-bus_bms_bl:               can2       # FDCAN2 (BL only; the app no longer listens here)
+bus_acu:                  can2       # AMS FDCAN1 = Pi can2 (telemetry + ACU stim);
+                                     # v1.6.0 fleet cutover moved the AMS off can0
+bus_bms_bl:               can2       # BL flash bus — same physical bus as the app now
+                                     # (v1.6.0 multi-FDCAN BL, reachable on can2)
 
 # -- Bootloader -------------------------------------------------------
 bl_node_id:               0x01       # kAmsNodeId in ams_config.hpp (option-1 per isc-fs/IFS08-CE-AMS#123)

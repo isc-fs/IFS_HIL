@@ -27,7 +27,7 @@ import pytest
 
 from tools.firmware_test.ams import can_map as M
 
-_BUS = "can0"
+_BUS = "can2"   # AMS bus = ams_profile.bus_acu (FDCAN1 on Pi can2 since v1.6.0)
 
 
 def _can_err_counts(channel: str = _BUS) -> tuple[int, int]:
