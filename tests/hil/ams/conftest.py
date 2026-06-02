@@ -411,6 +411,69 @@ def charger_0x101(ams_profile, mlc_powered):
 
 
 # ---------------------------------------------------------------------------
+# balance_override -- operator balance-control 0x103 sender (AMS #340)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def balance_override(ams_profile, mlc_powered):
+    """Background `0x103` sender for the operator balance-override (#340).
+
+    The operator/charger broadcasts `0x103` at >= 2 Hz with a magic payload:
+    'BALO' suppresses autonomous balancing, 'BALX' resumes auto. If the frame
+    goes stale (> BalanceOverrideFreshMs = 5 s) the AMS reverts to auto.
+    Charge-only.
+
+    Exposes:
+      - `send(magic)` -- start emitting at ~5 Hz; `magic` is 'BALO' / 'BALX' /
+                         'BALZ' (a wrong-magic probe) or raw 4 bytes.
+      - `stop()`      -- stop emitting (let the override go stale).
+    """
+    from tools.firmware_test.acu_stim import AcuStim
+    from tools.firmware_test.ams import can_map as M
+
+    bus = ams_profile["bus_acu"]
+    _skip_if_no_can(bus)
+
+    stim = AcuStim(channel=bus)
+    stim.start()
+    state = {"payload": None}
+    stop_evt = threading.Event()
+    period_s = 0.2   # 5 Hz, well above the >= 2 Hz freshness floor
+
+    def _loop():
+        while not stop_evt.is_set():
+            p = state["payload"]
+            if p is not None:
+                try:
+                    stim.send_raw(M.ID_BALANCE_OVERRIDE, p, is_extended_id=False)
+                except Exception as e:
+                    log.warning("balance_override send failed: %s", e)
+                    break
+            stop_evt.wait(period_s)
+
+    t = threading.Thread(target=_loop, name="balance-0x103", daemon=True)
+    t.start()
+
+    _MAGIC = {
+        "BALO": M.BALANCE_OVERRIDE_SUPPRESS,
+        "BALX": M.BALANCE_OVERRIDE_RESUME,
+        "BALZ": bytes([0x42, 0x41, 0x4C, 0x5A]),   # wrong magic (B-05)
+    }
+
+    def _send(magic):
+        state["payload"] = _MAGIC[magic] if isinstance(magic, str) else magic
+
+    def _stop():
+        state["payload"] = None
+
+    yield {"send": _send, "stop": _stop}
+
+    stop_evt.set()
+    t.join(timeout=1.0)
+    stim.stop()
+
+
+# ---------------------------------------------------------------------------
 # wait_for_settled -- telemetry settle after fresh_boot (AMS #301 / first poll)
 # ---------------------------------------------------------------------------
 
@@ -749,7 +812,7 @@ def flasher(ams_profile, mlc_powered):
         pytest.skip("can-flasher binary not on PATH")
     return CanFlasher(
         channel=ams_profile["bus_bms_bl"],
-        bitrate=500_000,
+        bitrate=1_000_000,
         node_id=int(ams_profile["bl_node_id"]),
         discover_timeout_ms=int(ams_profile["bl_discover_timeout_ms"]),
         per_frame_timeout_ms=int(ams_profile["bl_per_frame_timeout_ms"]),

@@ -124,8 +124,8 @@ RELAY_PINS = {
 # ---------------------------------------------------------------------------
 MCP2515_OSC_HZ = 16_000_000
 
-# CAN bus bitrate for loopback test
-CAN_BITRATE = 500_000
+# CAN bus bitrate for loopback test (bench bus is 1 Mbps — #338 / BL #120)
+CAN_BITRATE = 1_000_000
 
 # ---------------------------------------------------------------------------
 # MLC carrier current limits (A) — flag unexpected consumption

@@ -79,7 +79,7 @@ def _trigger_rebooted_to_bl(observe_acu, ams_profile,
     r = subprocess.run(
         ["can-flasher", "--interface", "socketcan",
          "--channel", ams_profile["bus_bms_bl"],
-         "--bitrate", "500000",
+         "--bitrate", "1000000",
          "--node-id", hex(int(ams_profile["bl_node_id"])),
          "--timeout", "3000", "discover"],
         capture_output=True, text=True, timeout=10)
@@ -309,7 +309,7 @@ class TestD052JumpReasonViaPitDiag:
         r = subprocess.run(
             ["can-flasher", "--interface", "socketcan",
              "--channel", ams_profile["bus_bms_bl"],
-             "--bitrate", "500000",
+             "--bitrate", "1000000",
              "--node-id", hex(int(ams_profile["bl_node_id"])),
              "--timeout", "8000",
              "flash", str(bin_path),

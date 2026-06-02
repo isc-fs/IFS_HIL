@@ -96,6 +96,9 @@ ID_DC_BUS_VOLTAGE   = 0x100         # STANDARD (11-bit), DLC 2, little-endian vo
                                     # extended IDs, so this frame MUST be sent as
                                     # standard. A-012 verifies the reject path by
                                     # explicitly cansending extended form.
+ID_BALANCE_OVERRIDE = 0x103         # STANDARD, DLC 4, operator -> AMS (#340).
+                                    # Magic-gated: BALO suppress / BALX resume,
+                                    # re-sent >=2 Hz; stale > 5 s reverts to auto.
 ID_START_BUTTON     = 0x600         # standard, DLC 1, byte 0 = 0/1
 ID_CHARGER_DETECT   = 0x18FF50E7    # extended (29-bit), any payload
 
@@ -144,7 +147,7 @@ ID_PIT_DIAG_CMD          = 0x7F0   # host -> AMS: enable/disable
 ID_PIT_DIAG_ACK          = 0x7F1   # AMS -> host: one-shot {01|00} after change
 ID_PIT_DIAG_CELL_BASE    = 0x680   # 24 frames: 4 cells/frame BE u16 mV
 ID_PIT_DIAG_TEMP_BASE    = 0x6A0   # 25 frames: 8 NTCs/frame i8 degC
-ID_PIT_DIAG_FSM_STATUS   = 0x6C0   # [0]fsm [1]mode [2]inputs [3]ams_ok [4..5]pec_err_total BE [6..7]rsv
+ID_PIT_DIAG_FSM_STATUS   = 0x6C0   # [0]fsm [1]mode [2]inputs(b0 DASH,b1 TSMS,b2 bal_override #340) [3]ams_ok [4..5]pec_err BE [6]fault_reason [7]detail
 ID_PIT_DIAG_TIMING       = 0x6C1   # [0..1]volt_poll_ms BE [2..3]volt_poll_max BE [4..7]temp_sweep_mask LE
 ID_PIT_DIAG_BAL_MASK_A   = 0x6C2
 ID_PIT_DIAG_BAL_MASK_B   = 0x6C3
@@ -158,6 +161,14 @@ PIT_DIAG_ENABLE_MAGIC  = bytes([0xDE, 0xAD, 0xBE, 0xEF])
 PIT_DIAG_DISABLE_MAGIC = bytes([0x00, 0x00, 0x00, 0x00])
 PIT_DIAG_SCAN_PERIOD_MS = 1000     # 1 Hz scan when enabled
 PIT_DIAG_PEC_SATURATION = 0xFF     # u8 saturation point for per-IC counts
+
+# 0x103 balance-override magic (#340). Re-send >= 2 Hz to stay in effect;
+# stale > BALANCE_OVERRIDE_FRESH_MS reverts the AMS to autonomous balancing.
+BALANCE_OVERRIDE_SUPPRESS = bytes([0x42, 0x41, 0x4C, 0x4F])   # "BALO" -> suppress
+BALANCE_OVERRIDE_RESUME   = bytes([0x42, 0x41, 0x4C, 0x58])   # "BALX" -> resume auto
+BALANCE_OVERRIDE_FRESH_MS = 5000
+# 0x6C0[2] inputs byte: bit0 DASH_CHG, bit1 TSMS, bit2 balance_override (#340).
+BALANCE_OVERRIDE_BIT = 0x04
 
 
 # FSM state enum, matches Core/Inc/app/state_machine.hpp `ams::fsm::State`.

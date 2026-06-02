@@ -5,7 +5,7 @@ Wants=hil-psu-on.service hil-can-up.service
 # hil-psu-on.service asserts PS_ON# (GPIO7 LOW) so the ATX main rail
 # is stable before the broker opens /dev/spidev0.3 or binds python-can
 # sockets to canN. hil-can-up.service brings can0/can1/can2 up at
-# 500 kbps with txqueuelen=1000 before the broker starts. Dashboard
+# 1 Mbps with txqueuelen=1000 before the broker starts. Dashboard
 # and pytest should only talk to hardware through this broker (see
 # docs/broker_migration_plan.md).
 
