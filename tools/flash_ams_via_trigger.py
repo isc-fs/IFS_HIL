@@ -84,8 +84,10 @@ def flash(bin_path: str, channel: str = FLASH_CHANNEL,
         # always does real writes -- used by F-077 so a same-image reflash
         # still takes seconds to interrupt mid-write.
         cmd.append("--no-diff")
-    if jump:
-        cmd.append("--jump")
+    # Be explicit: without --no-jump the flasher jumps by default, so
+    # jump=False would still warm-jump after a force-write -- unreliable
+    # right after a write (F-077). Pass the flag that matches `jump`.
+    cmd.append("--jump" if jump else "--no-jump")
     return subprocess.run(cmd, capture_output=True, text=True,
                           timeout=180)
 
