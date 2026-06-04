@@ -157,7 +157,7 @@ class TestF062PrechargeToggles:
 
 class TestF063AmsOkFollowsFsm:
 
-    def test_f063(self, fresh_boot, tsms, dash_chg, acu_heartbeat,
+    def test_f063(self, fresh_boot, tsms, dash_chg, acu_heartbeat, pico_emu,
                   wait_for_state, relays_readback, ams_profile):
         _require(relays_readback)
         if tsms is None or dash_chg is None:
@@ -173,14 +173,16 @@ class TestF063AmsOkFollowsFsm:
             f"AMS_OK never went HIGH in Start within 6 s. "
             f"Voltages: {relays_readback.read_volts()}")
 
-        # Trip Error via TSMS drop after reaching Run
+        # Reach Run (AMS_OK HIGH), then trip Error via a real fault.
+        # #327: a TSMS drop is now a non-latching de-energise to Start, not a
+        # sticky Error -- induce Error with a cell-UV fault (cf. C-042/C-048).
         _drive_to_run(tsms, dash_chg, acu_heartbeat, wait_for_state, ams_profile)
         assert relays_readback.read()["ams_ok"], (
             f"AMS_OK LOW at Run. Voltages: {relays_readback.read_volts()}")
 
-        tsms.deassert()
+        pico_emu.inject_cell_v(module=0, cell=10, mV=2500)  # < 2800 -> cell-UV
         wait_for_state(M.FsmState.ERROR,
-                       timeout_ms=int(ams_profile["state_transition_window_ms"]) + 50)
+                       timeout_ms=int(ams_profile["tx_telemetry_period_ms"]) * 2 + 500)
         s = relays_readback.poll_for(lambda x: not x["ams_ok"], timeout_s=0.2)
         assert s is not None, (
             f"AMS_OK stayed HIGH in Error. Voltages: {relays_readback.read_volts()}")
@@ -249,16 +251,19 @@ class TestF065PrechargeToTransitionSequence:
 
 class TestF066ErrorOpensAllContactors:
 
-    def test_f066(self, fresh_boot, tsms, dash_chg, acu_heartbeat,
+    def test_f066(self, fresh_boot, tsms, dash_chg, acu_heartbeat, pico_emu,
                   wait_for_state, relays_readback, ams_profile):
         _require(relays_readback)
         if tsms is None or dash_chg is None:
             pytest.skip("tsms/dash_chg fixture unavailable")
 
+        # #327: a TSMS drop is a non-latching de-energise to Start, not a
+        # sticky Error -- induce Error with a cell-UV fault so the
+        # "all contactors open in Error" check is meaningful.
         _drive_to_run(tsms, dash_chg, acu_heartbeat, wait_for_state, ams_profile)
-        tsms.deassert()
+        pico_emu.inject_cell_v(module=0, cell=10, mV=2500)  # < 2800 -> cell-UV
         wait_for_state(M.FsmState.ERROR,
-                       timeout_ms=int(ams_profile["state_transition_window_ms"]) + 50)
+                       timeout_ms=int(ams_profile["tx_telemetry_period_ms"]) * 2 + 500)
 
         # Within one FSM tick (20 ms) of Error: all three open
         s = relays_readback.poll_for(
