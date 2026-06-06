@@ -351,6 +351,103 @@ def current_heartbeat(ams_profile, mlc_powered):
 
 
 # ---------------------------------------------------------------------------
+# pack_current_diff -- differential pack-current injection (AMS #348 rework)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def pack_current_diff(ams_profile, mlc_powered):
+    """Drive the differential pack-current pair into the AMS (#348 current-
+    sensor rework). DAC4 ch0 -> S_current_p (PF7/OUT_P), ch1 -> S_current_n
+    (PF8/OUT_N); the firmware reads 5 mV/A of (OUT_P - OUT_N). A common-mode
+    of ~1.44 V keeps both legs inside the 0-3.3 V rail across +-200 A.
+
+        set_A(I): OUT_P = CM + I*(mV/A)/2 ; OUT_N = CM - I*(mV/A)/2   (volts)
+
+    Opt-in: needs `pack_current_dac_idx` + `pack_current_dac_ch_p/_n` in
+    ams_profile.yaml; a no-op (state dict only) otherwise -- the DAC -> PF7/PF8
+    routing is bench-physical (DAC4 ch0/ch1; see CLAUDE.md DAC80504 wiring).
+
+    Exposes (current_heartbeat-shaped):
+      - `set_A(amps)`            -- set the injected pack current (default 0 A)
+      - `pause()` / `resume()`   -- stop / restart driving (pause holds last V)
+      - `A` / `paused`
+    """
+    period_s = float(ams_profile.get("pack_current_period_ms", 50)) / 1000.0
+    dac_idx  = ams_profile.get("pack_current_dac_idx")
+    ch_p     = ams_profile.get("pack_current_dac_ch_p")
+    ch_n     = ams_profile.get("pack_current_dac_ch_n")
+    cm_v     = float(ams_profile.get("pack_current_cm_v", 1.44))
+    mv_per_a = float(ams_profile.get("pack_current_mv_per_a", 5.0))
+    enabled  = dac_idx is not None and ch_p is not None and ch_n is not None
+
+    state = {
+        "A":         float(ams_profile.get("pack_current_default_a", 0)),
+        "paused":    False,
+        "enabled":   enabled,
+        "dac_idx":   dac_idx,
+        "ch_p":      ch_p,
+        "ch_n":      ch_n,
+        "cm_v":      cm_v,
+        "mv_per_a":  mv_per_a,
+        "period_ms": int(period_s * 1000),
+    }
+
+    def _legs(amps):
+        half = amps * (mv_per_a / 1000.0) / 2.0   # half the differential, volts
+        return cm_v + half, cm_v - half            # (OUT_P, OUT_N)
+
+    if enabled:
+        from broker.server import BrokerClient
+        client = BrokerClient(
+            os.environ.get("HIL_BROKER_SOCKET", "/run/hil-broker/broker.sock"))
+        stop_evt = threading.Event()
+
+        def _loop():
+            while not stop_evt.is_set():
+                if not state["paused"]:
+                    try:
+                        vp, vn = _legs(state["A"])
+                        client.call("dac.set_voltage", idx=dac_idx,
+                                    channel=ch_p, volts=vp)
+                        client.call("dac.set_voltage", idx=dac_idx,
+                                    channel=ch_n, volts=vn)
+                    except Exception as e:
+                        log.warning("pack_current_diff DAC write failed: %s", e)
+                        break
+                stop_evt.wait(period_s)
+
+        t = threading.Thread(target=_loop, name="pack-current-diff", daemon=True)
+        t.start()
+        log.info("pack_current_diff: DAC%d ch%d/%d, CM %.2f V, %.1f mV/A "
+                 "(start %.1f A)", dac_idx, ch_p, ch_n, cm_v, mv_per_a, state["A"])
+    else:
+        log.info("pack_current_diff: DISABLED (no pack_current_dac_idx + "
+                 "pack_current_dac_ch_p/_n in ams_profile.yaml).")
+        stop_evt = None
+        t = None
+
+    def set_A(amps): state["A"] = float(amps)
+    def pause():     state["paused"] = True
+    def resume():    state["paused"] = False
+
+    state["set_A"]  = set_A
+    state["pause"]  = pause
+    state["resume"] = resume
+
+    yield state
+
+    if stop_evt is not None:
+        stop_evt.set()
+        if t is not None:
+            t.join(timeout=1.0)
+        try:   # park both legs at CM (0 A) so no current is left injected
+            client.call("dac.set_voltage", idx=dac_idx, channel=ch_p, volts=cm_v)
+            client.call("dac.set_voltage", idx=dac_idx, channel=ch_n, volts=cm_v)
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
 # charger_0x101 -- operator charge-request emitter (AMS #311 / #316)
 # ---------------------------------------------------------------------------
 

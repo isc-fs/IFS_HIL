@@ -81,6 +81,20 @@ current_heartbeat_dac_idx:     3     # broker idx 3 = DAC4 (U15)
 current_heartbeat_dac_channel: 0     # ch0 -> AMS PF7
 current_heartbeat_default_mA:  0     # quiescent 0 A (= 2.5 V on the DAC)
 
+# -- Pack current injection: DIFFERENTIAL (AMS #348 current-sensor rework) --
+# For the #348 firmware (PF7/PF8 differential pack sense), superseding the
+# single-ended current_heartbeat. DAC4 drives both legs: ch0 -> S_current_p
+# (PF7/OUT_P), ch1 -> S_current_n (PF8/OUT_N). Firmware reads 5 mV/A of
+# (OUT_P - OUT_N); CM 1.44 V keeps both legs in 0-3.3 V across +-200 A.
+# Bench wiring: DAC4 ch0/ch1 -> PF7/PF8 (conftest::pack_current_diff).
+pack_current_dac_idx:     3      # broker idx 3 = DAC4 (U15)
+pack_current_dac_ch_p:    0      # ch0 -> S_current_p (PF7 / OUT_P)
+pack_current_dac_ch_n:    1      # ch1 -> S_current_n (PF8 / OUT_N)
+pack_current_cm_v:        1.44   # common-mode (legs equal -> 0 A)
+pack_current_mv_per_a:    5.0    # (OUT_P - OUT_N) sensitivity
+pack_current_default_a:   0      # quiescent
+pack_current_period_ms:   50     # 20 Hz refresh (current-stale freshness)
+
 # -- ACU stim frame IDs (mirror firmware kAcuRx*) --------------------
 acu_rx_dc_bus_id:         0x100      # extended, DLC 2, LE uint16 volts
 # Retired in isc-fs/IFS08-CE-AMS#187: 0x600 start_button and 0x18FF50E7
