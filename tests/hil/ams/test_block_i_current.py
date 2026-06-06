@@ -14,19 +14,21 @@ I covers the measurement; Block J the over-current safety trip.
 | I-101 | 0 A injection reads ~0 (no differential offset)                 | impl   |
 | J-100 | |current| > CurrentMaxMa -> Error (unconditional, undebounced)  | impl   |
 | J-101 | over-current latch is sticky (drop to 0 A, stays Error)         | impl   |
+| J-102 | under-limit (190 A) does NOT trip -- brackets the trip at 200 A | impl   |
 
 Notes:
-  - Characterized over 6 boots (2026-06-06): zero is STABLE at +0.6 A
-    (stdev 0.1 A) and the gain is consistently 0.924 (reads ~7.6% LOW vs the
-    5 mV/A injection). I-100's tolerance (`pack_current_accuracy_tol_pct`,
-    default 12 %) accommodates the gain; tighten if/when the AMS team blesses a
-    tighter `adc_to_mA` / VREF+.
+  - The 6-boot characterization (2026-06-06: gain 0.924, zero +0.6 A, both
+    stable) fed AMS #350, which commissioned the cal from this bench
+    (CurrentMvPerAmpe1 50->46, CurrentZeroCount 2048->2050). So the firmware
+    now reads ~1.004x (residual +0.4 %) with a nulled zero, and I-100's tol is
+    tight (+-2 %). The cal is BOARD-SPECIFIC (VREF+); a different carrier may
+    need re-measuring + a looser tol (COMMISSIONING #2).
   - The IIR current filter needs ~3-4 s to settle a big step (`pack_current_settle_s`).
     Read too soon (1.5 s) off a 200 A step and the residual reads ~-22 A — a
     settle artifact, NOT an offset. The sweep is ordered to keep steps <= 200 A.
-  - Over-current injection (`pack_current_overcurrent_a`, default 240 A) sits
-    well above CurrentMaxMa (200 A) even after the 7.6% under-read
-    (240 * 0.924 ~= 222 A > 200 A), and the legs stay in-rail (CM 1.44 V).
+  - Block J brackets the trip at 200 A real: `pack_current_overcurrent_a`
+    (210 A) must trip, `pack_current_undercurrent_a` (190 A) must not. Both legs
+    stay in-rail (CM 1.44 V). Pre-#350 the trip sat at ~216 A (0.924x gain).
   - `pack_current_diff` refreshes at 20 Hz, so CurrentStale never pre-empts the
     over-limit trip; `fresh_boot_diff` keeps that source active across boot.
 """
@@ -171,3 +173,24 @@ class TestBlockJOverCurrent:
         assert st == M.FsmState.ERROR, (
             "over-current latch should be sticky — chip recovered to "
             f"{M.FsmState.name(st)} after current returned to 0 A.")
+
+    def test_j102_under_limit_does_not_trip(self, fresh_boot_diff, pack_current_diff,
+                                            observe_acu, ams_profile):
+        """J-102: a current just UNDER the limit must NOT trip — brackets the
+        trip at ~200 A real (post-#350 cal). Pre-#350 the trip sat at ~216 A;
+        this guards the threshold against drifting low."""
+        _require_diff(pack_current_diff)
+        assert fresh_boot_diff["first_frame"]["state"] == M.FsmState.START
+        _past_boot_grace(fresh_boot_diff, ams_profile)
+
+        uc_a = float(ams_profile.get("pack_current_undercurrent_a", 190.0))
+        pack_current_diff["set_A"](uc_a)
+        # hold past the filter settle + several telemetry cycles; must stay Start
+        hold_s = (float(ams_profile.get("pack_current_settle_s", 4.0))
+                  + int(ams_profile["tx_telemetry_period_ms"]) * 3 / 1000.0)
+        time.sleep(hold_s)
+        st = _read_state(observe_acu)
+        assert st == M.FsmState.START, (
+            f"{uc_a:.0f} A (under the 200 A trip) left FSM in "
+            f"{M.FsmState.name(st)} — expected Start (no over-current trip).")
+        pack_current_diff["set_A"](0)
