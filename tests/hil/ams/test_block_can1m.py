@@ -64,7 +64,7 @@ class TestM01TelemetryDecode:
     1 Mbps over a window, with no can2 framing errors accruing."""
 
     def test_m01_telemetry_decodes_at_1mbps(
-        self, fresh_boot, observe_acu, acu_heartbeat, current_heartbeat,
+        self, fresh_boot, observe_acu, acu_heartbeat,
         ams_profile):
         window_s = 30.0   # 60 s is the soak target; 30 s is enough for cadence
         period_s = M.TX_TELEM_PERIOD_MS / 1000.0
@@ -183,7 +183,7 @@ class TestM03PitDiagStream:
 
 class TestM04ErrorCountersClean:
     def test_m04_error_counters_clean(
-        self, fresh_boot, acu_heartbeat, current_heartbeat, observe_acu,
+        self, fresh_boot, acu_heartbeat, observe_acu,
         ams_profile):
         soak_s = 30.0   # 60 s is the acceptance target; 30 s for a dev gate
         assert _can_state() in ("ERROR-ACTIVE",), (
@@ -251,7 +251,7 @@ class TestM05RebootFlashAt1M:
 class TestM06SamplePointSoak:
     @pytest.mark.soak
     def test_m06_zero_errors_5min(
-        self, fresh_boot, acu_heartbeat, current_heartbeat, ams_profile):
+        self, fresh_boot, acu_heartbeat, ams_profile):
         rx0, tx0 = _can_err_counts()
         time.sleep(300.0)
         rx1, tx1 = _can_err_counts()

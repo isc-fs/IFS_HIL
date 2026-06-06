@@ -922,7 +922,7 @@ def flasher(ams_profile, mlc_powered):
 
 @pytest.fixture
 def fresh_boot(ams_profile, mlc_powered, observe_acu, acu_heartbeat,
-               current_heartbeat):
+               pack_current_diff):
     """Power-cycle the MLC, let the BL auto-jump to the app, return once
     the first `0x4A0` telemetry frame has arrived.
 
@@ -933,6 +933,12 @@ def fresh_boot(ams_profile, mlc_powered, observe_acu, acu_heartbeat,
 
     `acu_heartbeat` is started before power-on so the VCU staleness
     predicate sees fresh data within the boot-grace window.
+
+    `pack_current_diff` (not the legacy single-ended `current_heartbeat`)
+    drives the PF7/PF8 pair to CM = 0 A. The #348/#350 firmware reads PF7-PF8
+    differentially, so a single-ended PF7=2.5 V drive reads as a massive
+    over-current and latches Error before a test can reach a clean baseline
+    (M-043 surfaced this across Block B). This is the #348 harness migration.
     """
     from broker.server import BrokerClient
     from tools.firmware_test.ams import can_map as M
