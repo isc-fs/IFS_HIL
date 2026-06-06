@@ -1005,6 +1005,78 @@ def fresh_boot(ams_profile, mlc_powered, observe_acu, acu_heartbeat,
     }
 
 
+def _boot_diff_core(ams_profile, mlc_powered, observe_acu):
+    """Relay power-cycle to a clean Start and return the first decoded 0x4A0.
+
+    Mirror of `fresh_boot`'s core, kept standalone so the #348 current-sensor
+    block can boot with the DIFFERENTIAL current source active. `fresh_boot`
+    proper still pulls in the single-ended `current_heartbeat`, which drives
+    DAC4 ch0 (PF7) only and fights the differential `pack_current_diff` on the
+    same channel — wrong input for the PF7/PF8 rework firmware. The #348
+    migration will fold `fresh_boot` onto `pack_current_diff` and drop this.
+    """
+    from broker.server import BrokerClient
+    from tools.firmware_test.ams import can_map as M
+
+    client = BrokerClient(
+        os.environ.get("HIL_BROKER_SOCKET", "/run/hil-broker/broker.sock"))
+    relay_bit = mlc_powered["relay_bit"]
+    try:
+        client.call("tca.write_pin", addr=0x20, port=0, pin=relay_bit, value=False)
+        # Drop TSMS + DASH_CHG before power-on (TCA outputs survive an MLC
+        # power-cycle) so the chip boots to Start, not Start->Precharge.
+        for key_prefix in ("tsms", "dash_chg"):
+            ak, pk, nk = (f"{key_prefix}_tca_addr", f"{key_prefix}_tca_port",
+                          f"{key_prefix}_tca_pin")
+            if all(k in ams_profile for k in (ak, pk, nk)):
+                addr, port, pin = (int(ams_profile[ak]), int(ams_profile[pk]),
+                                   int(ams_profile[nk]))
+                mask = _combined_output_mask(ams_profile, addr, port)
+                client.call("tca.set_direction", addr=addr, port=port, mask=mask)
+                client.call("tca.write_pin", addr=addr, port=port, pin=pin, value=False)
+        time.sleep(2.0)
+        observe_acu.clear()
+        client.call("tca.write_pin", addr=0x20, port=0, pin=relay_bit, value=True)
+        t_power_on = time.monotonic()
+        from tests.hil.ams import kpi_plugin
+        kpi_plugin.bump_power_cycle()
+    finally:
+        client.close()
+
+    # The current-sensor-rework firmware boots slower (CubeMX-regenerated,
+    # RTOS/HAL bump) than the single-ended build, so allow more slack than
+    # fresh_boot's 5 s before declaring the app dead.
+    deadline = time.monotonic() + 12.0
+    first = None
+    while time.monotonic() < deadline:
+        f = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
+        if f is not None:
+            first = f
+            break
+        time.sleep(0.05)
+    if first is None:
+        pytest.fail(
+            "No 0x4A0 telemetry within 12 s of power-on. current-sensor-diff "
+            "app didn't reach MainTask, or FDCAN1 isn't transmitting.")
+
+    return {
+        "first_frame":   M.decode_telem_status(first.data),
+        "t_power_on":    t_power_on,
+        "t_first_frame": time.monotonic(),
+    }
+
+
+@pytest.fixture
+def fresh_boot_diff(ams_profile, mlc_powered, observe_acu, acu_heartbeat,
+                    pack_current_diff):
+    """`fresh_boot` variant for the #348 current-sensor firmware: drives the
+    differential pack-current pair (`pack_current_diff`) instead of the
+    single-ended `current_heartbeat`. Same contract (returns first 0x4A0 +
+    timing). `acu_heartbeat` + `pack_current_diff` are active before power-on
+    so VCU + current freshness predicates see data inside the boot grace."""
+    return _boot_diff_core(ams_profile, mlc_powered, observe_acu)
+
+
 # ---------------------------------------------------------------------------
 # Polling helpers
 # ---------------------------------------------------------------------------

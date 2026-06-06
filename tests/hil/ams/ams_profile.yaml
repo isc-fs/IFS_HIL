@@ -95,6 +95,17 @@ pack_current_mv_per_a:    5.0    # (OUT_P - OUT_N) sensitivity
 pack_current_default_a:   0      # quiescent
 pack_current_period_ms:   50     # 20 Hz refresh (current-stale freshness)
 
+# -- Block I/J current-sensor test parameters (test_block_i_current.py) --
+# Accuracy tolerance is generous pending the AMS team blessing adc_to_mA /
+# VREF+: the firmware reads ~7.4% LOW vs the 5 mV/A injection on-bench
+# (2026-06-06, pure gain). Tighten once #348 calibration is confirmed.
+pack_current_accuracy_tol_pct: 12     # |reported - injected| <= 12 % (I-100)
+pack_current_zero_floor_a:     10     # |reported| < 10 A at 0 A inject (I-101)
+pack_current_overcurrent_a:    240    # > CurrentMaxMa (200 A) even at 0.926x (J-100/J-101)
+pack_current_settle_s:         4.0    # IIR settle after a set_A step before reading
+                                       # (1.5 s under-reads a 200 A step badly; 6-boot
+                                       # char 2026-06-06: 3 s already clean, 4 s margin)
+
 # -- ACU stim frame IDs (mirror firmware kAcuRx*) --------------------
 acu_rx_dc_bus_id:         0x100      # extended, DLC 2, LE uint16 volts
 # Retired in isc-fs/IFS08-CE-AMS#187: 0x600 start_button and 0x18FF50E7
