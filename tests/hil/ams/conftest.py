@@ -351,6 +351,103 @@ def current_heartbeat(ams_profile, mlc_powered):
 
 
 # ---------------------------------------------------------------------------
+# pack_current_diff -- differential pack-current injection (AMS #348 rework)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def pack_current_diff(ams_profile, mlc_powered):
+    """Drive the differential pack-current pair into the AMS (#348 current-
+    sensor rework). DAC4 ch0 -> S_current_p (PF7/OUT_P), ch1 -> S_current_n
+    (PF8/OUT_N); the firmware reads 5 mV/A of (OUT_P - OUT_N). A common-mode
+    of ~1.44 V keeps both legs inside the 0-3.3 V rail across +-200 A.
+
+        set_A(I): OUT_P = CM + I*(mV/A)/2 ; OUT_N = CM - I*(mV/A)/2   (volts)
+
+    Opt-in: needs `pack_current_dac_idx` + `pack_current_dac_ch_p/_n` in
+    ams_profile.yaml; a no-op (state dict only) otherwise -- the DAC -> PF7/PF8
+    routing is bench-physical (DAC4 ch0/ch1; see CLAUDE.md DAC80504 wiring).
+
+    Exposes (current_heartbeat-shaped):
+      - `set_A(amps)`            -- set the injected pack current (default 0 A)
+      - `pause()` / `resume()`   -- stop / restart driving (pause holds last V)
+      - `A` / `paused`
+    """
+    period_s = float(ams_profile.get("pack_current_period_ms", 50)) / 1000.0
+    dac_idx  = ams_profile.get("pack_current_dac_idx")
+    ch_p     = ams_profile.get("pack_current_dac_ch_p")
+    ch_n     = ams_profile.get("pack_current_dac_ch_n")
+    cm_v     = float(ams_profile.get("pack_current_cm_v", 1.44))
+    mv_per_a = float(ams_profile.get("pack_current_mv_per_a", 5.0))
+    enabled  = dac_idx is not None and ch_p is not None and ch_n is not None
+
+    state = {
+        "A":         float(ams_profile.get("pack_current_default_a", 0)),
+        "paused":    False,
+        "enabled":   enabled,
+        "dac_idx":   dac_idx,
+        "ch_p":      ch_p,
+        "ch_n":      ch_n,
+        "cm_v":      cm_v,
+        "mv_per_a":  mv_per_a,
+        "period_ms": int(period_s * 1000),
+    }
+
+    def _legs(amps):
+        half = amps * (mv_per_a / 1000.0) / 2.0   # half the differential, volts
+        return cm_v + half, cm_v - half            # (OUT_P, OUT_N)
+
+    if enabled:
+        from broker.server import BrokerClient
+        client = BrokerClient(
+            os.environ.get("HIL_BROKER_SOCKET", "/run/hil-broker/broker.sock"))
+        stop_evt = threading.Event()
+
+        def _loop():
+            while not stop_evt.is_set():
+                if not state["paused"]:
+                    try:
+                        vp, vn = _legs(state["A"])
+                        client.call("dac.set_voltage", idx=dac_idx,
+                                    channel=ch_p, volts=vp)
+                        client.call("dac.set_voltage", idx=dac_idx,
+                                    channel=ch_n, volts=vn)
+                    except Exception as e:
+                        log.warning("pack_current_diff DAC write failed: %s", e)
+                        break
+                stop_evt.wait(period_s)
+
+        t = threading.Thread(target=_loop, name="pack-current-diff", daemon=True)
+        t.start()
+        log.info("pack_current_diff: DAC%d ch%d/%d, CM %.2f V, %.1f mV/A "
+                 "(start %.1f A)", dac_idx, ch_p, ch_n, cm_v, mv_per_a, state["A"])
+    else:
+        log.info("pack_current_diff: DISABLED (no pack_current_dac_idx + "
+                 "pack_current_dac_ch_p/_n in ams_profile.yaml).")
+        stop_evt = None
+        t = None
+
+    def set_A(amps): state["A"] = float(amps)
+    def pause():     state["paused"] = True
+    def resume():    state["paused"] = False
+
+    state["set_A"]  = set_A
+    state["pause"]  = pause
+    state["resume"] = resume
+
+    yield state
+
+    if stop_evt is not None:
+        stop_evt.set()
+        if t is not None:
+            t.join(timeout=1.0)
+        try:   # park both legs at CM (0 A) so no current is left injected
+            client.call("dac.set_voltage", idx=dac_idx, channel=ch_p, volts=cm_v)
+            client.call("dac.set_voltage", idx=dac_idx, channel=ch_n, volts=cm_v)
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
 # charger_0x101 -- operator charge-request emitter (AMS #311 / #316)
 # ---------------------------------------------------------------------------
 
@@ -906,6 +1003,78 @@ def fresh_boot(ams_profile, mlc_powered, observe_acu, acu_heartbeat,
         "t_power_on":     t_power_on,
         "t_first_frame":  time.monotonic(),
     }
+
+
+def _boot_diff_core(ams_profile, mlc_powered, observe_acu):
+    """Relay power-cycle to a clean Start and return the first decoded 0x4A0.
+
+    Mirror of `fresh_boot`'s core, kept standalone so the #348 current-sensor
+    block can boot with the DIFFERENTIAL current source active. `fresh_boot`
+    proper still pulls in the single-ended `current_heartbeat`, which drives
+    DAC4 ch0 (PF7) only and fights the differential `pack_current_diff` on the
+    same channel — wrong input for the PF7/PF8 rework firmware. The #348
+    migration will fold `fresh_boot` onto `pack_current_diff` and drop this.
+    """
+    from broker.server import BrokerClient
+    from tools.firmware_test.ams import can_map as M
+
+    client = BrokerClient(
+        os.environ.get("HIL_BROKER_SOCKET", "/run/hil-broker/broker.sock"))
+    relay_bit = mlc_powered["relay_bit"]
+    try:
+        client.call("tca.write_pin", addr=0x20, port=0, pin=relay_bit, value=False)
+        # Drop TSMS + DASH_CHG before power-on (TCA outputs survive an MLC
+        # power-cycle) so the chip boots to Start, not Start->Precharge.
+        for key_prefix in ("tsms", "dash_chg"):
+            ak, pk, nk = (f"{key_prefix}_tca_addr", f"{key_prefix}_tca_port",
+                          f"{key_prefix}_tca_pin")
+            if all(k in ams_profile for k in (ak, pk, nk)):
+                addr, port, pin = (int(ams_profile[ak]), int(ams_profile[pk]),
+                                   int(ams_profile[nk]))
+                mask = _combined_output_mask(ams_profile, addr, port)
+                client.call("tca.set_direction", addr=addr, port=port, mask=mask)
+                client.call("tca.write_pin", addr=addr, port=port, pin=pin, value=False)
+        time.sleep(2.0)
+        observe_acu.clear()
+        client.call("tca.write_pin", addr=0x20, port=0, pin=relay_bit, value=True)
+        t_power_on = time.monotonic()
+        from tests.hil.ams import kpi_plugin
+        kpi_plugin.bump_power_cycle()
+    finally:
+        client.close()
+
+    # The current-sensor-rework firmware boots slower (CubeMX-regenerated,
+    # RTOS/HAL bump) than the single-ended build, so allow more slack than
+    # fresh_boot's 5 s before declaring the app dead.
+    deadline = time.monotonic() + 12.0
+    first = None
+    while time.monotonic() < deadline:
+        f = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
+        if f is not None:
+            first = f
+            break
+        time.sleep(0.05)
+    if first is None:
+        pytest.fail(
+            "No 0x4A0 telemetry within 12 s of power-on. current-sensor-diff "
+            "app didn't reach MainTask, or FDCAN1 isn't transmitting.")
+
+    return {
+        "first_frame":   M.decode_telem_status(first.data),
+        "t_power_on":    t_power_on,
+        "t_first_frame": time.monotonic(),
+    }
+
+
+@pytest.fixture
+def fresh_boot_diff(ams_profile, mlc_powered, observe_acu, acu_heartbeat,
+                    pack_current_diff):
+    """`fresh_boot` variant for the #348 current-sensor firmware: drives the
+    differential pack-current pair (`pack_current_diff`) instead of the
+    single-ended `current_heartbeat`. Same contract (returns first 0x4A0 +
+    timing). `acu_heartbeat` + `pack_current_diff` are active before power-on
+    so VCU + current freshness predicates see data inside the boot grace."""
+    return _boot_diff_core(ams_profile, mlc_powered, observe_acu)
 
 
 # ---------------------------------------------------------------------------

@@ -81,6 +81,34 @@ current_heartbeat_dac_idx:     3     # broker idx 3 = DAC4 (U15)
 current_heartbeat_dac_channel: 0     # ch0 -> AMS PF7
 current_heartbeat_default_mA:  0     # quiescent 0 A (= 2.5 V on the DAC)
 
+# -- Pack current injection: DIFFERENTIAL (AMS #348 current-sensor rework) --
+# For the #348 firmware (PF7/PF8 differential pack sense), superseding the
+# single-ended current_heartbeat. DAC4 drives both legs: ch0 -> S_current_p
+# (PF7/OUT_P), ch1 -> S_current_n (PF8/OUT_N). Firmware reads 5 mV/A of
+# (OUT_P - OUT_N); CM 1.44 V keeps both legs in 0-3.3 V across +-200 A.
+# Bench wiring: DAC4 ch0/ch1 -> PF7/PF8 (conftest::pack_current_diff).
+pack_current_dac_idx:     3      # broker idx 3 = DAC4 (U15)
+pack_current_dac_ch_p:    0      # ch0 -> S_current_p (PF7 / OUT_P)
+pack_current_dac_ch_n:    1      # ch1 -> S_current_n (PF8 / OUT_N)
+pack_current_cm_v:        1.44   # common-mode (legs equal -> 0 A)
+pack_current_mv_per_a:    5.0    # (OUT_P - OUT_N) sensitivity
+pack_current_default_a:   0      # quiescent
+pack_current_period_ms:   50     # 20 Hz refresh (current-stale freshness)
+
+# -- Block I/J current-sensor test parameters (test_block_i_current.py) --
+# Post AMS #350 (CurrentMvPerAmpe1 50->46, CurrentZeroCount 2048->2050) the
+# firmware is commissioned from this bench: gain residual +0.4 %, zero nulled.
+# Tol is now tight (+-2 %). NOTE: cal is board-specific (VREF+ tolerance) --
+# re-measure 0.924x/+0.6 A per carrier (COMMISSIONING #2) and loosen the tol if
+# a different board reads further off.
+pack_current_accuracy_tol_pct: 2      # |reported - injected| <= 2 % (I-100; +0.4% residual)
+pack_current_zero_floor_a:     5      # |reported| < 5 A at 0 A inject (I-101; zero nulled)
+pack_current_overcurrent_a:    210    # > CurrentMaxMa (200 A real post-#350) -> trips (J-100/J-101)
+pack_current_undercurrent_a:   190    # < 200 A real -> must NOT trip (J-102 brackets trip at 200 A)
+pack_current_settle_s:         4.0    # IIR settle after a set_A step before reading
+                                       # (1.5 s under-reads a 200 A step badly; 6-boot
+                                       # char 2026-06-06: 3 s already clean, 4 s margin)
+
 # -- ACU stim frame IDs (mirror firmware kAcuRx*) --------------------
 acu_rx_dc_bus_id:         0x100      # extended, DLC 2, LE uint16 volts
 # Retired in isc-fs/IFS08-CE-AMS#187: 0x600 start_button and 0x18FF50E7
