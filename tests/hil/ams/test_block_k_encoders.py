@@ -60,7 +60,7 @@ def _wait_state(observe_acu, target_state: int, timeout_s: float) -> dict:
 
 class TestK100Frame0x4A0DecodeAcrossStates:
 
-    def test_k100(self, fresh_boot, tsms, dash_chg, acu_heartbeat,
+    def test_k100(self, fresh_boot, tsms, dash_chg, acu_heartbeat, pico_emu,
                   wait_for_state, observe_acu, ams_profile):
         _require_inputs(tsms, dash_chg)
         stub_mask = int(ams_profile["stub_module_online_mask"])
@@ -117,14 +117,17 @@ class TestK100Frame0x4A0DecodeAcrossStates:
                        timeout_ms=hold_ms + int(ams_profile["state_transition_window_ms"]) + 100)
         snapshot(M.FsmState.RUN)
 
-        # Error (drop TSMS)
-        tsms.deassert()
+        # Error -- #327: a TSMS drop is now a non-latching de-energise to
+        # Start, not a sticky Error. Induce Error with a cell over-temp fault;
+        # it leaves cell *voltages* at the stub value so the 0x4A0 cell-mV
+        # invariants in snapshot() still hold.
+        pico_emu.set_all_temps(800)  # 80 C > CellOverTempC -> over-temp fault
         wait_for_state(M.FsmState.ERROR,
-                       timeout_ms=int(ams_profile["state_transition_window_ms"]) + 50)
+                       timeout_ms=int(ams_profile["tx_telemetry_period_ms"]) * 2 + 500)
         snapshot(M.FsmState.ERROR)
         assert not seen[M.FsmState.ERROR]["ams_ok"], "AMS_OK should be 0 in Error"
 
-        # We didn't hit Charge in this run (Error is sticky after Run).
+        # We didn't hit Charge in this run (the OT-induced Error is sticky).
         # C-042's charger-path test covers the Charge-state decoder
         # invariants; not repeating here to keep the test fast.
 
