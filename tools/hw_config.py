@@ -124,8 +124,10 @@ RELAY_PINS = {
 # ---------------------------------------------------------------------------
 MCP2515_OSC_HZ = 16_000_000
 
-# CAN bus bitrate for loopback test (bench bus is 1 Mbps — #338 / BL #120)
-CAN_BITRATE = 1_000_000
+# CAN bus bitrate for loopback test. Bench bus is 500 kbps (classic CAN,
+# 68.75 % SP): both the AMS app (AMS #351) and the v1.6.2 multi-FDCAN
+# bootloader reverted from the 1 Mbps experiment (#338/#341) back to 500 k.
+CAN_BITRATE = 500_000
 
 # ---------------------------------------------------------------------------
 # MLC carrier current limits (A) — flag unexpected consumption
