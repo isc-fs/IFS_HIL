@@ -426,13 +426,28 @@ def pack_current_diff(ams_profile, mlc_powered):
         stop_evt = None
         t = None
 
-    def set_A(amps): state["A"] = float(amps)
+    def set_A(amps):
+        state["A"] = float(amps)
+        state["paused"] = False        # symmetric current mode re-enabled
+
+    def set_legs(vp, vn):
+        """Drive the two legs to explicit voltages, pausing the symmetric
+        current driver. For Block-N disconnect / open-leg rows (OUT_P or OUT_N
+        driven independently). A single write holds — the DAC latches."""
+        state["paused"] = True
+        if enabled:
+            client.call("dac.set_voltage", idx=dac_idx, channel=ch_p,
+                        volts=max(0.0, min(3.3, vp)))
+            client.call("dac.set_voltage", idx=dac_idx, channel=ch_n,
+                        volts=max(0.0, min(3.3, vn)))
+
     def pause():     state["paused"] = True
     def resume():    state["paused"] = False
 
-    state["set_A"]  = set_A
-    state["pause"]  = pause
-    state["resume"] = resume
+    state["set_A"]    = set_A
+    state["set_legs"] = set_legs
+    state["pause"]    = pause
+    state["resume"]   = resume
 
     yield state
 
