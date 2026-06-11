@@ -101,7 +101,7 @@ class CanFlasher:
         practice.
     """
 
-    def __init__(self, channel: str = "can2", bitrate: int = 1_000_000,
+    def __init__(self, channel: str = "can2", bitrate: int = 500_000,
                  node_id: int = 0x01,
                  discover_timeout_ms: int = 3000,
                  per_frame_timeout_ms: int = 30_000,

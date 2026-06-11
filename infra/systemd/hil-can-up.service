@@ -13,11 +13,11 @@ After=sys-subsystem-net-devices-can0.device sys-subsystem-net-devices-can1.devic
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-# 1 Mbps is the bench standard: the multi-FDCAN bootloader
-# (stm32-can-bootloader #120 / bench #143) serves the protocol at 1 Mbps,
-# and the AMS is migrating its vehicle comms onto FDCAN1 at the same rate
-# (one bus for BL + vehicle). NB the AMS app firmware is still 500 k until
-# that migration lands, so AMS HIL/CI flashing is 1 M-only from here.
+# 500 kbps is the bench standard (classic CAN, 68.75 % sample point):
+# both the AMS app (AMS #351) and the v1.6.2 multi-FDCAN bootloader
+# reverted from the 1 Mbps experiment (#338/#341) back to 500 k. The
+# multi-FDCAN BL still serves all three FDCAN buses — only the bitrate
+# moved back.
 # txqueuelen=1000 is required for `can-flasher flash` — the default 10
 # overflows the TX queue during sustained flash writes and returns
 # ENOBUFS mid-sector. restart-ms=200 enables the kernel's automatic
@@ -28,7 +28,7 @@ ExecStart=/bin/sh -c '\
   for i in 0 1 2; do \
     /usr/sbin/ip link set "can$i" down 2>/dev/null || true; \
     /usr/sbin/ip link set "can$i" txqueuelen 1000; \
-    /usr/sbin/ip link set "can$i" up type can bitrate 1000000 restart-ms 200; \
+    /usr/sbin/ip link set "can$i" up type can bitrate 500000 restart-ms 200; \
   done'
 ExecStop=/bin/sh -c '\
   for i in 0 1 2; do \

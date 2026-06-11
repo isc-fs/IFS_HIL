@@ -362,16 +362,16 @@ c.call('ina.current', addr=0x40) * 1000   # mA — expect ~130 mA
 Single ECU, factory-default node ID:
 ```sh
 can-flasher \
-    --interface socketcan --channel can2 --bitrate 1000000 \
+    --interface socketcan --channel can2 --bitrate 500000 \
     --node-id 0x1 --timeout 10000 \
     flash /tmp/firmware.bin \
     --address 0x08020000 --verify-after --jump
 ```
 
 `--address 0x08020000` = app-image start for STM32H733 +
-`isc-fs/stm32-can-bootloader`. **The bench bus is 1 Mbps** (multi-FDCAN BL
-standard, stm32-can-bootloader #120 / #143); a carrier still on the
-pre-#120 500 k BL needs `--bitrate 500000`. After `--jump`, `discover` is
+`isc-fs/stm32-can-bootloader`. **The bench bus is 500 kbps** (classic CAN,
+68.75 % SP — both the AMS app and the v1.6.2 multi-FDCAN BL reverted from the
+1 Mbps experiment #338/#341 per AMS #351). After `--jump`, `discover` is
 silent — that's success, not failure. Drop app back to BL without touching the
 board:
 ```sh

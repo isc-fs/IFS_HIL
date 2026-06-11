@@ -29,6 +29,13 @@ from tools.firmware_test.ams import can_map as M
 
 _BUS = "can2"   # AMS bus = ams_profile.bus_acu (FDCAN1 on Pi can2 since v1.6.0)
 
+# The 1 Mbps migration this block validates (AMS #338/#341) was reverted to
+# 500 k by AMS #351 + the v1.6.2 bootloader, so the bench bus is 500 k again
+# and these rows no longer apply. Retained for reference — delete, or revive
+# with the bus pinned to 1 Mbps, if the 1 M move is ever revisited.
+pytestmark = pytest.mark.skip(
+    reason="1 Mbps migration (AMS #338/#341) reverted by #351; bench is 500 k")
+
 
 def _can_err_counts(channel: str = _BUS) -> tuple[int, int]:
     """(rx_errors, tx_errors) cumulative since interface-up, from `ip -s`."""

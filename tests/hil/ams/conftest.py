@@ -909,7 +909,7 @@ def flasher(ams_profile, mlc_powered):
         pytest.skip("can-flasher binary not on PATH")
     return CanFlasher(
         channel=ams_profile["bus_bms_bl"],
-        bitrate=1_000_000,
+        bitrate=500_000,
         node_id=int(ams_profile["bl_node_id"]),
         discover_timeout_ms=int(ams_profile["bl_discover_timeout_ms"]),
         per_frame_timeout_ms=int(ams_profile["bl_per_frame_timeout_ms"]),
