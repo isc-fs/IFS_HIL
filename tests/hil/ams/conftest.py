@@ -920,6 +920,48 @@ def flasher(ams_profile, mlc_powered):
 # Power-cycle + first-telemetry helper (used by every block)
 # ---------------------------------------------------------------------------
 
+def _robust_power_on(client, relay_bit, ina_addr, min_mA, observe_acu=None,
+                     *, settle_s=0.3, retries=4):
+    """Close the carrier relay and VERIFY the chip actually drew power.
+
+    The TCA9555/relay contact is intermittent on this bench: a bare
+    `write_pin(True)` can leave the carrier unpowered (INA ~0) or only
+    briefly powered (telemeters at boot, then drops). Re-toggle until INA
+    reads a solid >= min_mA across two samples, clearing the observer (if
+    given) before the winning close so the caller's telemetry wait sees
+    post-power-on frames. Returns the monotonic power-on time; fails loudly
+    if the carrier never comes up -- that's a bench/relay fault, not firmware.
+    """
+    mA = 0.0
+    for attempt in range(1, retries + 1):
+        if observe_acu is not None:
+            observe_acu.clear()
+        client.call("tca.write_pin", addr=0x20, port=0, pin=relay_bit, value=True)
+        t_on = time.monotonic()
+        ok = True
+        for _ in range(2):
+            time.sleep(settle_s)
+            try:
+                mA = client.call("ina.current", addr=ina_addr) * 1000.0
+            except Exception:
+                mA = 0.0
+            if mA < min_mA:
+                ok = False
+                break
+        if ok:
+            if attempt > 1:
+                log.warning("carrier powered only on relay attempt %d (%.0f mA)",
+                            attempt, mA)
+            return t_on
+        client.call("tca.write_pin", addr=0x20, port=0, pin=relay_bit, value=False)
+        time.sleep(0.4)
+    pytest.fail(
+        f"carrier never drew >= {min_mA:.0f} mA after {retries} relay closes "
+        f"(last {mA:.0f} mA, INA 0x{ina_addr:02x}) -- intermittent TCA/relay or "
+        "carrier seating, not a firmware fault."
+    )
+
+
 @pytest.fixture
 def fresh_boot(ams_profile, mlc_powered, observe_acu, acu_heartbeat,
                current_heartbeat):
@@ -968,9 +1010,9 @@ def fresh_boot(ams_profile, mlc_powered, observe_acu, acu_heartbeat,
                 client.call("tca.write_pin", addr=addr, port=port,
                             pin=pin, value=False)
         time.sleep(2.0)
-        observe_acu.clear()
-        client.call("tca.write_pin", addr=0x20, port=0, pin=relay_bit, value=True)
-        t_power_on = time.monotonic()
+        t_power_on = _robust_power_on(
+            client, relay_bit, mlc_powered["ina_addr"],
+            float(ams_profile["mlc_boot_current_mA"]), observe_acu)
         # KPI: this fixture is the canonical per-test power-cycle.
         # Counted toward `power_cycle_count` for relay K_n + carrier
         # connector reseat-wear accounting.
@@ -1035,9 +1077,9 @@ def _boot_diff_core(ams_profile, mlc_powered, observe_acu):
                 client.call("tca.set_direction", addr=addr, port=port, mask=mask)
                 client.call("tca.write_pin", addr=addr, port=port, pin=pin, value=False)
         time.sleep(2.0)
-        observe_acu.clear()
-        client.call("tca.write_pin", addr=0x20, port=0, pin=relay_bit, value=True)
-        t_power_on = time.monotonic()
+        t_power_on = _robust_power_on(
+            client, relay_bit, mlc_powered["ina_addr"],
+            float(ams_profile["mlc_boot_current_mA"]), observe_acu)
         from tests.hil.ams import kpi_plugin
         kpi_plugin.bump_power_cycle()
     finally:
