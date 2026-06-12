@@ -232,7 +232,7 @@ class TestC032bHeldLineNoFire:
     """
 
     def test_c032b_held_dash_does_not_fire(
-        self, mlc_powered, acu_heartbeat, current_heartbeat, observe_acu,
+        self, mlc_powered, acu_heartbeat, pack_current_diff, observe_acu,
         tsms, dash_chg, wait_for_state, ams_profile):
         _require_inputs(tsms, dash_chg)
         import os
