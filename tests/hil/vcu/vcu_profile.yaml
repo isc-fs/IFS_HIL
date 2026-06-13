@@ -15,7 +15,9 @@ bus_acu:                  can2       # fdcan2 ACU/flash/uDV (PCB CAN1/U17): 0x10
 bus_flash:                can2       # BL flash bus == the ACU bus
 
 # -- Bootloader ------------------------------------------------------
-bl_node_id:               0x02       # VCU BL node-id (!= AMS 0x01) -- PLACEHOLDER, confirm/burn
+bl_node_id:               0x01       # ECU/VCU node-id (Raul 2026-06-13: ECU=0x01, AMS=0x02, uDV=0x03).
+                                     # NOTE: the AMS chip is still physically 0x01 until re-burned ->
+                                     # power MLC2 (AMS) OFF when flashing the VCU, else both answer 0x01.
 bl_discover_timeout_ms:   3000
 bl_per_frame_timeout_ms:  30000
 bl_flash_timeout_s:       60
