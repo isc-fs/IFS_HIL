@@ -126,16 +126,19 @@ def _e2e_frame(dlc: int, cnt: int, data_id: int, sig_writer) -> bytes:
 
 
 def encode_inv_state2(inv_state: int, cnt: int, data_id: int = 0x461) -> bytes:
-    """EMC_TX_STATE_2 (0x461, 7 B): App_State_App @bit32 w7 = inv_state."""
+    """EMC_TX_STATE_2 (0x461, 7 B): inv_state in byte4. Firmware reads
+    `data[4] & 0x0F` (can.c:93) with NO E2E validation — any CRC/CNT accepted."""
     def w(buf):
-        buf[4] = (buf[4] & 0x80) | (inv_state & 0x7F)   # bit32 → byte4 low 7
+        buf[4] = inv_state & 0x0F
     return _e2e_frame(7, cnt, data_id, w)
 
 
 def encode_inv_state7(dc_bus_v: int, cnt: int, data_id: int = 0x466) -> bytes:
-    """EMC_TX_STATE_7 (0x466, 6 B): DCBus_Voltage_V @bit16 w10."""
+    """EMC_TX_STATE_7 (0x466, 6 B): DC-bus @bytes2-3. Firmware reads
+    `read_u16_le(&data[2])` and sets inv_vdc_ready on *any* receipt (can.c:134),
+    so even a 0 V frame opens the WAIT_INV_VDC_CONFIG gate."""
     def w(buf):
-        v = dc_bus_v & 0x3FF
+        v = dc_bus_v & 0xFFFF
         buf[2] = v & 0xFF
-        buf[3] = (buf[3] & 0xFC) | ((v >> 8) & 0x03)    # bits16-25
+        buf[3] = (v >> 8) & 0xFF
     return _e2e_frame(6, cnt, data_id, w)
