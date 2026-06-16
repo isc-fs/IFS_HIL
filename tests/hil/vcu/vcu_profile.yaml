@@ -26,7 +26,7 @@ firmware_info_address:    0x08020400 # bl_fwinfo_t (BL_APP_BASE + 0x400)
 
 # -- Heartbeat (VCU TX 0x100) ----------------------------------------
 heartbeat_id:             0x100      # VCU_heartbeat, 2 bytes
-heartbeat_extended:       true       # ECU sends 0x100 as FDCAN_EXTENDED_ID (ECU CLAUDE.md)
+heartbeat_extended:       false      # VCU sends 0x100 as STANDARD 11-bit id (control.c m->ide=0u)
 heartbeat_max_gap_ms:     20         # ~10 ms cadence; must never stop (Block B)
 
 # -- Analog pedals: bench DAC1 (idx0) -> ECU ADC3 (Core/Src/io_signals.c) --

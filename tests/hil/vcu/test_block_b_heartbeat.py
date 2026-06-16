@@ -40,7 +40,7 @@ class TestB001HeartbeatStreams:
         """B-001 (boot scope): 0x100 present right after boot, no gap > 3x the
         nominal period. Cross-transition continuity TODO (needs C-block stim)."""
         assert fresh_boot["first_frame"]["dc_bus_v"] is not None
-        ext = bool(vcu_profile.get("heartbeat_extended", True))
+        ext = bool(vcu_profile.get("heartbeat_extended", False))
         max_gap_s = float(vcu_profile["heartbeat_max_gap_ms"]) / 1000.0 * 3
         stamps = _collect_heartbeats(observe_acu, ext, 1.5)
         assert len(stamps) >= 5, \

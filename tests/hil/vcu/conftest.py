@@ -116,7 +116,7 @@ def fresh_boot(vcu_profile, mlc_powered, observe_acu):
     needed for liveness (FSM-transition stimulus comes with the C-block)."""
     client = _broker()
     relay_bit = mlc_powered["relay_bit"]
-    ext = bool(vcu_profile.get("heartbeat_extended", True))
+    ext = bool(vcu_profile.get("heartbeat_extended", False))
     try:
         client.call("tca.write_pin", addr=0x20, port=0, pin=relay_bit, value=False)
         time.sleep(2.0)
