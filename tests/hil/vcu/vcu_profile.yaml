@@ -11,8 +11,15 @@ mlc_boot_settle_s:        0.5
 
 # -- CAN buses (PCB->kernel inversion, operating-model invariant #3) --
 bus_inv:                  can0       # fdcan1 INV  (PCB CAN3/U21): 0x360/0x362 <-> 0x461-0x466
-bus_acu:                  can2       # fdcan2 ACU/flash/uDV (PCB CAN1/U17): 0x100/0x020/0x4A0
-bus_flash:                can2       # BL flash bus == the ACU bus
+bus_acu:                  can2       # fdcan2 ACU/flash/uDV/external (PCB CAN1/U17): 0x100/0x020/0x4A0
+bus_flash:                can2       # BL flash bus == the ACU bus (multi-FDCAN BL also answers on can0)
+# Per-bus sample points (ECU FDCAN clk = HSE 24 MHz / 48 = 500 k, but NON-STANDARD SP).
+# CRITICAL: bench default (hil-can-up) is 68.75% on every bus; the INV bus MUST be
+# overridden to 37.5% or the ECU's FDCAN1 won't cleanly RX the inverter frames
+# (proven on the bench: FDCAN2 ACKs only at 0.688, FDCAN1 only at 0.375).
+can_bitrate:              500000
+bus_inv_sample_point:     0.375      # FDCAN1/INV  (presc6 seg1=2  seg2=5)
+bus_acu_sample_point:     0.688      # FDCAN2/ACU  (presc3 seg1=10 seg2=5 = 68.75%)
 
 # -- Bootloader ------------------------------------------------------
 bl_node_id:               0x01       # ECU/VCU node-id (Raul 2026-06-13: ECU=0x01, AMS=0x02, uDV=0x03).

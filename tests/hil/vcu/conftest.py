@@ -39,6 +39,36 @@ def _skip_if_no_can(channel: str) -> None:
         pytest.skip(f"SocketCAN interface {channel} not present")
 
 
+# -- per-bus sample points (CRITICAL: ECU FDCAN1/INV runs at 37.5%) --
+@pytest.fixture(scope="session", autouse=True)
+def vcu_can_sp(vcu_profile):
+    """Set the per-bus sample points the ECU's FDCANs use, before any CAN op:
+    INV/can0 = 37.5%, ACU/can2 = 68.75%. The bench default (hil-can-up) is
+    68.75% on every bus, which MISMATCHES FDCAN1/INV (37.5%) -> the ECU won't
+    cleanly RX the inverter frames (Blocks C/D, K-002). Idempotent; keeps
+    txqueuelen=1000 (invariant #5). No-op off-bench / without sudo."""
+    import subprocess
+    br = int(vcu_profile.get("can_bitrate", 500000))
+    plan = [(vcu_profile["bus_inv"], float(vcu_profile.get("bus_inv_sample_point", 0.375))),
+            (vcu_profile["bus_acu"], float(vcu_profile.get("bus_acu_sample_point", 0.688)))]
+    for ch, sp in plan:
+        if not Path(f"/sys/class/net/{ch}").exists():
+            continue
+        try:
+            subprocess.run(["sudo", "ip", "link", "set", ch, "down"], check=False, timeout=5)
+            subprocess.run(["sudo", "ip", "link", "set", ch, "type", "can", "bitrate",
+                            str(br), "sample-point", f"{sp:.3f}", "restart-ms", "200"],
+                           check=True, timeout=5)
+            subprocess.run(["sudo", "ip", "link", "set", ch, "txqueuelen", "1000"],
+                           check=False, timeout=5)
+            subprocess.run(["sudo", "ip", "link", "set", ch, "up"], check=True, timeout=5)
+            log.info("VCU bus %s -> sample-point %.3f @ %d bps", ch, sp, br)
+        except Exception as e:  # bench/perm issue -> warn, don't abort the session
+            log.warning("could not set SP on %s (%s); ECU may not comm if the bench "
+                        "default SP mismatches its FDCAN", ch, e)
+    yield
+
+
 # -- carrier power (MLC4) --------------------------------------------
 def _robust_power_on(client, relay_bit, ina_addr, min_mA, observe=None,
                      *, settle_s=0.3, retries=4):
