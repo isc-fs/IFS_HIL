@@ -82,7 +82,7 @@ def main():
     rx_bus = can.interface.Bus(args.acu, interface="socketcan")
 
     st = {"inv": 0, "vdc": 0, "sendvdc": False, "ams": 3, "sess": 1, "prech": 1,
-          "cnt": 0, "run": True, "sim": args.ams == "sim", "fsm": None, "ams_seen": False}
+          "cnt": 0, "run": True, "sim": args.ams == "sim", "fsm": None, "torque": None, "ams_seen": False}
 
     def sender():
         while st["run"]:
@@ -100,8 +100,10 @@ def main():
             m = rx_bus.recv(timeout=0.4)
             if m is None:
                 continue
-            if m.arbitration_id == ID_PIT_STATUS and len(m.data) >= 1:
+            if m.arbitration_id == ID_PIT_STATUS and len(m.data) >= 8:
                 st["fsm"] = m.data[0]
+                raw = (m.data[6] << 8) | m.data[7]   # 0x700 torque_cmd: 55|16@0- (BE16, signed)
+                st["torque"] = raw - 0x10000 if raw >= 0x8000 else raw
             elif m.arbitration_id == ID_AMS_STATUS:
                 st["ams_seen"] = True
 
@@ -143,9 +145,9 @@ def main():
     c.call("dac.set_voltage", idx=0, channel=1, volts=apps_volts(2050, 2950, 50))  # APPS1 ~50%
     c.call("dac.set_voltage", idx=0, channel=2, volts=apps_volts(1915, 2570, 50))  # APPS2 ~50%
     time.sleep(0.6)
-    print("[4] torque commanded (inv=6, APPS~50%%) -> fsm=%s" % show())
+    print("[4] torque commanded (inv=6, APPS~50%%) -> fsm=%s torque_cmd=%s" % (show(), st["torque"]))
 
-    print("=== final fsm = %s ===" % show())
+    print("=== final fsm = %s, torque_cmd = %s ===" % (show(), st["torque"]))
     st["run"] = False
     time.sleep(0.1)
     for b in (inv_bus, acu_bus, rx_bus):

@@ -248,12 +248,13 @@ def inv_heartbeat(vcu_profile):
 @pytest.fixture
 def acu_inject(vcu_profile):
     """Background inject on the ACU bus (can2): 0x020 precharge-ack
-    (set_precharge 0/1) and 0x4A0 AMS status byte0 (set_ams_state n)."""
+    (set_precharge 0/1) and 0x4A0 AMS status -- byte0 (set_ams_state n) +
+    byte3 session-id (set_session s, for the Block J-003 AMS-reboot guard)."""
     import threading
     from tools.firmware_test.acu_stim import AcuStim
     bus = vcu_profile["bus_acu"]
     _skip_if_no_can(bus)
-    st = {"prech": 0, "ams": 0, "send_prech": False, "send_ams": False, "run": True}
+    st = {"prech": 0, "ams": 0, "sess": 1, "send_prech": False, "send_ams": False, "run": True}
     stim = AcuStim(channel=bus)
     stim.start()
 
@@ -265,9 +266,11 @@ def acu_inject(vcu_profile):
                                   bytes([st["prech"] & 0xFF] + [0] * 7),
                                   is_extended_id=False)
                 if st["send_ams"]:
+                    _a = bytearray(8)
+                    _a[0] = st["ams"] & 0xFF      # 0x4A0[0] = ams_state
+                    _a[3] = st["sess"] & 0xFF     # 0x4A0[3] = session_id (can.c:161)
                     stim.send_raw(int(vcu_profile["ams_status_id"]),
-                                  bytes([st["ams"] & 0xFF] + [0] * 7),
-                                  is_extended_id=False)
+                                  bytes(_a), is_extended_id=False)
             except Exception:
                 pass
             time.sleep(0.05)
@@ -275,6 +278,7 @@ def acu_inject(vcu_profile):
     threading.Thread(target=loop, daemon=True).start()
     st["set_precharge"] = lambda v: st.update(prech=int(v), send_prech=True)
     st["set_ams_state"] = lambda n: st.update(ams=int(n), send_ams=True)
+    st["set_session"]   = lambda s: st.update(sess=int(s), send_ams=True)
     yield st
     st["run"] = False
     time.sleep(0.1)
