@@ -1,12 +1,14 @@
 ecu:
   name: vcu
   board: stm32h733zg
-  slot: MLC1
+  slot: MLC4                 # ECU is on MLC4 (AMS owns MLC2); was MLC1
   transport: can
-  can_channel: can0
+  can_channel: can2          # flash bus = FDCAN2 = can2 (operating-model invariant #3); was can0
   firmware:
-    binary: /srv/hil/build/vcu/firmware.bin
-    cmake_target: vcu_firmware
+    binary: /srv/hil/build/vcu/firmware.bin   # TODO(#56): point at the ECU08 .bin once CI builds it
+    cmake_target: ECU08      # real firmware target; was vcu_firmware
+  # TODO(#56): migrate flash_tool to the Rust can-flasher; tools.flash is legacy
+  # (IFS08_HIL CLAUDE.md known-drift) -- left as-is pending the CI flash-mechanism review.
   flash_tool: tools.flash:flash
   reset_sequence:
     - off
