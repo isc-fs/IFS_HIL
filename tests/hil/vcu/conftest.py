@@ -1,5 +1,5 @@
 """
-VCU / ECU HIL test fixtures (IFS08-CE-ECU#35). The VCU is on MLC4.
+VCU / ECU HIL test fixtures (IFS08-CE-ECU#62). The VCU is on MLC4.
 
 Layered on `tests/hil/conftest.py`'s `broker_available` + `psu_on`; mirrors
 `tests/hil/ams/conftest.py`. Wiring lives in `vcu_profile.yaml`. The pedal /
@@ -309,8 +309,8 @@ def start_button(vcu_profile, mlc_powered):
 @pytest.fixture
 def pit_diag(vcu_profile, observe_acu):
     """Enable the VCU pit-diag stream (0x7E0 'DEADBEEF') and expose
-    read_fsm() -> the FSM state byte from 0x700[0]. NOTE pit_diag_bus is a
-    PLACEHOLDER (can2); if 0x700 never appears it is on another FDCAN."""
+    read_fsm() -> the FSM state byte from 0x700[0]. pit-diag is on the
+    ACU bus (can2) -- ecu-rework has no DASH FDCAN."""
     from tools.firmware_test.acu_stim import AcuStim
     bus = vcu_profile["pit_diag_bus"]
     _skip_if_no_can(bus)

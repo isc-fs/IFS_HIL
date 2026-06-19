@@ -5,7 +5,7 @@ Composes the two CAN sims + the broker-driven pedals/button to walk the ECU FSM
 (IFS08-CE-ECU Core/Src/control.c) through its whole startup spine, watching
 pit-diag 0x700[0] (= fsm_state) at each gate:
 
-  WAIT_INV_VDC_CONFIG --(inverter Vdc + fresh AMS)--> BOOT --(AMS ok_precarga)-->
+  WAIT_INV_VDC_CONFIG --(inverter Vdc + fresh AMS)--> PRECHARGE --(AMS ok_precarga)-->
   WAIT_START_BRAKE --(start btn + brake)--> R2D_DELAY --(2 s)--> WAIT_INV_STANDBY
   --(inv_state==3)--> ACTIVE --(inv_state==6 + APPS)--> torque
 
@@ -14,7 +14,7 @@ The AMS is a PLUGGABLE source so the bench can move off the sim later:
   --ams real            -- power MLC2 (the real AMS) and let IT publish 0x4A0/0x020;
                            this script injects NO AMS frames. The real AMS must
                            independently reach Run + precharge-complete (its own
-                           TSMS/DASH_CHG/BMS bring-up) -- we only power it and
+                           TSMS/BMS bring-up) -- we only power it and
                            verify 0x4A0 is arriving.
 
 NB observation needs the ECU #48 transmit fix: the stimulus drives the FSM either
@@ -35,9 +35,8 @@ from tools.firmware_test.vcu import inverter_sim as INV    # noqa: E402
 from tools.firmware_test.vcu import ams_sim as AMS         # noqa: E402
 import can                                                 # noqa: E402
 
-FSM = {0: "WAIT_INV_VDC_CONFIG", 1: "BOOT", 2: "WAIT_PRECHARGE_ACK",
-       3: "WAIT_START_BRAKE", 4: "R2D_DELAY", 5: "WAIT_INV_STANDBY",
-       6: "ACTIVE", 7: "AMS_ERROR"}
+FSM = {0: "WAIT_INV_VDC_CONFIG", 1: "PRECHARGE", 2: "WAIT_START_BRAKE",
+       3: "R2D_DELAY", 4: "WAIT_INV_STANDBY", 5: "ACTIVE", 6: "AMS_ERROR"}
 ID_PIT_STATUS = 0x700
 ID_PIT_ENABLE = 0x7E0
 ID_AMS_STATUS = 0x4A0
@@ -130,16 +129,16 @@ def main():
     print("[0] boot + pit-diag enabled -> fsm=%s" % show())
 
     st["vdc"], st["sendvdc"] = 400, True
-    print("[1] inverter Vdc on  -> %s" % ("WAIT_START_BRAKE" if wait_fsm(3) else "no advance, fsm=%s" % show()))
+    print("[1] inverter Vdc on  -> %s" % ("WAIT_START_BRAKE" if wait_fsm(2) else "no advance, fsm=%s" % show()))
 
     c.call("tca.set_direction", addr=0x22, port=1, mask=0x00)
     c.call("tca.write_pin", addr=0x22, port=1, pin=0, value=True)     # start button
     c.call("dac.set_voltage", idx=0, channel=0, volts=1.5)            # brake > arm threshold
-    print("[2] start btn + brake -> %s" % ("R2D_DELAY" if wait_fsm(4) else "no advance, fsm=%s" % show()))
+    print("[2] start btn + brake -> %s" % ("R2D_DELAY" if wait_fsm(3) else "no advance, fsm=%s" % show()))
 
-    wait_fsm(5)
+    wait_fsm(4)
     st["inv"] = 3                                                     # inverter -> standby
-    print("[3] inverter standby -> %s" % ("ACTIVE" if wait_fsm(6) else "fsm=%s" % show()))
+    print("[3] inverter standby -> %s" % ("ACTIVE" if wait_fsm(5) else "fsm=%s" % show()))
 
     st["inv"] = 6                                                     # inverter -> torque
     c.call("dac.set_voltage", idx=0, channel=1, volts=apps_volts(2050, 2950, 50))  # APPS1 ~50%

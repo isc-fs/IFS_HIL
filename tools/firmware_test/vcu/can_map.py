@@ -1,9 +1,9 @@
 """
-VCU / ECU CAN frame definitions for the HIL bench (IFS08-CE-ECU#35).
+VCU / ECU CAN frame definitions for the HIL bench (IFS08-CE-ECU#62 (ecu-rework)).
 
 Sources of truth:
-  - VCU TX:   isc-fs/IFS08-CE-ECU/docs/dbc/ecu.dbc — 0x100 heartbeat (FDCAN
-              EXTENDED id), 0x700-0x703 + 0x7E1 pit-diag.
+  - VCU TX:   isc-fs/IFS08-CE-ECU/docs/dbc/ecu.dbc — 0x100 heartbeat (STANDARD
+              11-bit id), 0x700-0x705 + 0x7E1 pit-diag.
   - Inverter: NX0001-STS04_A16.dbc (node EMC). VCU→inv 0x360/0x362,
               inv→VCU 0x461-0x466. Every NX frame carries AUTOSAR E2E
               Profile-1 (CRC=byte0, rolling CNT=bits8-11).
@@ -21,8 +21,8 @@ INV_KERNEL = "can0"
 ACU_KERNEL = "can2"
 
 # -- VCU TX (observe) -------------------------------------------------
-ID_HEARTBEAT       = 0x100   # EXTENDED, 2 bytes (LE u16 dc_bus volts)
-HEARTBEAT_EXTENDED = True
+ID_HEARTBEAT       = 0x100   # STANDARD 11-bit, 2 bytes (LE u16 dc_bus volts)
+HEARTBEAT_EXTENDED = False   # STANDARD 11-bit id (ecu-rework)
 
 ID_PIT_ENABLE   = 0x7E0   # bench→VCU: 'DEADBEEF' enable / 0 disable
 ID_PIT_ACK      = 0x7E1   # VCU→bench: 1 enabled / 0 disabled
@@ -43,15 +43,15 @@ ID_AMS_STATUS    = 0x4A0   # AMS 0x4A0[0] FSM state
 
 
 class VcuFsmState(IntEnum):
-    """control.c startup FSM. Numeric values are the assumed declaration
-    order — CONFIRM against the firmware control.h enum (pit-diag 0x700[0])."""
+    """ecu-rework consolidated startup FSM (IFS08-CE-ECU#62). Numeric values
+    are the firmware enum order, reported in pit-diag 0x700[0]."""
     WAIT_INV_VDC_CONFIG = 0
-    BOOT                = 1
-    WAIT_PRECHARGE_ACK  = 2
-    WAIT_START_BRAKE    = 3
-    R2D_DELAY           = 4
-    WAIT_INV_STANDBY    = 5
-    ACTIVE              = 6
+    PRECHARGE           = 1
+    WAIT_START_BRAKE    = 2
+    R2D_DELAY           = 3
+    WAIT_INV_STANDBY    = 4
+    ACTIVE              = 5
+    AMS_ERROR           = 6
 
     @classmethod
     def name_of(cls, v: int) -> str:

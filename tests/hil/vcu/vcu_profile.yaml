@@ -2,7 +2,7 @@
 # Mirrors tests/hil/ams/ams_profile.yaml. The VCU is on MLC4 (AMS owns MLC2).
 # Wire contracts: VCU docs/dbc/ecu.dbc (0x100 + pit-diag) and the inverter
 # NX0001-STS04 dbc (node EMC: 0x360/0x362 cmd, 0x461-0x466 state).
-# Spec: isc-fs/IFS08-CE-ECU#35.  ← PLACEHOLDER markers = confirm before A-block flash.
+# Spec: isc-fs/IFS08-CE-ECU#62.  ← PLACEHOLDER markers = confirm before A-block flash.
 
 # -- Carrier slot (MLC4) ---------------------------------------------
 mlc_slot:                 4          # K4 = TCA 0x20 port0 pin3, INA 0x45
@@ -85,13 +85,13 @@ pit_diag_pedals_id:       0x701
 pit_diag_inverter_id:     0x702
 pit_diag_fwinfo_id:       0x703
 pit_diag_period_ms:       100
-pit_diag_bus:             can2       # PLACEHOLDER -- DASH(fdcan3) reserved, so likely the ACU bus
+pit_diag_bus:             can2       # confirmed on the FDCAN2/ACU bus (ecu-rework has no DASH)
 
 # -- FSM windows (Core/Src/control.c) --------------------------------
 state_transition_window_ms: 700
 boot_grace_ms:            2000
 r2d_delay_ms:             2000       # R2D_DELAY: RTDS active 2 s
-precharge_timeout_ms:     10000      # WAIT_PRECHARGE_ACK 10 s -> retry BOOT (feat/1)
+precharge_timeout_ms:     10000      # PRECHARGE 10 s -> retry (ecu-rework)
 
 # -- Soak (Block H) --------------------------------------------------
 soak_active_minutes:      30
