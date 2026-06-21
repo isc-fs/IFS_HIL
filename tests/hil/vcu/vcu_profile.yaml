@@ -60,6 +60,10 @@ rtds_digital_threshold_v: 1.65       # midpoint 0-3.3 V CMOS
 start_btn_tca_addr:       0x22       # IOEXP3
 start_btn_tca_port:       1          # port1 (P10..P17)
 start_btn_tca_pin:        0          # P10 -> PB5/D2 = START (50 ms debounce in fw)
+# PB5 start jumper is open at the carrier end (scan-confirmed; bench fix pending).
+# Until it's reseated, inject the start button over CAN (0x7E0 byte4), which needs
+# the firmware built with -DECU_HIL_STUB_START_BTN=ON. Set false once the wire's back.
+start_btn_via_can:        true       # HIL stub: 0x7E0 byte4 inject vs TCA->PB5
 
 # -- Inverter frames (NX0001-STS04, node EMC, on bus_inv/can0) -------
 inv_cmd_id:               0x360      # EMC_RX_SETPOINT_1: observe App_State_Req + Flt_Clear

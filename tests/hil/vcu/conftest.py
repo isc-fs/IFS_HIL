@@ -288,7 +288,30 @@ def acu_inject(vcu_profile):
 # -- start button: bench ioexp3 (TCA 0x22) -> ECU PB5 ----------------
 @pytest.fixture
 def start_button(vcu_profile, mlc_powered):
-    """Drive the ECU start button (PB5/D2) via TCA 0x22 P1.0. press()/release()."""
+    """Drive the ECU start button. press()/release().
+
+    Two paths: with `start_btn_via_can` set (firmware built ECU_HIL_STUB_START_BTN,
+    for when the physical PB5 jumper is unavailable) the button is injected over
+    0x7E0 payload byte 4; otherwise it's driven on the real TCA 0x22 P1.0 -> PB5.
+    The inject is sent a few times because g_hil_force_start is sticky and a busy
+    ACU bus can drop a single frame."""
+    if vcu_profile.get("start_btn_via_can"):
+        from tools.firmware_test.acu_stim import AcuStim
+        stim = AcuStim(channel=vcu_profile["bus_acu"])
+        stim.start()
+
+        def drive(level):
+            payload = "DEADBEEF" + ("01" if level else "00")
+            for _ in range(5):
+                stim.send_raw(0x7E0, bytes.fromhex(payload), is_extended_id=False)
+                time.sleep(0.02)
+
+        drive(False)
+        yield {"press": lambda: drive(True), "release": lambda: drive(False)}
+        drive(False)
+        stim.stop()
+        return
+
     client = _broker()
     addr = int(vcu_profile["start_btn_tca_addr"])
     port = int(vcu_profile["start_btn_tca_port"])
