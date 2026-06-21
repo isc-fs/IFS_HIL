@@ -655,9 +655,9 @@ class TestA014RelayStatusPresent:
 
     def test_a014(self, fresh_boot, wait_for_settled, observe_acu):
         wait_for_settled()
-        t0 = time.monotonic()
+        observe_acu.clear()
         time.sleep(1.0)
-        frames = observe_acu.frames(M.ID_RELAY_STATUS, since=t0)
+        frames = observe_acu.frames(M.ID_RELAY_STATUS)
         if not frames:
             pytest.skip("no 0x4A4 AMS_relay_status -- firmware predates #395")
         assert all(len(f.data) == 8 for f in frames), "0x4A4 must be DLC 8"
