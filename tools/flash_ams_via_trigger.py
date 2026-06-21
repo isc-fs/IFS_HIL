@@ -78,7 +78,8 @@ def flash(bin_path: str, channel: str = FLASH_CHANNEL,
            "--bitrate", BITRATE, "--node-id", NODE_ID,
            "--timeout", str(timeout_ms),
            "flash", bin_path, "--address", APP_ADDRESS,
-           "--verify-after" if verify_after else "--no-verify-after"]
+           "--verify-after" if verify_after else "--no-verify-after",
+           "--yes"]   # non-interactive bench flash: skip the erase-confirm prompt
     if force_all:
         # Force every sector (skip the changed-sector diff) so the flash
         # always does real writes -- used by F-077 so a same-image reflash
