@@ -94,11 +94,11 @@ class TestBlockRRelayStatus:
     def test_r113_charger_precharge_is_skipped(self, fresh_boot, tsms, dash_chg,
             acu_heartbeat, charger_0x101, wait_for_state, observe_acu, ams_profile):
         _require_inputs(tsms, dash_chg)
-        t0 = time.monotonic()
+        observe_acu.clear()
         _drive_to_charge(tsms, dash_chg, acu_heartbeat, charger_0x101,
                          wait_for_state, ams_profile)
         # the precharge bit must NEVER read 1 across the whole Start->Charge path
-        seen = observe_acu.frames(M.ID_RELAY_STATUS, since=t0)
+        seen = observe_acu.frames(M.ID_RELAY_STATUS)
         bad = [M.decode_relay_status(f.data) for f in seen
                if M.decode_relay_status(f.data)["precharge"]]
         assert not bad, f"#397 VIOLATED: precharge contactor closed in Charger path ({len(bad)} frames)"
