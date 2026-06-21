@@ -158,6 +158,7 @@ ID_PIT_DIAG_POST_MORTEM  = 0x6C5
 ID_PIT_DIAG_FW_ID        = 0x6C6   # [0..2]semver [3..6]git_hash [7]bl_node_id
 ID_PIT_DIAG_PEC_PER_IC_A = 0x6C7   # [0..7]saturating u8 PEC count per IC for chain index 0..7
 ID_PIT_DIAG_PEC_PER_IC_B = 0x6C8   # [0..1]saturating u8 for chain 8..9, [2..7]reserved
+ID_PIT_DIAG_FDCAN1_RECOVERY = 0x6C9   # [0..3]busoff_recovery_count LE u32 [4..7]acu_tx_fail LE u32 (#391/#392)
 
 PIT_DIAG_ENABLE_MAGIC  = bytes([0xDE, 0xAD, 0xBE, 0xEF])
 PIT_DIAG_DISABLE_MAGIC = bytes([0x00, 0x00, 0x00, 0x00])
@@ -245,6 +246,19 @@ def decode_relay_status(data: bytes) -> dict:
         "air_positive": bool(b & 0x02),
         "precharge":    bool(b & 0x04),
         "ams_ok":       bool(b & 0x08),
+    }
+
+
+def decode_fdcan1_recovery(data: bytes) -> dict:
+    """Decode 0x6C9 (#391/#392): FDCAN1 bus-off recovery diagnostics.
+      bytes 0-3  busoff_recovery_count (LE u32) -- HAL_FDCAN_Stop/Start cycles
+      bytes 4-7  acu_tx_fail_count     (LE u32) -- 0x12C ACU TX failures
+    """
+    if len(data) < 8:
+        raise ValueError(f"0x6C9 needs 8 bytes, got {len(data)}")
+    return {
+        "busoff_recovery_count": int.from_bytes(data[0:4], "little"),
+        "acu_tx_fail_count":     int.from_bytes(data[4:8], "little"),
     }
 
 
