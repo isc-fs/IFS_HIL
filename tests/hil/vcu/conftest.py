@@ -334,3 +334,24 @@ def pit_diag(vcu_profile, observe_acu):
         stim.send_raw(en_id, bytes([0] * 4), is_extended_id=False)
     finally:
         stim.stop()
+
+
+# -- can-flasher (Block A BL discover/flash/round-trip) ---------------
+@pytest.fixture(scope="session")
+def flasher(vcu_profile, mlc_powered):
+    """can-flasher wrapper bound to the ECU's BL/flash bus (FDCAN2/can2).
+
+    NB the BL runs at SP 87.5% while the app's FDCAN2 is 68.75%, so Block A
+    flips can2 to 0.875 for BL ops and back to 0.688 after — see
+    `set_can_sp` in test_block_a_boot.py."""
+    import shutil
+    from tools.firmware_test.flash_helper import CanFlasher
+    if shutil.which("can-flasher") is None:
+        pytest.skip("can-flasher binary not on PATH")
+    return CanFlasher(
+        channel=vcu_profile["bus_flash"],
+        bitrate=int(vcu_profile.get("can_bitrate", 500000)),
+        node_id=int(vcu_profile["bl_node_id"]),
+        discover_timeout_ms=int(vcu_profile["bl_discover_timeout_ms"]),
+        per_frame_timeout_ms=int(vcu_profile["bl_per_frame_timeout_ms"]),
+    )
