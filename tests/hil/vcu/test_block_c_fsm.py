@@ -70,14 +70,16 @@ class TestC004ReachesActive:
                                          acu_inject, pedals, start_button,
                                          pit_diag, vcu_profile):
         """C-004 (+C-003): vdc → precharge → brake+button → RTDS delay →
-        inv_state==3 drives the FSM all the way to ACTIVE."""
+        inv_state==InvReadyState(4) drives the FSM all the way to ACTIVE.
+        WaitInvStandby→Active gates on inv_state==4 (control.cpp), NOT the
+        standby value 3 — feeding 3 stalls the FSM one step short."""
         inv_heartbeat["vdc_ready"]()
         acu_inject["set_precharge"](1)
         if _wait_fsm(pit_diag, lambda s: s >= S.WAIT_START_BRAKE, 4.0) is None:
             pytest.skip("FSM never reached WAIT_START_BRAKE -- confirm pit-diag bus / gates")
         pedals["set_brake"](int(vcu_profile["brake_arm_raw"]) + 200)
         start_button["press"]()
-        inv_heartbeat["set_state"](int(vcu_profile["inv_state_standby"]))
+        inv_heartbeat["set_state"](int(vcu_profile["inv_state_ready"]))
         active = _wait_fsm(pit_diag, lambda s: s == S.ACTIVE,
                            float(vcu_profile["r2d_delay_ms"]) / 1000.0 + 5.0)
         assert active == S.ACTIVE, f"FSM reached {S.name_of(active)}, not ACTIVE"
