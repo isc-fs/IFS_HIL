@@ -1,0 +1,101 @@
+# Tunable thresholds + cadences for the VCU/ECU HIL tests (IFS08-CE-ECU).
+# Mirrors tests/hil/ams/ams_profile.yaml. The VCU is on MLC4 (AMS owns MLC2).
+# Wire contracts: VCU docs/dbc/ecu.dbc (0x100 + pit-diag) and the inverter
+# NX0001-STS04 dbc (node EMC: 0x360/0x362 cmd, 0x461-0x466 state).
+# Spec: isc-fs/IFS08-CE-ECU#62.  ← PLACEHOLDER markers = confirm before A-block flash.
+
+# -- Carrier slot (MLC4) ---------------------------------------------
+mlc_slot:                 4          # K4 = TCA 0x20 port0 pin3, INA 0x45
+mlc_boot_current_mA:      100        # min draw after K4 closes (~130 mA alive)
+mlc_boot_settle_s:        0.5
+
+# -- CAN buses (PCB->kernel inversion, operating-model invariant #3) --
+bus_inv:                  can0       # fdcan1 INV  (PCB CAN3/U21): 0x360/0x362 <-> 0x461-0x466
+bus_acu:                  can2       # fdcan2 ACU/flash/uDV/external (PCB CAN1/U17): 0x100/0x020/0x4A0
+bus_flash:                can2       # BL flash bus == the ACU bus (multi-FDCAN BL also answers on can0)
+# Per-bus sample points (ECU FDCAN kernel clk = HSE 24 MHz / 48 = 500 k).
+# INV is now 87.5% after ECU #57 / PR #61 (was 37.5%); ACU stays 68.75% (coordinated
+# with AMS/uDV on the shared bus). hil-can-up defaults to 68.75% on every bus, so the
+# INV bus still needs an explicit override -> the vcu_can_sp fixture applies these.
+can_bitrate:              500000
+bus_inv_sample_point:     0.875      # FDCAN1/INV — 87.5% (presc3 seg1=13 seg2=2), ECU #57/PR61
+bus_acu_sample_point:     0.688      # FDCAN2/ACU — 68.75% (presc3 seg1=10 seg2=5)
+
+# -- Bootloader ------------------------------------------------------
+bl_node_id:               0x01       # ECU/VCU node-id (Raul 2026-06-13: ECU=0x01, AMS=0x02, uDV=0x03).
+                                     # NOTE: the AMS chip is still physically 0x01 until re-burned ->
+                                     # power MLC2 (AMS) OFF when flashing the VCU, else both answer 0x01.
+bl_discover_timeout_ms:   3000
+bl_per_frame_timeout_ms:  30000
+bl_flash_timeout_s:       60
+app_flash_address:        0x08020000 # ECU app image start (sector 1)
+firmware_info_address:    0x08020400 # bl_fwinfo_t (BL_APP_BASE + 0x400)
+
+# -- Heartbeat (VCU TX 0x100) ----------------------------------------
+heartbeat_id:             0x100      # VCU_heartbeat, 2 bytes
+heartbeat_extended:       false      # VCU sends 0x100 as STANDARD 11-bit id (control.c m->ide=0u)
+heartbeat_max_gap_ms:     20         # ~10 ms cadence; must never stop (Block B)
+
+# -- Analog pedals: bench DAC1 (idx0) -> ECU ADC3 (Core/Src/io_signals.c) --
+pedal_dac_idx:            0          # broker idx 0 = DAC1 (U12)
+brake_dac_channel:        0          # ch0 -> PF7/A1/ADC3_INP3 = S_BRAKE
+apps1_dac_channel:        1          # ch1 -> PF8/A2/ADC3_INP7 = APPS_1
+apps2_dac_channel:        2          # ch2 -> PF9/A3/ADC3_INP2 = APPS_2
+pedal_vref:               3.3        # DAC full-scale volts
+ecu_adc_full_scale:       4095       # ECU 12-bit ADC counts (for raw<->volts)
+# APPS/brake raw-ADC thresholds -- firmware PLACEHOLDERS (control.c:6-9), not on-car-cal:
+apps1_adc_min:            2050
+apps1_adc_max:            2950
+apps2_adc_min:            1915
+apps2_adc_max:            2570
+brake_arm_raw:            900        # UMBRAL_FRENO_ARRANQUE (~0.72 V)
+brake_apps_raw:           3000       # UMBRAL_FRENO_APPS
+
+# -- RTDS read-back: bench ADC1 (idx0) reads ECU PB4/D1 (ECU output) --
+rtds_adc_idx:             0          # broker idx 0 = ADC1 (U9)
+rtds_adc_channel:         0          # ch0 -> PB4/D1 = RTDS
+rtds_digital_threshold_v: 1.65       # midpoint 0-3.3 V CMOS
+
+# -- Start button: bench ioexp3 (TCA 0x22/U8) -> ECU PB5/D2 (input) --
+start_btn_tca_addr:       0x22       # IOEXP3
+start_btn_tca_port:       1          # port1 (P10..P17)
+start_btn_tca_pin:        0          # P10 -> PB5/D2 = START (50 ms debounce in fw)
+# PB5 start jumper is open at the carrier end (scan-confirmed; bench fix pending).
+# Until it's reseated, inject the start button over CAN (0x7E0 byte4), which needs
+# the firmware built with -DECU_HIL_STUB_START_BTN=ON. Set false once the wire's back.
+start_btn_via_can:        true       # HIL stub: 0x7E0 byte4 inject vs TCA->PB5
+
+# -- Inverter frames (NX0001-STS04, node EMC, on bus_inv/can0) -------
+inv_cmd_id:               0x360      # EMC_RX_SETPOINT_1: observe App_State_Req + Flt_Clear
+inv_torque_id:            0x362      # EMC_RX_SETPOINT_3: observe Torque_Nm_Req (i16 Nm)
+inv_state2_id:            0x461      # EMC_TX_STATE_2: inject App_State_App = inv_state
+inv_state7_id:            0x466      # EMC_TX_STATE_7: inject DCBus_Voltage_V (vdc gate)
+inv_e2e_profile:          1          # AUTOSAR E2E P1 (CRC=byte0, CNT=bits8-11) -- see can_map
+inv_state_standby:        3
+inv_state_ready:          4
+inv_state_torque:         6
+inv_state_fault_soft:     10
+inv_state_fault_hard:     11
+
+# -- ACU frames from the AMS (on bus_acu/can2) -- reuse AMS can_map ---
+acu_precharge_id:         0x020      # ok_precarga (VCU RX)
+ams_status_id:            0x4A0      # AMS 0x4A0[0] FSM state (E-block stimulus)
+
+# -- Pit-diag (VCU 0x700-0x703 + 0x7E0/0x7E1) ------------------------
+pit_diag_enable_id:       0x7E0      # payload 'DEADBEEF' enable / 0 disable
+pit_diag_ack_id:          0x7E1      # 1 enabled / 0 disabled
+pit_diag_status_id:       0x700      # FSM state in byte[0]
+pit_diag_pedals_id:       0x701
+pit_diag_inverter_id:     0x702
+pit_diag_fwinfo_id:       0x703
+pit_diag_period_ms:       100
+pit_diag_bus:             can2       # confirmed on the FDCAN2/ACU bus (ecu-rework has no DASH)
+
+# -- FSM windows (Core/Src/control.c) --------------------------------
+state_transition_window_ms: 700
+boot_grace_ms:            2000
+r2d_delay_ms:             2000       # R2D_DELAY: RTDS active 2 s
+precharge_timeout_ms:     10000      # PRECHARGE 10 s -> retry (ecu-rework)
+
+# -- Soak (Block H) --------------------------------------------------
+soak_active_minutes:      30
