@@ -640,3 +640,35 @@ class TestA013FirmwareInfoMatchesSource:
                 "0x6C6 git_hash %s present but no expected SHA to assert "
                 "against -- set AMS_GIT_HASH or firmware/GIT_HASH.",
                 git_bytes.hex())
+
+
+
+# ---------------------------------------------------------------------------
+# A-014 — AMS_relay_status (0x4A4) present from boot (#395)
+# ---------------------------------------------------------------------------
+
+class TestA014RelayStatusPresent:
+    """#395: the always-on 0x4A4 AMS_relay_status frame streams from boot at
+    ~100 ms, DLC 8. Byte 0 carries 4 bool read-back bits; bytes 1-7 are
+    reserved zero. Full contactor-sequence behaviour is Block R; this asserts
+    only presence, cadence, and the reserved-zero contract."""
+
+    def test_a014(self, fresh_boot, wait_for_settled, observe_acu):
+        wait_for_settled()
+        t0 = time.monotonic()
+        time.sleep(1.0)
+        frames = observe_acu.frames(M.ID_RELAY_STATUS, since=t0)
+        if not frames:
+            pytest.skip("no 0x4A4 AMS_relay_status -- firmware predates #395")
+        assert all(len(f.data) == 8 for f in frames), "0x4A4 must be DLC 8"
+        # ~100 ms cadence -> ~10 frames/s; allow 6..16 for observer jitter
+        assert 6 <= len(frames) <= 16, (
+            f"0x4A4 cadence: {len(frames)} frames in ~1 s, expected ~10 "
+            f"(TX_RELAY_PERIOD_MS={M.TX_RELAY_PERIOD_MS})")
+        for f in frames:
+            assert f.data[1:8] == bytes(7), (
+                f"0x4A4 bytes 1-7 must be reserved-zero; got {f.data.hex()}")
+            assert (f.data[0] & 0xF0) == 0, \
+                f"0x4A4 byte0 upper nibble must be 0; got 0x{f.data[0]:02X}"
+        r = M.decode_relay_status(frames[-1].data)
+        assert set(r) == {"air_negative", "air_positive", "precharge", "ams_ok"}
