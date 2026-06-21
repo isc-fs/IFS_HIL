@@ -133,8 +133,10 @@ STATE_CPU_CHARGING      = 0x04
 ID_TELEM_STATUS  = 0x4A0   # FSM state, AMS_OK, module mask, min/max cell V
 ID_TELEM_PACK    = 0x4A1   # pack mV (u32 LE), filtered mA (i32 LE)
 ID_TELEM_TEMPS   = 0x4A2   # min/max/avg tempC, dc_bus_V, heartbeat
+ID_RELAY_STATUS  = 0x4A4   # AMS_relay_status (#395): contactor + AMS_OK ODR read-backs, ~100 ms
 
 TX_TELEM_PERIOD_MS = 500
+TX_RELAY_PERIOD_MS = 100   # 0x4A4 cadence (#395)
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +228,24 @@ def decode_telem_pack(data: bytes) -> dict:
     pack_mV = int.from_bytes(data[0:4], "little", signed=False)
     mA      = int.from_bytes(data[4:8], "little", signed=True)
     return {"pack_voltage_mV": pack_mV, "filtered_mA": mA}
+
+
+def decode_relay_status(data: bytes) -> dict:
+    """Decode 0x4A4 AMS_relay_status byte 0 (#395). ODR read-backs of what
+    the firmware drives the contactor coils + AMS_OK GPIO to:
+      bit 0 air_negative, bit 1 air_positive, bit 2 precharge, bit 3 ams_ok.
+    Bytes 1-7 are reserved (zero). This is the direct contactor-sequence
+    observability the pit-diag stream never gave us (Block R; #397 guard).
+    """
+    if len(data) < 1:
+        raise ValueError(f"0x4A4 needs >=1 byte, got {len(data)}")
+    b = data[0]
+    return {
+        "air_negative": bool(b & 0x01),
+        "air_positive": bool(b & 0x02),
+        "precharge":    bool(b & 0x04),
+        "ams_ok":       bool(b & 0x08),
+    }
 
 
 def decode_telem_temps(data: bytes) -> dict:
