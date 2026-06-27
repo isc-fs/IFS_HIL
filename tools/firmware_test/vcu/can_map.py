@@ -34,11 +34,14 @@ ID_PIT_INVERTER = 0x702   # inverter dc_bus, rpm, error
 ID_PIT_FWINFO   = 0x703   # fw version + git hash
 ID_PIT_HEALTH   = 0x704   # firmware health @1 Hz (DiagTask) — the IWDG instrument
 ID_PIT_BRAKE    = 0x705   # brake pressure + %
+ID_PIT_TEMPS    = 0x706   # inverter board/stage/motor temps (raw -50 = degC)
 
 # -- Inverter (NX0001-STS04, node EMC, on INV/can0) -------------------
 ID_INV_CMD    = 0x360   # EMC_RX_SETPOINT_1 (VCU→inv): App_State_Req, Flt_Clear
 ID_INV_TORQUE = 0x362   # EMC_RX_SETPOINT_3 (VCU→inv): Torque_Nm_Req
 ID_INV_STATE2 = 0x461   # EMC_TX_STATE_2 (inv→VCU): App_State_App = inv_state
+ID_INV_RPM    = 0x463   # EMC_TX_STATE_4 (inv→VCU): EMachine_Speed_erpm (20-bit signed @bit44)
+ID_INV_TEMPS  = 0x464   # EMC_TX_STATE_5 (inv→VCU): board/stage/motor temps (raw -50 = degC)
 ID_INV_STATE7 = 0x466   # EMC_TX_STATE_7 (inv→VCU): DCBus_Voltage_V
 
 # -- ACU (from AMS, on ACU/can2) -------------------------------------
@@ -78,10 +81,11 @@ class InvMode(IntEnum):
     """ECU→inv command word on 0x360 (App_State_Req / EMC_RX_SETPOINT_1). The
     FSM walks Off→Ready→TorqueEnable; Fault on inverter fault. Emitted by the
     deferred inverter adapter (firmware TODO #10) — Block E gate (E2E-framed)."""
-    OFF           = 0x01
-    READY         = 0x04
-    TORQUE_ENABLE = 0x06
-    FAULT         = 0x13
+    OFF              = 0x01
+    READY            = 0x04
+    TORQUE_ENABLE    = 0x06
+    HARD_FAULT_RESET = 0x0D   # inv_state 11 (hard fault) -> command reset
+    FAULT            = 0x13   # inv_state 10 (soft fault)
 
 
 class ResetCause(IntEnum):
@@ -250,3 +254,39 @@ def encode_inv_state7(dc_bus_v: int, cnt: int, data_id: int = 0x466) -> bytes:
         buf[2] = v & 0xFF
         buf[3] = (v >> 8) & 0xFF
     return _e2e_frame(6, cnt, data_id, w)
+
+
+def encode_inv_rpm(rpm: int) -> bytes:
+    """EMC_TX_STATE_4 (0x463, 8 B): EMachine_Speed_erpm, 20-bit SIGNED little-endian
+    at frame bit44 (LSB = byte5 bit4). Firmware decode_inv_rpm reads d5[4:7]|d6|d7
+    and sign-extends bit19, with no E2E check (vehicle_service.cpp:46) -- bytes 0-4
+    are don't-care, so this is a plain (non-E2E) frame."""
+    raw = int(rpm) & 0xFFFFF                          # 20-bit two's complement
+    buf = bytearray(8)
+    buf[5] = (raw & 0x0F) << 4
+    buf[6] = (raw >> 4) & 0xFF
+    buf[7] = (raw >> 12) & 0xFF
+    return bytes(buf)
+
+
+def encode_inv_temps(board: int, pwrstg: int, motor1: int, motor2: int) -> bytes:
+    """EMC_TX_STATE_5 (0x464, 4 B): four inverter temps, each a raw byte where the
+    DBC offset is -50 (raw = degC + 50). Firmware copies bytes 0-3 verbatim
+    (vehicle_service.cpp:84)."""
+    return bytes((
+        (int(board)  + 50) & 0xFF,
+        (int(pwrstg) + 50) & 0xFF,
+        (int(motor1) + 50) & 0xFF,
+        (int(motor2) + 50) & 0xFF,
+    ))
+
+
+def decode_pit_temps(data: bytes) -> dict:
+    """0x706 (4 B): inverter board/stage/motor1/motor2 temps, each uint8 with a -50
+    offset -> degC (PitDiag_inverter_temps.def)."""
+    return {
+        "temp_board_degC":  data[0] - 50,
+        "temp_pwrstg_degC": data[1] - 50,
+        "temp_motor1_degC": data[2] - 50,
+        "temp_motor2_degC": data[3] - 50,
+    }
