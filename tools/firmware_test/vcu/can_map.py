@@ -106,11 +106,14 @@ PIT_FLAG_RTDS_ACTIVE  = 1 << 2
 PIT_FLAG_OK_PRECHARGE = 1 << 3
 PIT_FLAG_START_BUTTON = 1 << 4
 
-# pit-diag 0x704.task_ran_mask bits (EcuTaskId) — a frozen bit = a stalled task
-TASK_CONTROL = 1 << 0
-TASK_CAN_RX  = 1 << 1
-TASK_CAN_TX  = 1 << 2
-TASK_DIAG    = 1 << 3
+# pit-diag 0x704.task_ran_mask bits (EcuTaskId) — a frozen bit = a stalled task.
+# feat/telemetry is a 5-task layout: TELEMETRY inserted at bit3, DIAG MOVED to
+# bit4 (pre-telemetry firmware had DIAG at bit3, no telemetry task). #96 gate.
+TASK_CONTROL   = 1 << 0
+TASK_CAN_RX    = 1 << 1
+TASK_CAN_TX    = 1 << 2
+TASK_TELEMETRY = 1 << 3
+TASK_DIAG      = 1 << 4
 
 # pit-diag 0x704.last_fault sentinels (0 = none)
 LAST_FAULT = {
