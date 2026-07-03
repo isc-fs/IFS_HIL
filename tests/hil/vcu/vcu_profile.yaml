@@ -50,8 +50,16 @@ apps1_adc_min:            2490
 apps1_adc_max:            3350
 apps2_adc_min:            2345
 apps2_adc_max:            3025
-brake_arm_raw:            900        # UMBRAL_FRENO_ARRANQUE (~0.72 V)
-brake_apps_raw:           3000       # UMBRAL_FRENO_APPS
+brake_arm_raw:            900        # UMBRAL_FRENO_ARRANQUE (~0.72 V) = BrakeArmRaw (manual R2D arm)
+brake_apps_raw:           3000       # UMBRAL_FRENO_APPS = BrakePressedRaw (EV.2.3 "brake pressed")
+
+# -- uDV / DV drive mode (#101 Block L, feat/dv-mode) ----------------
+brake_dv_hard_raw:        2500       # BrakeDvHardRaw: DV/EBS hard-brake limit (COMMISSION); gates DV R2D + 0x505
+udv_torque_id:            0x507      # uDV->VCU torque cmd (s32 LE integer %, stale >100 ms; stream >=20 Hz)
+udv_r2d_req_id:           0x510      # uDV->VCU R2D request (1B bool, stale >200 ms; stream >=10 Hz)
+udv_cmd_stale_ms:         100        # UdvCmdStaleMs
+udv_r2d_stale_ms:         200        # UdvR2dStaleMs
+motor_pole_pairs:         10         # 0x506 mechanical rpm = inverter erpm / pole_pairs
 
 # -- RTDS read-back: bench ADC1 (idx0) reads ECU PB4/D1 (ECU output) --
 rtds_adc_idx:             0          # broker idx 0 = ADC1 (U9)

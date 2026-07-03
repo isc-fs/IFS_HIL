@@ -265,7 +265,7 @@ def acu_inject(vcu_profile):
     bus = vcu_profile["bus_acu"]
     _skip_if_no_can(bus)
     st = {"prech": 0, "ams": 0, "sess": 1, "vcell": 3600, "send_prech": False,
-          "send_ams": False, "run": True}
+          "send_ams": False, "send_vcell": True, "run": True}
     stim = AcuStim(channel=bus)
     stim.start()
 
@@ -282,10 +282,12 @@ def acu_inject(vcu_profile):
                     _a[3] = st["sess"] & 0xFF     # 0x4A0[3] = session_id (can.c:161)
                     stim.send_raw(int(vcu_profile["ams_status_id"]),
                                   bytes(_a), is_extended_id=False)
-                # v_cell_min (0x12C, mV BE) -- always healthy so the low-cell
-                # torque derate (control.cpp) doesn't zero torque in Active.
-                stim.send_raw(0x12C, st["vcell"].to_bytes(2, "big") + bytes(6),
-                              is_extended_id=False)
+                if st["send_vcell"]:
+                    # v_cell_min (0x12C, mV BE) -- healthy so the low-cell torque
+                    # derate doesn't zero torque in Active. It ALSO refreshes
+                    # last_ams_tick, so stop_all() must silence it to go AMS-stale.
+                    stim.send_raw(0x12C, st["vcell"].to_bytes(2, "big") + bytes(6),
+                                  is_extended_id=False)
             except Exception:
                 pass
             time.sleep(0.05)
@@ -295,6 +297,46 @@ def acu_inject(vcu_profile):
     st["set_ams_state"] = lambda n: st.update(ams=int(n), send_ams=True)
     st["set_session"]   = lambda s: st.update(sess=int(s), send_ams=True)
     st["set_v_cell"]    = lambda mv: st.update(vcell=int(mv))
+    st["stop_all"]      = lambda: st.update(send_prech=False, send_ams=False, send_vcell=False)
+    yield st
+    st["run"] = False
+    time.sleep(0.1)
+    stim.stop()
+
+
+# -- uDV inject (can2): 0x507 torque cmd + 0x510 R2D request (#101) ---
+@pytest.fixture
+def udv_inject(vcu_profile):
+    """Background inject of the uDV autonomous frames on the ACU bus (can2):
+    0x507 torque cmd (set_torque n / stop_torque; the firmware needs it fresh <100 ms
+    -> stream >=20 Hz) and 0x510 R2D request (set_r2d 0/1 / stop_r2d; fresh <200 ms).
+    Both start OFF (send only after set_*), so a test can prove the stale/absent paths."""
+    import threading
+    from tools.firmware_test.acu_stim import AcuStim
+    bus = vcu_profile["bus_acu"]
+    _skip_if_no_can(bus)
+    st = {"torque": 0, "send_torque": False, "r2d": 0, "send_r2d": False, "run": True}
+    stim = AcuStim(channel=bus)
+    stim.start()
+
+    def loop():
+        while st["run"]:
+            try:
+                if st["send_torque"]:
+                    stim.send_raw(int(vcu_profile["udv_torque_id"]),
+                                  M.encode_udv_torque(st["torque"]), is_extended_id=False)
+                if st["send_r2d"]:
+                    stim.send_raw(int(vcu_profile["udv_r2d_req_id"]),
+                                  M.encode_udv_r2d(st["r2d"]), is_extended_id=False)
+            except Exception:
+                pass
+            time.sleep(0.02)   # 50 Hz -- covers 0x507 (>=20 Hz) and 0x510 (>=10 Hz)
+
+    threading.Thread(target=loop, daemon=True).start()
+    st["set_torque"]  = lambda n: st.update(torque=int(n), send_torque=True)
+    st["stop_torque"] = lambda: st.update(send_torque=False)
+    st["set_r2d"]     = lambda v=1: st.update(r2d=int(v), send_r2d=True)
+    st["stop_r2d"]    = lambda: st.update(send_r2d=False)
     yield st
     st["run"] = False
     time.sleep(0.1)
