@@ -36,6 +36,14 @@ ID_PIT_HEALTH   = 0x704   # firmware health @1 Hz (DiagTask) — the IWDG instru
 ID_PIT_BRAKE    = 0x705   # brake pressure + %
 ID_PIT_TEMPS    = 0x706   # inverter board/stage/motor temps (raw -50 = degC)
 
+# -- uDV / DV drive mode (FDCAN2/ACU, #101 Block L) -------------------
+ID_DV_TS_ACTIVE   = 0x504   # VCU->uDV: TS-active (1B bool @100ms; tracks AMS precharge fresh)
+ID_DV_BRAKE_OVER  = 0x505   # VCU->uDV: brake > BrakeDvHardRaw (1B bool @100ms)
+ID_DV_MOTOR_RPM   = 0x506   # VCU->uDV: mechanical rpm (s32 LE @10ms, = inverter erpm / 10 pole pairs)
+ID_DV_R2D_CONFIRM = 0x511   # VCU->uDV: DV R2D confirm (1B, byte0!=0 while the DV latch is set)
+ID_UDV_TORQUE     = 0x507   # uDV->VCU: torque cmd (s32 LE integer %, stale >100ms)
+ID_UDV_R2D_REQ    = 0x510   # uDV->VCU: R2D request (1B bool, stale >200ms)
+
 # -- Inverter (NX0001-STS04, node EMC, on INV/can0) -------------------
 ID_INV_CMD    = 0x360   # EMC_RX_SETPOINT_1 (VCU→inv): App_State_Req, Flt_Clear
 ID_INV_TORQUE = 0x362   # EMC_RX_SETPOINT_3 (VCU→inv): Torque_Nm_Req
@@ -290,3 +298,52 @@ def decode_pit_temps(data: bytes) -> dict:
         "temp_motor1_degC": data[2] - 50,
         "temp_motor2_degC": data[3] - 50,
     }
+
+
+# -- uDV / DV drive mode (#101 Block L) -------------------------------
+def encode_udv_torque(pct: int) -> bytes:
+    """0x507 UDV_torque_cmd (4 B): integer torque percent, s32 LE. Negative/garbage
+    is a valid input -- the firmware conditioner clamps <0 -> 0, >100 -> 100."""
+    return int(pct).to_bytes(4, "little", signed=True)
+
+
+def encode_udv_r2d(request: int) -> bytes:
+    """0x510 UDV_r2d_request (1 B): byte0 = R2D-request bool."""
+    return bytes([int(request) & 0xFF])
+
+
+def decode_ts_active(data: bytes) -> dict:
+    """0x504 VCU_ts_active (1 B): byte0 = ts_active (fresh AMS ok_precharge view)."""
+    return {"ts_active": data[0]}
+
+
+def decode_brake_over(data: bytes) -> dict:
+    """0x505 VCU_brake_over_limit (1 B): byte0 = brake_raw > BrakeDvHardRaw (2500)."""
+    return {"brake_over_limit": data[0]}
+
+
+def decode_motor_rpm(data: bytes) -> dict:
+    """0x506 VCU_motor_rpm (4 B): mechanical rpm, s32 LE (= inverter erpm / 10)."""
+    return {"motor_rpm": int.from_bytes(data[0:4], "little", signed=True)}
+
+
+def decode_r2d_confirm(data: bytes) -> dict:
+    """0x511 VCU_r2d_confirm (1 B): byte0 != 0 while the DV latch is set."""
+    return {"r2d_confirm": data[0]}
+
+
+# DV torque map (inverter.cpp:11) -- the expected 0x362 for a % command.
+DV_TORQUE_DEADBAND_PCT = 10
+
+
+def dv_conditioned_pct(cmd: int) -> int:
+    """0x507 conditioner (vehicle_service.cpp): <0 -> 0, >100 -> 100, else cmd."""
+    return 0 if cmd < 0 else (100 if cmd > 100 else int(cmd))
+
+
+def dv_torque_nm(pct: int) -> int:
+    """Expected 0x362 Torque_Nm_Req (s16) for a *conditioned* DV percent -- matches the
+    firmware map: <10% -> 0; else -(pct*240//90 - 2400//90). e.g. 40 -> -80, 100 -> -240."""
+    if pct < DV_TORQUE_DEADBAND_PCT:
+        return 0
+    return -(pct * 240 // 90 - 2400 // 90)
