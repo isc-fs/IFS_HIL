@@ -43,11 +43,13 @@ apps1_dac_channel:        1          # ch1 -> PF8/A2/ADC3_INP7 = APPS_1
 apps2_dac_channel:        2          # ch2 -> PF9/A3/ADC3_INP2 = APPS_2
 pedal_vref:               3.3        # DAC full-scale volts
 ecu_adc_full_scale:       4095       # ECU 12-bit ADC counts (for raw<->volts)
-# APPS/brake raw-ADC thresholds -- firmware PLACEHOLDERS (control.c:6-9), not on-car-cal:
-apps1_adc_min:            2050
-apps1_adc_max:            2950
-apps2_adc_min:            1915
-apps2_adc_max:            2570
+# APPS raw-ADC cal -- MUST track the firmware ecu_config.hpp (bench-cal 2026-06-22).
+# If these drift from the firmware, equal-% injection on the two different-span
+# sensors reads >10% apart and falsely trips T.11.8.9 (broke E-002/G-001).
+apps1_adc_min:            2490
+apps1_adc_max:            3350
+apps2_adc_min:            2345
+apps2_adc_max:            3025
 brake_arm_raw:            900        # UMBRAL_FRENO_ARRANQUE (~0.72 V)
 brake_apps_raw:           3000       # UMBRAL_FRENO_APPS
 

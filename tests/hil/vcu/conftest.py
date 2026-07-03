@@ -216,7 +216,8 @@ def inv_heartbeat(vcu_profile):
     from tools.firmware_test.acu_stim import AcuStim
     bus = vcu_profile["bus_inv"]
     _skip_if_no_can(bus)
-    st = {"inv_state": 0, "vdc": 0, "cnt": 0, "send_vdc": False, "run": True}
+    st = {"inv_state": 0, "vdc": 0, "cnt": 0, "send_vdc": False, "run": True,
+          "rpm": 0, "send_rpm": False, "temps": (0, 0, 0, 0), "send_temps": False}
     stim = AcuStim(channel=bus)
     stim.start()
 
@@ -231,6 +232,12 @@ def inv_heartbeat(vcu_profile):
                     stim.send_raw(M.ID_INV_STATE7,
                                   M.encode_inv_state7(st["vdc"], st["cnt"]),
                                   is_extended_id=False)
+                if st["send_rpm"]:
+                    stim.send_raw(M.ID_INV_RPM, M.encode_inv_rpm(st["rpm"]),
+                                  is_extended_id=False)
+                if st["send_temps"]:
+                    stim.send_raw(M.ID_INV_TEMPS, M.encode_inv_temps(*st["temps"]),
+                                  is_extended_id=False)
             except Exception:
                 pass
             time.sleep(0.05)
@@ -238,6 +245,9 @@ def inv_heartbeat(vcu_profile):
     threading.Thread(target=loop, daemon=True).start()
     st["set_state"] = lambda n: st.update(inv_state=int(n))
     st["vdc_ready"] = lambda v=0: st.update(vdc=int(v), send_vdc=True)
+    st["set_rpm"] = lambda r: st.update(rpm=int(r), send_rpm=True)
+    st["set_temps"] = lambda b, p, m1, m2: st.update(
+        temps=(int(b), int(p), int(m1), int(m2)), send_temps=True)
     yield st
     st["run"] = False
     time.sleep(0.1)
