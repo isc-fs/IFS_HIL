@@ -2,20 +2,29 @@
 # Sync the local working copy to the HIL bench Pi via rsync.
 #
 # Use this instead of `git pull` on the Pi — the bench Pi's
-# /home/isc/IFS08_HIL/ is a NON-git working copy maintained from a
+# ~/IFS08_HIL/ is a NON-git working copy maintained from a
 # developer machine that has the real git checkout. Avoids storing
 # GitHub credentials on the bench host and lets you test uncommitted
 # changes against real hardware.
 #
 # Usage:
-#   scripts/sync_to_pi.sh                    # default isc@192.168.0.123
+#   export HIL_BENCH_HOST=user@host          # pick the bench once per shell
+#   scripts/sync_to_pi.sh                    # sync to $HIL_BENCH_HOST
 #   scripts/sync_to_pi.sh --dry-run          # show changes, no transfer
-#   scripts/sync_to_pi.sh user@host          # custom target
+#   scripts/sync_to_pi.sh user@host          # override for a single run
 #   scripts/sync_to_pi.sh user@host --dry-run
 #
+# There is deliberately NO default host. With more than one bench on the
+# fleet, silently syncing to someone else's bench is worse than an error.
+# Bench addresses live in CLAUDE.md ("Bench hosts").
+#
+# Destination defaults to ~/IFS08_HIL/ on the bench (relative to the remote
+# user's home); override with HIL_BENCH_PATH if a bench differs.
+#
 # Auth:
-#   - Preferred: SSH key auth (run `ssh-copy-id isc@192.168.0.123` once).
+#   - Preferred: per-developer SSH key (`ssh-copy-id "$HIL_BENCH_HOST"` once).
 #   - Fallback: export HIL_SSH_PASS=<password> and the script uses sshpass.
+#     Bootstrap only — never commit a password or share one across the team.
 #
 # What's excluded:
 #   .git/, .DS_Store, __pycache__/, *.pyc, .pytest_cache/, build/,
@@ -26,15 +35,16 @@
 
 set -euo pipefail
 
-DEFAULT_TARGET="isc@192.168.0.123"
-TARGET="$DEFAULT_TARGET"
+TARGET="${HIL_BENCH_HOST:-}"
 DRY=""
 
 for arg in "$@"; do
     case "$arg" in
         --dry-run|-n) DRY="--dry-run" ;;
         -h|--help)
-            sed -n '2,/^$/p' "$0" | sed 's/^# \?//'
+            # Portable strip: BSD sed (macOS) has no \? operator, so the
+            # old 's/^# \?//' silently left every line prefixed with '#'.
+            sed -n '2,/^$/p' "$0" | sed -e 's/^# //' -e 's/^#$//'
             exit 0
             ;;
         *@*) TARGET="$arg" ;;
@@ -46,7 +56,22 @@ for arg in "$@"; do
     esac
 done
 
+if [ -z "$TARGET" ]; then
+    cat >&2 <<'EOF'
+No bench selected.
+
+  export HIL_BENCH_HOST=user@host      # once per shell, or
+  scripts/sync_to_pi.sh user@host      # for a single run
+
+Bench addresses are listed in CLAUDE.md ("Bench hosts"). There is no default
+on purpose: with several benches on the fleet, syncing to the wrong one is
+worse than an error.
+EOF
+    exit 2
+fi
+
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+DEST_PATH="${HIL_BENCH_PATH:-IFS08_HIL/}"
 SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 
 if [ -n "${HIL_SSH_PASS:-}" ]; then
@@ -59,7 +84,7 @@ else
     RSH="ssh ${SSH_OPTS}"
 fi
 
-echo "Syncing ${REPO_ROOT}/  →  ${TARGET}:/home/isc/IFS08_HIL/  ${DRY:+(DRY RUN)}"
+echo "Syncing ${REPO_ROOT}/  →  ${TARGET}:${DEST_PATH}  ${DRY:+(DRY RUN)}"
 
 rsync -avh ${DRY} \
     --exclude='.git/' \
@@ -72,7 +97,7 @@ rsync -avh ${DRY} \
     --exclude='.claude/' \
     -e "${RSH}" \
     "${REPO_ROOT}/" \
-    "${TARGET}:/home/isc/IFS08_HIL/"
+    "${TARGET}:${DEST_PATH}"
 
 echo
 echo "✓ Sync complete."
