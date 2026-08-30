@@ -65,6 +65,8 @@ flowchart TD
 
 ## Getting started
 
+- **In a hurry** — [`docs/quickstart.md`](docs/quickstart.md): the short path,
+  a bootstrap script plus four manual steps, ~60-90 min including one reboot.
 - **Fresh bench setup** — follow
   [`docs/getting-started.md`](docs/getting-started.md).
   From blank Pi OS to flashing an ECU in roughly 45 minutes.

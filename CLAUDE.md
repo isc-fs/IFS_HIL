@@ -189,7 +189,8 @@ pytest both go through it via Unix-socket JSON-RPC.
 | What pin / address / netdev does X live on? | [`docs/hardware-reference.md`](docs/hardware-reference.md) |
 | What does broker RPC `Y` do? | [`docs/broker-api.md`](docs/broker-api.md) |
 | Day-to-day operator recipes | [`docs/operator-guide.md`](docs/operator-guide.md) |
-| Fresh-Pi bringup | [`docs/getting-started.md`](docs/getting-started.md) |
+| Fresh-Pi bringup (short path) | [`docs/quickstart.md`](docs/quickstart.md) |
+| Fresh-Pi bringup (with reasoning) | [`docs/getting-started.md`](docs/getting-started.md) |
 | Something broke | [`docs/troubleshooting.md`](docs/troubleshooting.md) |
 | HTTP API for the dashboard | [`docs/dashboard.md`](docs/dashboard.md) |
 | Why mcp251x is patched (5 patches) | [`docs/design/mcp251x-driver-patches.md`](docs/design/mcp251x-driver-patches.md) |
