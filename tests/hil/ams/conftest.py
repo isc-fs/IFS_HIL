@@ -61,10 +61,10 @@ log = logging.getLogger(__name__)
 
 PROFILE_PATH = Path(__file__).parent / "ams_profile.yaml"
 
-# Register the KPI plugin so it sees all session events for AMS HIL
-# runs. See `tests/hil/ams/kpi_plugin.py` and
-# `docs/ams-hil/test-plan-v1.5.0.md` §4. Disable with `--no-kpi`.
-pytest_plugins = ["tests.hil.ams.kpi_plugin"]
+# The KPI plugin is registered from the rootdir `conftest.py` — pytest
+# rejects `pytest_plugins` in a nested conftest. See
+# `tests/hil/ams/kpi_plugin.py` and `docs/ams-hil/test-plan-v1.5.0.md`
+# §4. Disable with `--no-kpi`.
 
 
 # ---------------------------------------------------------------------------
