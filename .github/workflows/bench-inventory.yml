@@ -1,0 +1,50 @@
+name: Bench inventory
+
+# Validates the fleet inventory in configs/benches/ on every change.
+#
+# Runs on a cloud runner and touches no hardware: descriptors are committed to
+# the repo precisely so routing can be resolved without contacting a bench. That
+# also means a bad descriptor is caught in review rather than at dispatch time,
+# when it would send someone's run to a bench that cannot do the job.
+
+on:
+  pull_request:
+    paths:
+      - 'configs/benches/**'
+      - 'tools/bench.py'
+      - 'tests/test_bench_descriptors.py'
+      - '.github/workflows/bench-inventory.yml'
+  push:
+    branches: [dev]
+    paths:
+      - 'configs/benches/**'
+      - 'tools/bench.py'
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Dependencies are installed directly rather than via `pip install -e .`:
+      # the package still lists spidev / RPi.GPIO as hard requirements, which
+      # cannot build off a Pi. Descriptor tooling is pure Python by design so it
+      # runs anywhere, including a contributor's laptop.
+      - name: Install tooling deps
+        run: pip install --quiet pyyaml jsonschema pytest
+
+      - name: Validate every bench descriptor
+        run: python -m tools.bench validate
+
+      - name: List the fleet
+        run: python -m tools.bench list
+
+      # `python -m pytest` (not bare `pytest`) so the repo root lands on
+      # sys.path and `tools.bench` imports without installing the package.
+      - name: Inventory guards
+        run: python -m pytest tests/test_bench_descriptors.py -v
