@@ -86,14 +86,27 @@ routing:
     ch_p: 0         # -> S_current_p (AMS PF7 / OUT_P)
     ch_n: 1         # -> S_current_n (AMS PF8 / OUT_N)
     zero_volts: 1.44
+  # Legacy single-ended current path, superseded by the differential pair above
+  # (AMS #348). Kept as its own entry rather than derived from pack_current:
+  # they coincide on this bench, and that is a bench fact, not a rule.
+  current_heartbeat:
+    dac: 3
+    channel: 0      # ch0 -> AMS PF7
   tsms:
-    tca: 0x21
+    tca: 0x21       # IOEXP2 (U7 on silk); P10 -> AMS PF9
     port: 1
     pin: 0
   dash_chg:
-    tca: 0x21
+    tca: 0x21       # P11 -> AMS PF10
     port: 1
     pin: 1
+  # AMS relay GPIOs PB4..PB7 tapped to bench ADC3 (broker idx 2) ch0..3.
+  relay_readback:
+    adc: 2
+    ams_ok: 0       # PB4
+    air_p: 1        # PB5
+    air_n: 2        # PB6
+    prech: 3        # PB7
 
 # The probe-verifiable half. `describe` drafts this; `verify` re-probes and diffs.
 expect:

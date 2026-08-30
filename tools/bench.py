@@ -100,6 +100,38 @@ def get_descriptor(bench_id):
     return benches[bench_id][1]
 
 
+def load_bench(bench_id=None):
+    """The descriptor for the bench this session targets.
+
+    Selected by $HIL_BENCH. When that is unset and exactly one bench is
+    described, that one is used -- a single-bench fleet should not need
+    configuring. With several described, the choice has to be explicit: picking
+    alphabetically would silently run somebody's tests on the wrong hardware.
+
+    Raises rather than exiting, so test fixtures can skip on it.
+    """
+    benches = load_descriptors()
+    bench_id = bench_id or os.environ.get("HIL_BENCH")
+    if bench_id:
+        if bench_id not in benches:
+            raise KeyError(f"unknown bench '{bench_id}'; known: "
+                           f"{', '.join(sorted(benches)) or '(none)'}")
+        return benches[bench_id][1]
+    if len(benches) == 1:
+        return next(iter(benches.values()))[1]
+    raise RuntimeError(
+        "several benches are described; set $HIL_BENCH to one of: "
+        + ", ".join(sorted(benches)))
+
+
+def slot_for_dut(desc, dut):
+    """Which MLC slot holds `dut` on this bench."""
+    for slot, spec in sorted((desc.get("slots") or {}).items()):
+        if spec.get("dut") == dut:
+            return int(slot)
+    raise KeyError(f"{desc['id']} declares no slot with dut: {dut}")
+
+
 def runner_labels(desc):
     base = desc.get("runner", {}).get("base_labels", ["self-hosted", "hil-bench"])
     return list(base) + [desc["id"]] + sorted(desc.get("capabilities", []))
