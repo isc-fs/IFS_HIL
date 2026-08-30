@@ -107,8 +107,13 @@ Install Python dependencies in editable mode so the `tools.*` and
 `broker.*` packages resolve from your working copy:
 
 ```sh
-pi$ pip install -e . --break-system-packages
+pi$ pip install -e '.[bench]' --break-system-packages
 ```
+
+The `[bench]` extra pulls in the Pi-only hardware drivers (`spidev`,
+`smbus2`, `RPi.GPIO`). Plain `pip install -e .` deliberately omits them
+so the repo stays installable on a developer laptop; on a bench you want
+the extra, or the real broker backend cannot open the buses.
 
 (The `--break-system-packages` flag is Pi OS Bookworm's opt-in for
 system-wide `pip install`. If you prefer a venv, create one in

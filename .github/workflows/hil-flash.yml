@@ -71,8 +71,11 @@ jobs:
       - name: Checkout HIL repo
         uses: actions/checkout@v4
 
+      # This job runs on the bench Pi, so it needs the hardware extra. The old
+      # line asked for a `[dev]` extra that was never defined and silently fell
+      # back, which happened to work only because the hardware deps were core.
       - name: Install HIL tools
-        run: pip install --quiet -e ".[dev]" 2>/dev/null || pip install --quiet -e .
+        run: pip install --quiet -e ".[bench]"
 
       - name: Download firmware artifact
         uses: actions/download-artifact@v4

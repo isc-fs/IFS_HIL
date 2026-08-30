@@ -526,6 +526,9 @@ files if needed.
 
 Most of this repo runs on the Pi (broker, dashboard, tests, kernel
 module, systemd units). Off-bench on a Mac/Linux laptop you can:
+- `pip install -e .` — works anywhere. The Pi-only hardware drivers
+  (`spidev`, `smbus2`, `RPi.GPIO`) live in the `[bench]` extra, which
+  is what a bench installs: `pip install -e '.[bench]'`.
 - Build/edit code, run `pytest tests/broker/` (fake backend).
 - Run `python -m broker.server --fake --socket /tmp/hil-broker.sock`
   + `HIL_BROKER_SOCKET=/tmp/hil-broker.sock pytest tests/hil/` for
