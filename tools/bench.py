@@ -45,10 +45,13 @@ INA_CANDIDATES = [0x40, 0x41, 0x44, 0x45]
 TCA_CANDIDATES = [0x20, 0x21, 0x22]
 DAC_CANDIDATES = [0, 1, 2, 3]
 
-# A DAC80504 reporting device id 0x0000 is wedged, not absent -- it answers but
-# has lost its POR state. Recovering it needs a full PSU cycle plus a broker
-# restart, so the probe calls it out rather than reporting a healthy device.
-DAC_WEDGED_ID = 0x0000
+# A healthy DAC80504 returns 0x0417 in the low 14 bits of DEVID (tools/dac80504.py,
+# asserted by tests/hil/test_spi_dac.py). Anything else means the SPI read did not
+# land: 0x0000 and 0x3FFF are the floating-low and floating-high patterns, and on
+# a real bench they have been observed alternating between reads. Testing only for
+# one of them reports a healthy device half the time, so compare against the
+# expected value instead.
+DAC_DEVID_EXPECTED = 0x0417
 
 
 # --------------------------------------------------------------------------
@@ -162,8 +165,8 @@ def probe(deep=False):
     """
     client = _client()
     result = {"psu_ok": None, "broker": None, "ina": [], "tca": [],
-              "dac": [], "dac_wedged": [], "nrf24": False, "can": {},
-              "slots_powered": None, "warnings": []}
+              "dac": [], "dac_devid": {}, "dac_bad_devid": [], "nrf24": False,
+              "can": {}, "slots_powered": None, "warnings": []}
 
     result["broker"] = _try(client, "broker.health")
 
@@ -189,13 +192,19 @@ def probe(deep=False):
         if dev_id is None:
             continue
         result["dac"].append(idx)
-        if dev_id == DAC_WEDGED_ID:
-            result["dac_wedged"].append(idx)
+        result["dac_devid"][str(idx)] = f"0x{dev_id:04X}"
+        if dev_id != DAC_DEVID_EXPECTED:
+            result["dac_bad_devid"].append(idx)
 
-    if result["dac_wedged"]:
+    if result["dac_bad_devid"]:
+        got = ", ".join(f"DAC{i}={result['dac_devid'][str(i)]}"
+                        for i in result["dac_bad_devid"])
         result["warnings"].append(
-            f"DAC(s) {result['dac_wedged']} report device id 0x0000 — wedged. "
-            "Recover with a full PSU off/on cycle plus `systemctl restart hil-broker`.")
+            f"DAC(s) {result['dac_bad_devid']} did not return the expected device "
+            f"id 0x{DAC_DEVID_EXPECTED:04X} ({got}) — the SPI read is not landing. "
+            "Check PWR_OK gating (invariant #6), then try a full PSU off/on cycle "
+            "plus `systemctl restart hil-broker`. Any capability driven by a DAC "
+            "(stim-pack-current) is untrustworthy until this clears.")
 
     result["nrf24"] = bool(_try(client, "nrf.is_present"))
     result["can"] = _probe_can()
@@ -463,6 +472,18 @@ def cmd_verify(args):
 
     if "nrf24" in expect and expect["nrf24"] != found["nrf24"]:
         problems.append(f"nrf24: declared {expect['nrf24']}, detected {found['nrf24']}")
+
+    # Capability-level honesty: routing trusts `capabilities`, so a declared
+    # capability whose hardware does not answer is worse than an absent one --
+    # it silently attracts runs this bench cannot serve.
+    caps = desc.get("capabilities", [])
+    if "stim-pack-current" in caps and found["dac_bad_devid"]:
+        problems.append(
+            f"stim-pack-current is declared, but DAC(s) {found['dac_bad_devid']} "
+            "do not return a valid device id — this bench cannot drive pack "
+            "current right now")
+    if "radio-nrf24" in caps and not found["nrf24"]:
+        problems.append("radio-nrf24 is declared, but no nRF24 responds")
 
     # A declared sample point that the live bus contradicts is the single
     # highest-value check here: it is invisible until a DUT mysteriously bus-offs.
