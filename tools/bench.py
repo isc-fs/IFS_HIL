@@ -53,6 +53,10 @@ DAC_CANDIDATES = [0, 1, 2, 3]
 # expected value instead.
 DAC_DEVID_EXPECTED = 0x0417
 
+# `ip` reports the sample point to three decimals and the kernel quantises to
+# the achievable bit timing, so declared and live never compare exactly equal.
+SAMPLE_POINT_TOL = 0.005
+
 
 # --------------------------------------------------------------------------
 # descriptor loading
@@ -493,11 +497,19 @@ def cmd_verify(args):
         if not live:
             problems.append(f"can[{role}]: {dev} not present on this host")
             continue
-        for field in ("bitrate", "sample_point"):
-            if field in spec and field in live and spec[field] != live[field]:
+        if "bitrate" in spec and "bitrate" in live and spec["bitrate"] != live["bitrate"]:
+            problems.append(f"can[{role}] {dev}: declared bitrate={spec['bitrate']}, "
+                            f"live bitrate={live['bitrate']}")
+        # `ip` prints the sample point to three decimals (0.6875 renders as
+        # 0.687) and the kernel quantises to the nearest achievable bit timing,
+        # so an exact compare calls a correctly configured bus broken. The
+        # tolerance is still an order of magnitude tighter than the mistake this
+        # check exists to catch (0.875 against 0.6875).
+        if "sample_point" in spec and "sample_point" in live:
+            if abs(spec["sample_point"] - live["sample_point"]) > SAMPLE_POINT_TOL:
                 problems.append(
-                    f"can[{role}] {dev}: declared {field}={spec[field]}, "
-                    f"live {field}={live[field]}")
+                    f"can[{role}] {dev}: declared sample_point={spec['sample_point']}, "
+                    f"live sample_point={live['sample_point']}")
 
     for w in found["warnings"]:
         print(f"warning: {w}", file=sys.stderr)
