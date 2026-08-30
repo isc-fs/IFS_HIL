@@ -1,22 +1,26 @@
-# Tunable thresholds and cadences for the AMS HIL tests.
+# Firmware facts and test expectations for the AMS HIL suite.
 # Adjust here so test code stays free of magic numbers.
 #
 # Aligned with `isc-fs/IFS08-CE-AMS#123` (v1.3.0-flatten bench session,
 # chain-less rig, -DAMS_BMS_HIL_STUB=1 build). Mirrors constants in the
 # firmware's `Core/Inc/app/ams_config.hpp`; if firmware moves, this file
 # moves with it.
+#
+# WHAT BELONGS HERE: values that are identical on every bench -- firmware
+# constants, frame IDs, thresholds, cadences, tolerances.
+#
+# WHAT DOES NOT: anything bench-physical -- which slot the AMS sits in, which
+# CAN device, which DAC channel drives the current fixture, which TCA pin is
+# TSMS. Those differ per bench and live in `configs/benches/<id>.yaml`; the
+# `ams_profile` fixture overlays them under the same key names, so tests never
+# need to know which layer a value came from. Putting one back here would make
+# the suite silently bench-specific again, so the fixture raises if a key is
+# defined in both places.
 
-# -- Carrier slot -----------------------------------------------------
-mlc_slot:                 2          # which carrier slot the AMS is in
+# -- Carrier -----------------------------------------------------------
 mlc_boot_current_mA:      100        # min draw after K_n closes (bench: 118-128 mA)
 mlc_boot_settle_s:        0.5        # delay after relay close before discover
                                      # short enough to catch BL before auto-jump
-
-# -- CAN buses --------------------------------------------------------
-bus_acu:                  can2       # AMS FDCAN1 = Pi can2 (telemetry + ACU stim);
-                                     # v1.6.0 fleet cutover moved the AMS off can0
-bus_bms_bl:               can2       # BL flash bus — same physical bus as the app now
-                                     # (v1.6.0 multi-FDCAN BL, reachable on can2)
 
 # -- Bootloader -------------------------------------------------------
 bl_node_id:               0x01       # kAmsNodeId in ams_config.hpp (option-1 per isc-fs/IFS08-CE-AMS#123)
@@ -77,8 +81,6 @@ acu_heartbeat_dc_bus_v:   0          # quiescent value (precharge tests override
 # DAC80504 wiring section. Voltage model in conftest::current_heartbeat
 # uses 2.5 V at 0 A, 5.7 mV/A (matches ams_config.hpp Hall constants).
 current_heartbeat_period_ms:   50    # 20 Hz, well under kIStaleMs = 200
-current_heartbeat_dac_idx:     3     # broker idx 3 = DAC4 (U15)
-current_heartbeat_dac_channel: 0     # ch0 -> AMS PF7
 current_heartbeat_default_mA:  0     # quiescent 0 A (= 2.5 V on the DAC)
 
 # -- Pack current injection: DIFFERENTIAL (AMS #348 current-sensor rework) --
@@ -87,10 +89,6 @@ current_heartbeat_default_mA:  0     # quiescent 0 A (= 2.5 V on the DAC)
 # (PF7/OUT_P), ch1 -> S_current_n (PF8/OUT_N). Firmware reads 5 mV/A of
 # (OUT_P - OUT_N); CM 1.44 V keeps both legs in 0-3.3 V across +-200 A.
 # Bench wiring: DAC4 ch0/ch1 -> PF7/PF8 (conftest::pack_current_diff).
-pack_current_dac_idx:     3      # broker idx 3 = DAC4 (U15)
-pack_current_dac_ch_p:    0      # ch0 -> S_current_p (PF7 / OUT_P)
-pack_current_dac_ch_n:    1      # ch1 -> S_current_n (PF8 / OUT_N)
-pack_current_cm_v:        1.44   # common-mode (legs equal -> 0 A)
 pack_current_mv_per_a:    5.0    # (OUT_P - OUT_N) sensitivity
 pack_current_default_a:   0      # quiescent
 pack_current_period_ms:   50     # 20 Hz refresh (current-stale freshness)
@@ -115,22 +113,11 @@ acu_rx_dc_bus_id:         0x100      # extended, DLC 2, LE uint16 volts
 # charger_detect are no longer FSM triggers. TSMS + DASH_CHG GPIO inputs
 # replace them; see tsms_* / dash_chg_* keys below.
 
-# -- TSMS routing (side-of-car external master switch) ----------------
-# Drives AMS PF9. Active-high; both this AND dash_chg must be asserted
-# to trigger Start -> Precharge. Bench jumper: IOEXP2_P10 -> SLOT1_AN0
-# patch-header pin (MLC1 connector pin 14 -> AMS PF9).
-tsms_tca_addr:            0x21       # IOEXP2 (U7 on backplane silk)
-tsms_tca_port:            1          # port 1 (P10..P17)
-tsms_tca_pin:             0          # P10 -> PF9
-
-# -- DASH_CHG routing (cockpit dashboard / charger button) ------------
-# Drives AMS PF10. Active-high. Bench jumper: IOEXP2_P11 -> SLOT1_AN1
-# patch-header pin (MLC1 connector pin 15 -> AMS PF10). Sibling channel
-# to TSMS so they share a TCA9555 port (conftest's _combined_output_mask
-# helper handles the shared direction-register write idempotently).
-dash_chg_tca_addr:        0x21
-dash_chg_tca_port:        1
-dash_chg_tca_pin:         1          # P11 -> PF10
+# -- TSMS / DASH_CHG ---------------------------------------------------
+# Both drive AMS GPIOs (PF9 / PF10, active-high) and both must be asserted to
+# trigger Start -> Precharge. They share a TCA9555 port, which conftest's
+# _combined_output_mask helper handles idempotently. The pin routing is
+# bench-physical -> `routing.tsms` / `routing.dash_chg` in the bench descriptor.
 
 # -- charger_0x101 (operator charge-request emitter, AMS #311 / #316) --
 # A connected charger broadcasts 0x101 with magic 'CHRG' (0x43485247) at
@@ -141,19 +128,12 @@ charger_0x101_id:         0x101
 charger_0x101_payload:    "4348524700000000"   # 'CHRG' + 4 zero bytes
 charger_0x101_period_ms:  200                  # 5 Hz, well above the 2 Hz floor
 
-# -- Relay-readback (AMS GPIO outputs sampled by bench ADC3 / MCP3208) -
-# Per the bench wiring spec: SLOT2 connector taps PB4..PB7 to ADC3
-# (silk: ADC3, broker idx 2) channels 0..3. The conftest fixture
-# `relays_readback` exposes a read()/poll_for()/sample_for() helper
-# that thresholds the analogue reading at the digital boundary.
-ams_ok_adc_idx:           2          # ADC3 (= broker idx 2)
-ams_ok_adc_channel:       0          # PB4
-air_p_adc_idx:            2
-air_p_adc_channel:        1          # PB5
-air_n_adc_idx:            2
-air_n_adc_channel:        2          # PB6
-prech_adc_idx:            2
-prech_adc_channel:        3          # PB7
+# -- Relay-readback (AMS GPIO outputs sampled by a bench ADC) ----------
+# The AMS relay GPIOs PB4..PB7 are tapped to an MCP3208 channel group; which
+# ADC and which channels is bench-physical -> `routing.relay_readback` in the
+# bench descriptor. The conftest fixture `relays_readback` exposes a
+# read()/poll_for()/sample_for() helper that thresholds the analogue reading at
+# the digital boundary below.
 relay_readback_digital_threshold_v: 1.65   # midpoint of 0-3.3 V CMOS
 
 # -- Block E soak budgets --------------------------------------------
