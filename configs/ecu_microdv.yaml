@@ -3,7 +3,8 @@ ecu:
   board: stm32h733zg
   slot: MLC3
   transport: can
-  can_channel: can0
+  can_channel: can2          # MLC carriers are all reached on kernel can2
+                             # (PCB CAN1 / U17, invariant #3); was can0
   firmware:
     binary: /srv/hil/build/microdv/firmware.bin
     cmake_target: microdv_firmware
