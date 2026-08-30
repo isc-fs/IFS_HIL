@@ -334,14 +334,33 @@ def cmd_resolve(args):
     """Match a capability set to benches. This is what the dispatch workflow
     calls; it runs on a cloud runner with no bench access, which is why the
     inventory has to live in the repo rather than being served by the benches."""
-    required = {c.strip() for c in args.capabilities.split(",") if c.strip()}
+    required = {c.strip() for c in (args.capabilities or "").split(",") if c.strip()}
     benches = load_descriptors()
 
-    matches = []
-    for bench_id, (_, desc) in sorted(benches.items()):
-        caps = set(desc.get("capabilities", []))
-        if required <= caps:
-            matches.append((bench_id, desc))
+    # An explicit bench always wins. Capability matching is the good default for
+    # throughput, but someone standing at a bench with a scope on a pin needs the
+    # run pinned to that bench, not to whichever one happens to be free.
+    if args.bench:
+        if args.bench not in benches:
+            print(f"unknown bench '{args.bench}'; known: "
+                  f"{', '.join(sorted(benches)) or '(none)'}", file=sys.stderr)
+            return 1
+        desc = benches[args.bench][1]
+        missing = required - set(desc.get("capabilities", []))
+        if missing:
+            print(f"{args.bench} was requested explicitly but lacks: "
+                  f"{' '.join(sorted(missing))}", file=sys.stderr)
+            return 1
+        matches = [(args.bench, desc)]
+    else:
+        if not required:
+            print("give --capabilities or --bench", file=sys.stderr)
+            return 1
+        matches = []
+        for bench_id, (_, desc) in sorted(benches.items()):
+            caps = set(desc.get("capabilities", []))
+            if required <= caps:
+                matches.append((bench_id, desc))
 
     if not matches:
         # Fail with the diff, not just "no match" -- an actionable error is the
@@ -572,8 +591,10 @@ def main():
     p.set_defaults(func=cmd_labels)
 
     p = sub.add_parser("resolve", help="which bench satisfies a capability set")
-    p.add_argument("--capabilities", required=True,
+    p.add_argument("--capabilities",
                    help="comma-separated, e.g. dut-ams,stim-temps")
+    p.add_argument("--bench",
+                   help="pin to this bench; still checked against --capabilities")
     p.add_argument("--github-output", action="store_true",
                    help="also append bench/labels to $GITHUB_OUTPUT")
     p.set_defaults(func=cmd_resolve)

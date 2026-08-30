@@ -98,6 +98,17 @@ def test_runner_labels_include_id_and_capabilities(descriptors):
             assert cap in labels
 
 
+def test_labels_are_runner_safe(descriptors):
+    """Labels are the routing table, and GitHub matches them literally. Anything
+    needing quoting on a `config.sh --labels` line will silently register as a
+    different label and the bench stops matching its own dispatches."""
+    for bench_id, (_, desc) in descriptors.items():
+        for label in runner_labels(desc):
+            assert label == label.strip(), f"{bench_id}: '{label}' has whitespace"
+            assert all(c.isalnum() or c in "-_." for c in label), (
+                f"{bench_id}: label '{label}' has characters that need quoting")
+
+
 def test_can_sample_point_is_declared(descriptors):
     """A silent sample-point mismatch presents as an unexplained bus-off rather
     than a config error, so every bus must state the value preflight checks."""
