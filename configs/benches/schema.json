@@ -1,0 +1,173 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/isc-fs/IFS08_HIL/configs/benches/schema.json",
+  "title": "HIL bench descriptor",
+  "description": "One descriptor per physical bench, authored by that bench's owner. `capabilities` is what routes a test run to this bench; `hardware` records what physically provides each capability, so swapping an emulator never changes what tests ask for. `expect` is the probe-verifiable half -- `tools/bench.py verify` diffs it against the live bench.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "owner", "hosts", "capabilities", "can"],
+
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "Bumped only on a breaking change to this schema."
+    },
+
+    "id": {
+      "type": "string",
+      "pattern": "^bench-[0-9]{2,}$",
+      "description": "Fleet-unique id, e.g. bench-01. Also the concurrency-group key, so a typo silently disables this bench's queue lock."
+    },
+
+    "owner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "github"],
+      "description": "Who keeps this bench running. With several benches, uptime needs a named owner rather than defaulting to whoever built it.",
+      "properties": {
+        "name":   { "type": "string", "minLength": 1 },
+        "github": { "type": "string", "minLength": 1 },
+        "notes":  { "type": "string" }
+      }
+    },
+
+    "board_rev": {
+      "type": "string",
+      "description": "Backplane revision, e.g. BACKPLANE_HIL-A. Different revisions may move addresses."
+    },
+
+    "location": {
+      "type": "string",
+      "description": "Human hint for whoever has to walk to it."
+    },
+
+    "hosts": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "description": "SSH targets. The single source of truth for bench addresses -- nothing else in the repo should carry one.",
+      "properties": {
+        "lan":       { "type": "string" },
+        "tailscale": { "type": "string" }
+      }
+    },
+
+    "runner": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "GitHub self-hosted runner identity. `tools/bench.py labels` emits base + capability labels; CI checks the runner actually carries them.",
+      "properties": {
+        "base_labels": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["self-hosted", "hil-bench"]
+        }
+      }
+    },
+
+    "capabilities": {
+      "type": "array",
+      "uniqueItems": true,
+      "minItems": 1,
+      "description": "What this bench can DO. These become runner labels and are what a dispatch matches on. Named for the capability, never the hardware -- replacing an emulator must not change what a test asks for.",
+      "items": {
+        "type": "string",
+        "enum": [
+          "dut-ams",
+          "dut-ecu",
+          "dut-udv",
+
+          "stim-cells",
+          "stim-temps",
+          "stim-pack-current",
+          "stim-sdc",
+          "stim-inverter",
+
+          "fault-temp-open",
+          "fault-cell-open",
+          "fault-module-silent",
+
+          "radio-nrf24"
+        ]
+      }
+    },
+
+    "hardware": {
+      "type": "object",
+      "description": "What physically provides each capability. Documentation and debugging only -- never routed on. Answers 'which benches have a Pico?' without coupling tests to the answer.",
+      "additionalProperties": { "type": "string" },
+      "properties": {
+        "cell_temp_emulator": { "type": "string", "description": "e.g. pico-ltc, real-pack" },
+        "pack_current_source": { "type": "string", "description": "e.g. dac80504" },
+        "temp_fault": { "type": "string", "description": "e.g. ntc-interposer" },
+        "cell_fault": { "type": "string" },
+        "radio": { "type": "string" }
+      }
+    },
+
+    "can": {
+      "type": "object",
+      "minProperties": 1,
+      "description": "CAN buses by role. Kernel netdev names are inverted vs the PCB silk (invariant #3), so the dev name is recorded per bench rather than assumed.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["dev", "bitrate"],
+        "properties": {
+          "dev":     { "type": "string", "pattern": "^can[0-9]+$" },
+          "bitrate": { "type": "integer", "minimum": 1 },
+          "sample_point": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "exclusiveMaximum": 1,
+            "description": "Recorded because hil-can-up defaults to 0.875 while the AMS/ACU bus needs 0.6875; a mismatch bus-offs the DUT. Preflight asserts the live value."
+          }
+        }
+      }
+    },
+
+    "slots": {
+      "type": "object",
+      "description": "MLC carrier slot occupancy, keyed by slot number 1..4.",
+      "propertyNames": { "pattern": "^[1-4]$" },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["dut"],
+        "properties": {
+          "dut": {
+            "type": "string",
+            "enum": ["ams", "ecu", "udv", "none"],
+            "description": "Canonical DUT names. 'ecu' is the ECU08 target (historically 'vcu'); 'udv' is the microDV."
+          },
+          "ina": {
+            "type": "integer",
+            "description": "INA226 address monitoring this slot's carrier current."
+          },
+          "notes": { "type": "string" }
+        }
+      }
+    },
+
+    "routing": {
+      "type": "object",
+      "description": "Bench-physical wiring that tests must not hardcode. A test asks the descriptor for pack_current, never for DAC 3 channel 0.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+
+    "expect": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The probe-verifiable half. `tools/bench.py describe` drafts it from a live bench; `verify` re-probes and diffs. A bench that claims a capability it cannot demonstrate fails preflight in seconds instead of producing a puzzling red suite an hour later.",
+      "properties": {
+        "ina":  { "type": "array", "items": { "type": "integer" }, "uniqueItems": true },
+        "tca":  { "type": "array", "items": { "type": "integer" }, "uniqueItems": true },
+        "dac":  { "type": "array", "items": { "type": "integer" }, "uniqueItems": true },
+        "nrf24": { "type": "boolean" }
+      }
+    }
+  }
+}

@@ -1,0 +1,103 @@
+# bench-01 — the original BACKPLANE_HIL bench in the ISC lab.
+#
+# Authored by the bench owner, validated against configs/benches/schema.json in
+# CI, and consumed by tools/bench.py (labels / verify) and the test fixtures.
+#
+# STATUS: the `expect` block below is DECLARED, not yet machine-verified -- the
+# bench was unreachable (LAN and Tailscale) when this descriptor was written.
+# Run `python -m tools.bench verify --bench bench-01` on the bench and correct
+# anything that disagrees before trusting it for routing.
+
+schema_version: 1
+id: bench-01
+
+owner:
+  name: Raul Moran
+  github: raulmoranguerra
+
+board_rev: BACKPLANE_HIL-A
+location: ISC Racing Team lab
+
+hosts:
+  lan: isc@192.168.0.123
+  tailscale: isc@100.96.95.78
+
+runner:
+  base_labels: [self-hosted, hil-bench]
+
+# What this bench can DO. These become runner labels and are what a dispatch
+# matches on. Add one only once `verify` can demonstrate it.
+capabilities:
+  - dut-ams               # AMS carrier in MLC2
+  - dut-ecu               # ECU08 carrier in MLC4
+  - stim-cells            # Pico drives per-cell voltages
+  - stim-temps            # Pico drives per-slot NTC temperatures through the mux
+  - stim-pack-current     # DAC differential into the AMS current front-end
+  - stim-sdc              # TSMS / DASH_CHG driven via TCA9555
+  - fault-temp-open       # NTC interposer can physically open a sensor
+  - fault-module-silent   # Pico stop_reply() silences a whole LTC
+  #
+  # NOT claimed, deliberately:
+  #   fault-cell-open -- a true in-range open needs the LTC's own ADOW current
+  #   injection. The Pico emulates the LTC, and whether it reproduces ADOW has
+  #   never been confirmed on hardware (see IFS08_HIL#96 test 4). Claim it only
+  #   once a bench run demonstrates CellOpenWire actually fires.
+  #   radio-nrf24 -- U23 is unpopulated on this backplane.
+
+# What physically provides each capability. Documentation and debugging only:
+# nothing routes on this, so replacing the Pico does not change any test.
+hardware:
+  cell_temp_emulator: pico-ltc
+  pack_current_source: dac80504
+  temp_fault: ntc-interposer
+  radio: none
+
+can:
+  # Kernel netdev names are inverted vs the PCB silk (invariant #3): PCB "CAN1"
+  # (U17) is kernel can2, and every MLC carrier is reached there.
+  acu:
+    dev: can2
+    bitrate: 500000
+    # 0.6875, NOT the 0.875 that hil-can-up sets. A mismatch bus-offs the AMS,
+    # which has cost several sessions. Preflight asserts the live value.
+    sample_point: 0.6875
+
+slots:
+  "1":
+    dut: none
+  "2":
+    dut: ams
+    ina: 0x41
+  "3":
+    dut: none
+    notes: configs/ecu_udv.yaml targets this slot, but no carrier is seated today.
+  "4":
+    dut: ecu
+    ina: 0x45
+    notes: >-
+      Powering K4 boots the ECU, which then supplies the 0x100 VCU heartbeat at
+      100 Hz for free -- the AMS needs it continuously or it trips VcuStale.
+
+# Bench-physical wiring. Tests resolve through these names and must never
+# hardcode a DAC index or TCA pin.
+routing:
+  pack_current:
+    dac: 3          # broker idx 3 = DAC4 (U15)
+    ch_p: 0         # -> S_current_p (AMS PF7 / OUT_P)
+    ch_n: 1         # -> S_current_n (AMS PF8 / OUT_N)
+    zero_volts: 1.44
+  tsms:
+    tca: 0x21
+    port: 1
+    pin: 0
+  dash_chg:
+    tca: 0x21
+    port: 1
+    pin: 1
+
+# The probe-verifiable half. `describe` drafts this; `verify` re-probes and diffs.
+expect:
+  ina:  [0x40, 0x41, 0x44, 0x45]   # one per MLC slot
+  tca:  [0x20, 0x21, 0x22]
+  dac:  [0, 1, 2, 3]
+  nrf24: false
