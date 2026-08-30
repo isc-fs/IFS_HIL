@@ -117,50 +117,6 @@ the extra, or the real broker backend cannot open the buses.
 
 ---
 
-## Join the fleet (self-hosted runner)
-
-Required for dispatched runs (`.github/workflows/hil-test.yml`). Without a
-runner the test job sits in **Queued** forever rather than failing — GitHub
-does not error on an unmatched `runs-on` — so the workflow checks for one up
-front and tells you if it is missing.
-
-First describe the bench, then register a runner carrying exactly the labels
-the descriptor declares:
-
-```sh
-# on your laptop, from the repo root
-python -m tools.bench describe --draft bench-02 --out configs/benches/bench-02.yaml
-# fill in the FIXMEs, then:
-python -m tools.bench validate
-python -m tools.bench labels --bench bench-02
-#   -> self-hosted,hil-bench,bench-02,dut-ams,stim-cells,...
-```
-
-```sh
-# on the bench
-mkdir -p ~/actions-runner && cd ~/actions-runner
-curl -o r.tar.gz -L https://github.com/actions/runner/releases/latest/download/actions-runner-linux-arm64.tar.gz
-tar xzf r.tar.gz
-
-# a registration token is short-lived; mint one with:
-#   gh api -X POST repos/isc-fs/IFS08_HIL/actions/runners/registration-token --jq .token
-./config.sh --url https://github.com/isc-fs/IFS08_HIL \
-            --token <REGISTRATION_TOKEN> \
-            --name bench-02 \
-            --labels "$(python -m tools.bench labels --bench bench-02)"
-
-sudo ./svc.sh install && sudo ./svc.sh start
-```
-
-The labels **are** the routing table: a dispatch asks for capabilities, the
-resolve job turns those into labels, and GitHub picks a bench that carries
-them. If you rewire a bench, update its descriptor *and* re-run `config.sh`
-with the new label set, or it will keep attracting runs it can no longer serve.
-
-> A self-hosted runner executes workflow code from this repository on the bench
-> host. Keep the repo's write access to people you would trust with the
-> hardware.
-
 (The `--break-system-packages` flag is Pi OS Bookworm's opt-in for
 system-wide `pip install`. If you prefer a venv, create one in
 `~/IFS08_HIL/.venv`, activate it, and drop the flag.)
@@ -233,13 +189,21 @@ and installs it at
 `/lib/modules/$(uname -r)/kernel/drivers/net/can/spi/mcp251x.ko.xz`.
 The stock module is preserved at `mcp251x.ko.xz.orig` for rollback.
 
-Verify the build artifact carries our markers:
+Verify the patched module is the one installed:
 
 ```sh
-pi$ sudo xz -dc /lib/modules/$(uname -r)/kernel/drivers/net/can/spi/mcp251x.ko.xz \
-       | strings | grep -i backplane_hil
-# Expected: several "/* Patched: … */" markers
+pi$ M=/lib/modules/$(uname -r)/kernel/drivers/net/can/spi/mcp251x.ko.xz
+pi$ sudo md5sum "$M" "$M.orig"
+# Expected: two DIFFERENT hashes. Same hash (or no .orig) means the
+# patch never landed and the stock module is still in place.
 ```
+
+> Earlier revisions of this guide said to run
+> `xz -dc … | strings | grep -i backplane_hil` and expect
+> `/* Patched: … */` markers. That check can never pass: those markers are C
+> *comments*, which the compiler strips — they are not in the binary. It
+> reported failure on a correctly built bench and sent people to
+> troubleshooting for no reason.
 
 ---
 
@@ -317,9 +281,11 @@ pi$ ls /dev/spidev0.3
 # Expected: /dev/spidev0.3
 
 pi$ # PSU_ON (GPIO7) driven LOW, PWR_OK (GPIO8) reads HIGH
-pi$ pinctrl get 7 8 | head
-# Expected:   7: op -- .. lo
-#             8: ip    pd | hi
+pi$ pinctrl get 7,8
+# Expected:   7: op -- pn | lo // GPIO7 = output
+#             8: ip    pd | hi // GPIO8 = input
+# NOTE: comma-separated. `pinctrl get 7 8` fails with "Too many arguments"
+# on current pinctrl.
 
 pi$ # broker and its socket up
 pi$ systemctl status hil-broker --no-pager | head
@@ -332,7 +298,17 @@ pi$ curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/api/status
 # Expected: dashboard "active (running)", HTTP 200
 ```
 
-If any of these fails, go to
+Or check the whole build in one go — this runs every assertion in this
+guide and names the section to redo for anything that fails:
+
+```sh
+pi$ cd ~/IFS08_HIL && python3 -m tools.bench doctor
+# Expected, on a correctly built bench:
+#   ...
+#   this bench matches the documented build
+```
+
+If any check fails, go to
 [`docs/troubleshooting.md`](troubleshooting.md) before proceeding.
 
 ---
@@ -364,20 +340,24 @@ protocol. It's a Rust binary published as a private release.
 On a workstation with `gh` authenticated:
 
 ```sh
-$ gh release download v1.1.2 -R isc-fs/can-flasher \
-       -p 'can-flasher-v1.1.2-aarch64-unknown-linux-gnu.tar.gz'
-$ scp can-flasher-v1.1.2-aarch64-unknown-linux-gnu.tar.gz isc@<pi-ip>:/tmp/
+# pick the current release; do not pin an old one -- v1.1.2 was pinned here
+# for a long time while benches ran 2.5.5, and newer versions carry the
+# `logs` subcommand the AMS LOGFS work depends on.
+$ VER=$(gh release view -R isc-fs/can-flasher --json tagName --jq .tagName)
+$ gh release download "$VER" -R isc-fs/can-flasher \
+       -p "can-flasher-$VER-aarch64-unknown-linux-gnu.tar.gz"
+$ scp can-flasher-$VER-aarch64-unknown-linux-gnu.tar.gz isc@<pi-ip>:/tmp/
 ```
 
 On the Pi:
 
 ```sh
 pi$ cd /tmp
-pi$ tar -xzf can-flasher-v1.1.2-aarch64-unknown-linux-gnu.tar.gz
+pi$ tar -xzf can-flasher-*-aarch64-unknown-linux-gnu.tar.gz
 pi$ sudo install -m 0755 \
-       can-flasher-v1.1.2-aarch64-unknown-linux-gnu/can-flasher \
+       can-flasher-*-aarch64-unknown-linux-gnu/can-flasher \
        /usr/local/bin/
-pi$ can-flasher --version     # expect: can-flasher 1.1.2
+pi$ can-flasher --version     # bench-01 runs 2.5.5 as of 2026-08-30
 pi$ can-flasher adapters      # expect: SocketCAN interfaces: can0 can1 can2
 ```
 
@@ -485,6 +465,53 @@ At this point you have:
 
 You're done. Anything else — regression tests, multi-ECU flashing,
 CI wiring — is the operator guide's territory.
+
+---
+
+## 14. Join the fleet (self-hosted runner)
+
+Required for dispatched runs (`.github/workflows/hil-test.yml`). Without a
+runner the test job sits in **Queued** forever rather than failing — GitHub
+does not error on an unmatched `runs-on` — so the workflow checks for one up
+front and tells you if it is missing.
+
+First describe the bench, then register a runner carrying exactly the labels
+the descriptor declares:
+
+```sh
+# on your laptop, from the repo root
+python -m tools.bench describe --draft bench-02 --out configs/benches/bench-02.yaml
+# fill in the FIXMEs, then:
+python -m tools.bench validate
+python -m tools.bench labels --bench bench-02
+#   -> self-hosted,hil-bench,bench-02,dut-ams,stim-cells,...
+```
+
+```sh
+# on the bench
+mkdir -p ~/actions-runner && cd ~/actions-runner
+curl -o r.tar.gz -L https://github.com/actions/runner/releases/latest/download/actions-runner-linux-arm64.tar.gz
+tar xzf r.tar.gz
+
+# a registration token is short-lived; mint one with:
+#   gh api -X POST repos/isc-fs/IFS08_HIL/actions/runners/registration-token --jq .token
+./config.sh --url https://github.com/isc-fs/IFS08_HIL \
+            --token <REGISTRATION_TOKEN> \
+            --name bench-02 \
+            --labels "$(python -m tools.bench labels --bench bench-02)"
+
+sudo ./svc.sh install && sudo ./svc.sh start
+```
+
+The labels **are** the routing table: a dispatch asks for capabilities, the
+resolve job turns those into labels, and GitHub picks a bench that carries
+them. If you rewire a bench, update its descriptor *and* re-run `config.sh`
+with the new label set, or it will keep attracting runs it can no longer serve.
+
+> A self-hosted runner executes workflow code from this repository on the bench
+> host. Keep the repo's write access to people you would trust with the
+> hardware.
+
 
 ---
 

@@ -305,12 +305,26 @@ Break these and things go weird in non-obvious ways.
 pi$ systemctl is-active hil-psu-on hil-can-up hil-broker   # → active × 3
 pi$ ip -br link | grep can                                 # can0/can1/can2 UP
 pi$ ls /dev/spidev0.3 /dev/i2c-1                           # both exist
-pi$ pinctrl get 7 8                                        # 7=op lo, 8=ip hi
+pi$ pinctrl get 7,8                                        # 7=op lo, 8=ip hi
+                                                           # comma, not space:
+                                                           # `get 7 8` errors
 pi$ curl -s -o /dev/null -w '%{http_code}\n' \
         http://localhost:8080/api/status                   # 200
 ```
 
 All five pass = healthy. Any failure → [`docs/troubleshooting.md`](docs/troubleshooting.md).
+
+Or run the whole thing, including the parts the five lines above skip
+(kernel module, sudoers, overlay, packages):
+
+```sh
+pi$ cd ~/IFS08_HIL && python3 -m tools.bench doctor   # host built per getting-started.md
+pi$ python3 -m tools.bench verify --bench <id>        # hardware matches its descriptor
+```
+
+`doctor` checks the **host build**; `verify` checks the **hardware** against
+what the bench declares. A new bench needs both to pass before it is worth
+registering a runner on it.
 
 ---
 
@@ -438,7 +452,7 @@ if you skip the explicit stop.)
 | `undervoltage detected!` in dmesg | Pi 5 V input weak (ATX 5VSBY < 3 A) | Move Pi to dedicated 5 V / 3 A supply |
 | Pytest all skipped | `HIL_BROKER_SOCKET` pointing nowhere | `unset HIL_BROKER_SOCKET`, or set to actual path |
 | MLC ≤ 1 mA after relay close | Fuse blown or relay didn't switch | Check F5–F14, listen for relay click, `tca.read_port(0x20, 0)` |
-| `Cannot initialize MCP2515. Wrong wiring?` | Patched module not active | `xz -dc /lib/modules/$(uname -r)/.../mcp251x.ko.xz \| strings \| grep backplane_hil` |
+| `Cannot initialize MCP2515. Wrong wiring?` | Patched module not active | `M=/lib/modules/$(uname -r)/kernel/drivers/net/can/spi/mcp251x.ko.xz; sudo md5sum "$M" "$M.orig"` — hashes must DIFFER. (Grepping the binary for `backplane_hil` can never work: those markers are C comments, stripped at compile time.) |
 | `/dev/spidev0.3` missing | Overlay didn't load | `grep dtoverlay /boot/firmware/config.txt`; `dmesg \| grep overlay` |
 | `Address already in use` on 8080 | Stray `nohup` dashboard fighting the service | `pkill -f dashboard/app.py && sudo systemctl restart hil-dashboard` |
 
