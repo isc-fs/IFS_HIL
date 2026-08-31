@@ -104,3 +104,31 @@ def test_isolation_is_the_default_not_restore():
     sig = inspect.signature(flash)
     assert sig.parameters["restore_relays"].default is False, (
         "restore_relays must default to False — isolation is the safe default")
+
+
+def test_a_build_recipe_exists_for_every_flashable_dut():
+    """The recipe is IFS_HIL-owned and reviewed here: a PR must not be able to
+    change how its own firmware is built when the result is written to shared
+    hardware. Every DUT the flasher can target needs one."""
+    import yaml as _yaml
+    from tools.flash_dut import PROFILE_FOR_DUT, REPO_ROOT
+    for dut in PROFILE_FOR_DUT:
+        r = REPO_ROOT / "configs" / "firmware" / f"{dut}.yaml"
+        assert r.is_file(), f"no build recipe for {dut}: {r}"
+        rec = _yaml.safe_load(r.read_text())
+        for key in ("dut", "repo", "configure", "build", "elf", "layout_check"):
+            assert key in rec, f"{r.name} is missing {key}"
+        assert rec["dut"] == dut
+
+
+def test_the_ecu_recipe_builds_the_firmware_not_the_sil_project():
+    """The ECU repo's ROOT CMakeLists.txt is project(ECU08_NSIL_Tests) — the
+    host test project. The ARM firmware is firmware/CMakeLists.txt. Anything
+    inferring the source dir from the repo layout builds the wrong thing and
+    would hand a host binary to the flasher."""
+    import yaml as _yaml
+    from tools.flash_dut import REPO_ROOT
+    rec = _yaml.safe_load((REPO_ROOT / "configs/firmware/ecu.yaml").read_text())
+    assert "-S firmware" in rec["configure"], (
+        "the ECU build must be told to use firmware/, not the repo root")
+    assert "ECU08.elf" in rec["elf"]

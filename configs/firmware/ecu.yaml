@@ -1,0 +1,19 @@
+# How to build ECU firmware for a HIL run. See ams.yaml for why this lives here
+# rather than in the firmware repo.
+#
+# NOTE the source directory. The ECU repo's ROOT CMakeLists.txt is
+# `project(ECU08_NSIL_Tests)` -- the host/SIL test project, not firmware. The
+# ARM firmware is firmware/CMakeLists.txt (`project(ECU08 C CXX ASM)`), while the
+# toolchain file stays at the repo root. Anything that infers the source dir from
+# a repo layout gets this wrong and silently builds the wrong project.
+
+dut: ecu
+repo: isc-fs/IFS08-CE-ECU
+submodules: false
+toolchain_release: '14.2.Rel1'
+
+configure: cmake -S firmware -B build-fw -DCMAKE_TOOLCHAIN_FILE="$PWD/cmake/gcc-arm-none-eabi.cmake"
+build: cmake --build build-fw -j
+elf: build-fw/ECU08.elf
+
+layout_check: python3 scripts/check_flash_layout.py build-fw/ECU08.elf

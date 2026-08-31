@@ -1,0 +1,173 @@
+name: HIL Firmware Build
+
+# Builds a firmware repo's PR commit into a flashable image, for hil-test.yml.
+#
+# Called with `uses: ./.github/workflows/hil-fw-build.yml` from the same repo.
+# NOT callable cross-repo: IFS_HIL is private with actions access_level=none, and
+# a cross-repo reusable workflow would resolve `./` against the CALLER, so the
+# bench runner would have to be visible to three firmware repos. For hardware,
+# that trust boundary is not worth crossing.
+#
+# The build recipe comes from configs/firmware/<dut>.yaml -- reviewed here, never
+# from the pull request. A PR must not be able to change how its own firmware is
+# built when the result gets written to a shared carrier.
+#
+# Runs on a cloud runner. Firmware is never built on the bench: PR-controlled
+# CMakeLists executing next to the broker socket, NOPASSWD ip link and the
+# spi/i2c/gpio groups is not a boundary worth testing.
+
+on:
+  workflow_call:
+    inputs:
+      dut:
+        description: "ams | ecu — selects configs/firmware/<dut>.yaml"
+        required: true
+        type: string
+      firmware_repo:
+        description: "owner/repo holding the firmware"
+        required: true
+        type: string
+      firmware_sha:
+        description: "exact commit to build"
+        required: true
+        type: string
+    outputs:
+      artifact:
+        description: "name of the uploaded artifact"
+        value: ${{ jobs.build.outputs.artifact }}
+      bin_name:
+        description: "the .bin inside it"
+        value: ${{ jobs.build.outputs.bin_name }}
+      sha256:
+        description: "sha256 of that .bin, for the bench to re-check"
+        value: ${{ jobs.build.outputs.sha256 }}
+    secrets:
+      FIRMWARE_TOKEN:
+        required: false
+
+  workflow_dispatch:
+    inputs:
+      dut:           { description: "ams | ecu", required: true, type: string }
+      firmware_repo: { description: "owner/repo", required: true, type: string }
+      firmware_sha:  { description: "commit sha", required: true, type: string }
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    outputs:
+      artifact: ${{ steps.pack.outputs.artifact }}
+      bin_name: ${{ steps.pack.outputs.bin_name }}
+      sha256:   ${{ steps.pack.outputs.sha256 }}
+    steps:
+      - name: Checkout IFS_HIL (for the recipe)
+        uses: actions/checkout@v4
+        with:
+          path: hil
+
+      - name: Load the build recipe
+        id: recipe
+        run: |
+          R="hil/configs/firmware/${{ inputs.dut }}.yaml"
+          if [ ! -f "$R" ]; then
+            echo "::error::no build recipe for dut '${{ inputs.dut }}' — expected $R"
+            echo "Known DUTs:"; ls hil/configs/firmware/ 2>/dev/null
+            exit 1
+          fi
+          python3 - "$R" <<'PY' >> "$GITHUB_OUTPUT"
+          import sys, yaml
+          r = yaml.safe_load(open(sys.argv[1]))
+          # The recipe pins the repo; a caller asking for a different one is a bug
+          # or an attempt to build something else under this DUT's name.
+          print(f"repo={r['repo']}")
+          print(f"submodules={str(r.get('submodules', False)).lower()}")
+          print(f"toolchain={r['toolchain_release']}")
+          print(f"elf={r['elf']}")
+          for k in ("configure", "build", "layout_check"):
+              print(f"{k}<<EOFX\n{r[k]}\nEOFX")
+          PY
+
+      - name: Refuse a repo the recipe does not name
+        run: |
+          if [ "${{ steps.recipe.outputs.repo }}" != "${{ inputs.firmware_repo }}" ]; then
+            echo "::error::dut '${{ inputs.dut }}' is pinned to ${{ steps.recipe.outputs.repo }}, but the run asked for ${{ inputs.firmware_repo }}"
+            exit 1
+          fi
+
+      - name: Checkout firmware at the exact commit
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.firmware_repo }}
+          ref: ${{ inputs.firmware_sha }}
+          submodules: ${{ steps.recipe.outputs.submodules == 'true' && 'recursive' || 'false' }}
+          token: ${{ secrets.FIRMWARE_TOKEN || github.token }}
+          path: fw
+          persist-credentials: false
+
+      - name: Install arm-none-eabi ${{ steps.recipe.outputs.toolchain }}
+        uses: carlosperate/arm-none-eabi-gcc-action@v1
+        with:
+          release: ${{ steps.recipe.outputs.toolchain }}
+
+      - name: Configure
+        working-directory: fw
+        run: ${{ steps.recipe.outputs.configure }}
+
+      - name: Build
+        working-directory: fw
+        run: ${{ steps.recipe.outputs.build }}
+
+      # The image is about to be written to a real carrier's app slot. This
+      # asserts .isr_vector starts exactly at 0x08020000 and nothing lands in
+      # sector 0 or 7 -- i.e. that it will not overwrite the bootloader.
+      - name: Flash-layout gate
+        working-directory: fw
+        run: ${{ steps.recipe.outputs.layout_check }}
+
+      - name: Package
+        id: pack
+        working-directory: fw
+        run: |
+          ELF="${{ steps.recipe.outputs.elf }}"
+          test -f "$ELF" || { echo "::error::recipe says $ELF but the build did not produce it"; exit 1; }
+          BIN="$(basename "${ELF%.elf}").bin"
+          arm-none-eabi-objcopy -O binary "$ELF" "out/$BIN" 2>/dev/null || {
+            mkdir -p out && arm-none-eabi-objcopy -O binary "$ELF" "out/$BIN"; }
+          cp "$ELF" out/
+          ( cd out && sha256sum ./* > SHA256SUMS.txt )
+          SUM=$(sha256sum "out/$BIN" | cut -d' ' -f1)
+          {
+            echo "dut=${{ inputs.dut }}"
+            echo "repo=${{ inputs.firmware_repo }}"
+            echo "sha=${{ inputs.firmware_sha }}"
+            echo "bin=$BIN"
+            echo "sha256=$SUM"
+          } > out/build-meta.txt
+          {
+            echo "artifact=fw-${{ inputs.dut }}-$(echo '${{ inputs.firmware_sha }}' | cut -c1-8)"
+            echo "bin_name=$BIN"
+            echo "sha256=$SUM"
+          } >> "$GITHUB_OUTPUT"
+          echo "built $BIN  sha256 $SUM"
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pack.outputs.artifact }}
+          path: fw/out/
+          # Short on purpose: this is a per-PR build, and an unbounded retention
+          # is what filled the org's artifact quota and broke a green bench run.
+          retention-days: 3
+
+      - name: Summary
+        run: |
+          {
+            echo "### Built \`${{ steps.pack.outputs.bin_name }}\` for \`${{ inputs.dut }}\`"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| repo | \`${{ inputs.firmware_repo }}\` |"
+            echo "| commit | \`${{ inputs.firmware_sha }}\` |"
+            echo "| sha256 | \`${{ steps.pack.outputs.sha256 }}\` |"
+            echo "| layout gate | passed |"
+          } >> "$GITHUB_STEP_SUMMARY"
