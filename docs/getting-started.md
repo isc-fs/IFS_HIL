@@ -115,8 +115,6 @@ The `[bench]` extra pulls in the Pi-only hardware drivers (`spidev`,
 so the repo stays installable on a developer laptop; on a bench you want
 the extra, or the real broker backend cannot open the buses.
 
----
-
 (The `--break-system-packages` flag is Pi OS Bookworm's opt-in for
 system-wide `pip install`. If you prefer a venv, create one in
 `~/IFS08_HIL/.venv`, activate it, and drop the flag.)
@@ -490,8 +488,11 @@ python -m tools.bench labels --bench bench-02
 ```sh
 # on the bench
 mkdir -p ~/actions-runner && cd ~/actions-runner
-curl -o r.tar.gz -L https://github.com/actions/runner/releases/latest/download/actions-runner-linux-arm64.tar.gz
-tar xzf r.tar.gz
+# The asset name embeds the version, so .../latest/download/<name> 404s.
+RUNNER_VER=$(curl -fsSL https://api.github.com/repos/actions/runner/releases/latest | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')
+curl -fsSL -o runner.tar.gz \
+  "https://github.com/actions/runner/releases/download/v${RUNNER_VER}/actions-runner-linux-arm64-${RUNNER_VER}.tar.gz"
+tar xzf runner.tar.gz
 
 # a registration token is short-lived; mint one with:
 #   gh api -X POST repos/isc-fs/IFS08_HIL/actions/runners/registration-token --jq .token
@@ -500,7 +501,8 @@ tar xzf r.tar.gz
             --name bench-02 \
             --labels "$(python -m tools.bench labels --bench bench-02)"
 
-sudo ./svc.sh install && sudo ./svc.sh start
+sudo ./svc.sh install "$(id -un)"   # svc.sh only exists after config.sh
+sudo ./svc.sh start
 ```
 
 The labels **are** the routing table: a dispatch asks for capabilities, the

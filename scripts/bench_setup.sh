@@ -352,7 +352,7 @@ if [ -f "$HOME/actions-runner/.runner" ]; then
         c_ok "runner service present"
     else
         c_do "install and start the runner service"
-        run "cd '$HOME/actions-runner' && sudo ./svc.sh install && sudo ./svc.sh start"
+        run "cd '$HOME/actions-runner' && sudo ./svc.sh install \"$(id -un)\" && sudo ./svc.sh start"
     fi
     mark_done runner
 elif [ -z "$RUNNER_TOKEN" ] && ! ( command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1 ); then
@@ -366,12 +366,15 @@ else
     if [ -z "$RUNNER_TOKEN" ]; then
         run "RUNNER_TOKEN=\$(gh api -X POST repos/isc-fs/IFS08_HIL/actions/runners/registration-token --jq .token)"
     fi
+    # The asset name embeds the version, so .../latest/download/<name> 404s --
+    # resolve the tag first. svc.sh does not exist until config.sh has run.
     run "mkdir -p '$HOME/actions-runner' && cd '$HOME/actions-runner' && \
-         curl -fsSL -o runner.tar.gz https://github.com/actions/runner/releases/latest/download/actions-runner-linux-arm64.tar.gz && \
+         RUNNER_VER=\$(curl -fsSL https://api.github.com/repos/actions/runner/releases/latest | sed -n 's/.*\"tag_name\": *\"v\\([^\"]*\\)\".*/\\1/p') && \
+         curl -fsSL -o runner.tar.gz \"https://github.com/actions/runner/releases/download/v\${RUNNER_VER}/actions-runner-linux-arm64-\${RUNNER_VER}.tar.gz\" && \
          tar xzf runner.tar.gz"
     run "cd '$HOME/actions-runner' && ./config.sh --unattended --url https://github.com/isc-fs/IFS08_HIL \
          --token \"\${RUNNER_TOKEN}\" --name '$BENCH_ID' --labels '$LABELS' --replace"
-    run "cd '$HOME/actions-runner' && sudo ./svc.sh install && sudo ./svc.sh start"
+    run "cd '$HOME/actions-runner' && sudo ./svc.sh install \"$(id -un)\" && sudo ./svc.sh start"
     mark_done runner
 fi
 
