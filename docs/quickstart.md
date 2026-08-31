@@ -25,67 +25,47 @@ None of this is quick if a prerequisite is missing, so check first:
 
 ---
 
-## 1. Bootstrap (~30 min, mostly unattended)
+## One script, run it until it stops asking
 
 ```sh
 pi$ git clone https://github.com/isc-fs/IFS08_HIL.git && cd IFS08_HIL
-pi$ ./scripts/bench_bootstrap.sh --dry-run    # read what it will do
-pi$ ./scripts/bench_bootstrap.sh
-pi$ sudo reboot
+pi$ ./scripts/bench_setup.sh --bench bench-NN --dry-run   # read what it will do
+pi$ ./scripts/bench_setup.sh --bench bench-NN
 ```
 
-That covers sections 1–7 of the long guide: interfaces and groups, packages,
-the Python package with its `[bench]` extra, the device-tree overlay and boot
-config, the patched `mcp251x` module, the sudoers drop-in, and the four systemd
-units. It is idempotent — re-run it any time; it reports what is already done
-and changes nothing else.
+`bench_setup.sh` is **resumable**. Setup spans a reboot and one editing task
+that no script can do for you, so it runs as far as it can, tells you what it
+needs, and continues from there when you re-run it with the same arguments.
+It is idempotent throughout — re-running is always safe, and on a finished
+bench it changes nothing and says so.
 
-## 2. Check the build (~1 min)
+| Phase | What happens | You do |
+|---|---|---|
+| **base** | interfaces, groups, packages, Python package, overlay + boot config, patched `mcp251x`, sudoers, systemd units | nothing — ~30 min, mostly waiting |
+| **reboot** | stops and asks | `sudo reboot`, then re-run |
+| **host** | `bench doctor` — every assertion in the long guide | fix anything red before continuing |
+| **flasher** | installs `can-flasher` if `gh` is authenticated here, otherwise tells you to do it from a workstation | maybe §10 |
+| **descriptor** | drafts `configs/benches/bench-NN.yaml` from a live probe, then stops | **fill the FIXMEs** (below), re-run to validate + verify |
+| **runner** | registers a self-hosted runner with this bench's labels | supply `--runner-token`, or let it mint one via `gh` |
 
-```sh
-pi$ cd ~/IFS08_HIL && python3 -m tools.bench doctor
-```
+### The descriptor is the part only you can do
 
-Every check should pass, ending in `this bench matches the documented build`.
-A failure names the section of [`getting-started.md`](getting-started.md) to
-redo. Do not carry on past a red check — everything below assumes the host is
-sound.
-
-## 3. Install `can-flasher` (~5 min)
-
-Not in the bootstrap: it is a private release, so it needs your `gh` auth.
-[`getting-started.md` §10](getting-started.md).
-
-## 4. Describe the bench (~10 min, the part only you can do)
-
-```sh
-$ python -m tools.bench describe --draft bench-NN --out configs/benches/bench-NN.yaml
-$ python -m tools.bench validate      # tells you exactly what is still FIXME
-```
-
-`describe` probes the live bench and fills in what it can find — I²C addresses,
-CAN devices, slot map. You supply what no probe can know: which DUT is in which
-slot, what the fixtures are wired to, and who owns the bench.
+`describe` fills in what it can probe — I²C addresses, CAN devices, slot map.
+You supply what no probe can know: which DUT is in which slot, what the
+fixtures are wired to, who owns the bench.
 
 **Declare a capability only if the bench really has it.** These labels route
 other people's test runs; an optimistic one silently attracts work this bench
-cannot serve. `capabilities` is deliberately empty in the draft so validation
+cannot serve. That is why the draft leaves `capabilities` empty and validation
 fails until you have thought about it.
 
-Then prove the description is honest, and open a PR for it:
+Commit it and open a PR — the fleet inventory lives in the repo, so the
+resolve job can route without contacting any bench.
+
+### Then a dispatched run should land on it
 
 ```sh
-pi$ python3 -m tools.bench verify --bench bench-NN
-```
-
-## 5. Join the fleet (~10 min)
-
-Register a self-hosted runner carrying exactly the labels the descriptor
-declares — [`getting-started.md` §14](getting-started.md). The labels *are* the
-routing table. After that:
-
-```sh
-$ gh workflow run hil-test.yml -f capabilities=dut-ams -f suite=tests/hil/ams/...
+$ gh workflow run hil-test.yml -f bench=bench-NN -f suite=tests/hil/test_can.py
 ```
 
 ---
