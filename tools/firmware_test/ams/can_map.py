@@ -133,8 +133,10 @@ STATE_CPU_CHARGING      = 0x04
 ID_TELEM_STATUS  = 0x4A0   # FSM state, AMS_OK, module mask, min/max cell V
 ID_TELEM_PACK    = 0x4A1   # pack mV (u32 LE), filtered mA (i32 LE)
 ID_TELEM_TEMPS   = 0x4A2   # min/max/avg tempC, dc_bus_V, heartbeat
+ID_RELAY_STATUS  = 0x4A4   # AMS_relay_status (#395): contactor + AMS_OK ODR read-backs, ~100 ms
 
 TX_TELEM_PERIOD_MS = 500
+TX_RELAY_PERIOD_MS = 100   # 0x4A4 cadence (#395)
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +158,7 @@ ID_PIT_DIAG_POST_MORTEM  = 0x6C5
 ID_PIT_DIAG_FW_ID        = 0x6C6   # [0..2]semver [3..6]git_hash [7]bl_node_id
 ID_PIT_DIAG_PEC_PER_IC_A = 0x6C7   # [0..7]saturating u8 PEC count per IC for chain index 0..7
 ID_PIT_DIAG_PEC_PER_IC_B = 0x6C8   # [0..1]saturating u8 for chain 8..9, [2..7]reserved
+ID_PIT_DIAG_FDCAN1_RECOVERY = 0x6C9   # [0..3]busoff_recovery_count LE u32 [4..7]acu_tx_fail LE u32 (#391/#392)
 
 PIT_DIAG_ENABLE_MAGIC  = bytes([0xDE, 0xAD, 0xBE, 0xEF])
 PIT_DIAG_DISABLE_MAGIC = bytes([0x00, 0x00, 0x00, 0x00])
@@ -226,6 +229,37 @@ def decode_telem_pack(data: bytes) -> dict:
     pack_mV = int.from_bytes(data[0:4], "little", signed=False)
     mA      = int.from_bytes(data[4:8], "little", signed=True)
     return {"pack_voltage_mV": pack_mV, "filtered_mA": mA}
+
+
+def decode_relay_status(data: bytes) -> dict:
+    """Decode 0x4A4 AMS_relay_status byte 0 (#395). ODR read-backs of what
+    the firmware drives the contactor coils + AMS_OK GPIO to:
+      bit 0 air_negative, bit 1 air_positive, bit 2 precharge, bit 3 ams_ok.
+    Bytes 1-7 are reserved (zero). This is the direct contactor-sequence
+    observability the pit-diag stream never gave us (Block R; #397 guard).
+    """
+    if len(data) < 1:
+        raise ValueError(f"0x4A4 needs >=1 byte, got {len(data)}")
+    b = data[0]
+    return {
+        "air_negative": bool(b & 0x01),
+        "air_positive": bool(b & 0x02),
+        "precharge":    bool(b & 0x04),
+        "ams_ok":       bool(b & 0x08),
+    }
+
+
+def decode_fdcan1_recovery(data: bytes) -> dict:
+    """Decode 0x6C9 (#391/#392): FDCAN1 bus-off recovery diagnostics.
+      bytes 0-3  busoff_recovery_count (LE u32) -- HAL_FDCAN_Stop/Start cycles
+      bytes 4-7  acu_tx_fail_count     (LE u32) -- 0x12C ACU TX failures
+    """
+    if len(data) < 8:
+        raise ValueError(f"0x6C9 needs 8 bytes, got {len(data)}")
+    return {
+        "busoff_recovery_count": int.from_bytes(data[0:4], "little"),
+        "acu_tx_fail_count":     int.from_bytes(data[4:8], "little"),
+    }
 
 
 def decode_telem_temps(data: bytes) -> dict:

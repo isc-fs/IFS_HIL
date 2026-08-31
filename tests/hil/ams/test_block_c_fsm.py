@@ -417,11 +417,23 @@ class TestC037ChargerEntry:
 
     def test_c037_charger_entry(
         self, fresh_boot, tsms, dash_chg, acu_heartbeat, charger_0x101,
-        wait_for_state, pit_diag, ams_profile):
+        wait_for_state, pit_diag, observe_acu, ams_profile):
         _require_inputs(tsms, dash_chg)
+        observe_acu.clear()
         snap = _drive_to_charge(tsms, dash_chg, acu_heartbeat,
                                 charger_0x101, wait_for_state, ams_profile)
         assert snap["state"] == M.FsmState.CHARGE
+
+        # #397 (revised): the Charger path SKIPS the precharge resistor -- the
+        # precharge contactor (0x4A4 bit 2) must never close across
+        # Start->Precharge->Charge (cross-checked by R-113). Car still closes
+        # it (C-032/R-112). Conditional on 0x4A4 so pre-#395 images don't fail.
+        relay = observe_acu.frames(M.ID_RELAY_STATUS)
+        if relay:
+            bad = [f for f in relay if M.decode_relay_status(f.data)["precharge"]]
+            assert not bad, (
+                f"#397 VIOLATED: precharge contactor closed in the Charger path "
+                f"({len(bad)} of {len(relay)} 0x4A4 frames) -- must skip the resistor.")
 
         # Reaching Charge proves the Charger lock fired -- Charge is
         # unreachable except via a Charger-mode Precharge. mode_locked is
