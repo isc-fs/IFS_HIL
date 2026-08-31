@@ -17,6 +17,11 @@ dependencies = [
     "python-can>=4.0",
     "pyyaml>=6.0",
     "jsonschema>=4.0",
+    # tools/pico_ltc_emulator talks to the Pico over USB CDC. Pure Python and
+    # installs anywhere, unlike the [bench] extras -- and it was imported
+    # without ever being declared, so it only worked where the Pi happened to
+    # have it system-wide.
+    "pyserial>=3.5",
 ]
 
 [project.optional-dependencies]

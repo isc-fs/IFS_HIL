@@ -70,6 +70,13 @@ def _find_pico_port() -> str:
     raise RuntimeError("No /dev/ttyACM* port found; is the Pico connected?")
 
 
+# Mirrors ams_config.hpp:993-994. Keep in step with the firmware: the cell
+# split is what every per-cell injection is addressed through.
+CELLS_PER_LTC_UPPER = 9    # LTC_1 -> module cells 0..8
+CELLS_PER_LTC_LOWER = 10   # LTC_2 -> module cells 9..18
+CELLS_PER_MODULE = CELLS_PER_LTC_UPPER + CELLS_PER_LTC_LOWER   # 19
+
+
 class PicoLtcClient:
     def __init__(self, port: str | None = None,
                  baudrate: int = DEFAULT_BAUD,
@@ -186,9 +193,19 @@ class PicoLtcClient:
     # ------------------------------------------------------------------
     # AMS-view helpers — translate (module, cell-within-module) to the
     # chain-position addressing the Pico firmware speaks. Each AMS
-    # module = 2 LTC6811 chain positions (upper + lower); cells 0..9
-    # live on the upper LTC, cells 10..18 on the lower LTC (matching
-    # ams_config.hpp::CellsPerLtcUpper=10, CellsPerLtcLower=9).
+    # module = 2 LTC6811 chain positions (upper + lower).
+    #
+    # The split is 9 / 10, NOT 10 / 9. ams_config.hpp:993-994:
+    #     CellsPerLtcUpper =  9   // LTC_1 (first in chain) -> module cells 0..8
+    #     CellsPerLtcLower = 10   // LTC_2 (second)         -> module cells 9..18
+    #
+    # This was inverted here, and measurably wrong on bench-01: driving each
+    # chain position cell-by-cell shows upper LTCs answering 9 cells and lower
+    # LTCs 10. The inversion made `inject_cell_v(m, 10, …)` land on module cell
+    # 9, made cell 9 address a channel the AMS does not read at all (injection
+    # silently lost), and left cell 18 unreachable. Undervoltage tests still
+    # passed -- the AMS trips whichever neighbour goes low -- which is why it
+    # survived so long.
     #
     # Use these in tests rather than the chain-pos `set_cell` so test
     # code reads as "inject mV into module 3 cell 15" instead of "set
@@ -201,10 +218,10 @@ class PicoLtcClient:
             raise ValueError(f"module must be 0..4, got {module}")
         if not (0 <= cell < 19):
             raise ValueError(f"cell must be 0..18, got {cell}")
-        if cell < 10:
-            return (2 * module,     cell)           # upper LTC
+        if cell < CELLS_PER_LTC_UPPER:
+            return (2 * module,     cell)                          # LTC_1
         else:
-            return (2 * module + 1, cell - 10)      # lower LTC
+            return (2 * module + 1, cell - CELLS_PER_LTC_UPPER)    # LTC_2
 
     def set_module_cell(self, module: int, cell: int, mV: int) -> None:
         """`module` ∈ 0..4, `cell` ∈ 0..18 (AMS-view addressing)."""
