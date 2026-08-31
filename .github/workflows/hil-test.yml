@@ -16,6 +16,18 @@ name: HIL Test
 # rather than failing, which looks like a hang -- see docs/development/setup.md.
 
 on:
+  # Registers the workflow with GitHub. A workflow carrying ONLY
+  # workflow_dispatch/workflow_call is never indexed until it has run once, and
+  # until then `gh workflow run hil-test.yml` fails with
+  #   HTTP 404: workflow hil-test.yml not found on the default branch
+  # which reads like a branch problem but is not: the workflow is simply unknown.
+  # A push touching this file runs the cheap self-check job below, which indexes
+  # it. After that, `--ref <any-branch>` dispatches that branch's version, so a
+  # feature branch can be tested without going near main.
+  push:
+    paths:
+      - '.github/workflows/hil-test.yml'
+
   workflow_dispatch:
     inputs:
       capabilities:
@@ -71,11 +83,34 @@ on:
 
 jobs:
   # ---------------------------------------------------------------------
+  # Registration + a genuine smoke test of the resolver, on a cloud runner.
+  # Never touches hardware, so it is safe on every push to this file.
+  # ---------------------------------------------------------------------
+  self-check:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install
+        run: pip install --quiet -e .
+      - name: The resolver still works
+        run: |
+          python -m tools.bench validate
+          python -m tools.bench resolve --capabilities dut-ams
+          echo "hil-test.yml is registered; dispatch it with:"
+          echo "  gh workflow run hil-test.yml --repo ${{ github.repository }} --ref <branch> \\"
+          echo "    -f capabilities=dut-ams -f suite=tests/hil/ams/"
+
+  # ---------------------------------------------------------------------
   # Which bench can serve this? Cloud runner, no hardware access -- which is
   # exactly why the inventory is committed to the repo rather than served by
   # the benches themselves.
   # ---------------------------------------------------------------------
   resolve:
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     outputs:
       bench: ${{ steps.pick.outputs.bench }}
