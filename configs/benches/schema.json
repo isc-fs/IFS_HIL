@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/isc-fs/IFS08_HIL/configs/benches/schema.json",
+  "$id": "https://github.com/isc-fs/IFS_HIL/configs/benches/schema.json",
   "title": "HIL bench descriptor",
   "description": "One descriptor per physical bench, authored by that bench's owner. `capabilities` is what routes a test run to this bench; `hardware` records what physically provides each capability, so swapping an emulator never changes what tests ask for. `expect` is the probe-verifiable half -- `tools/bench.py verify` diffs it against the live bench.",
   "type": "object",

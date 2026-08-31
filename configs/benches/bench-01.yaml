@@ -40,7 +40,7 @@ capabilities:
   # NOT claimed, deliberately:
   #   fault-cell-open -- a true in-range open needs the LTC's own ADOW current
   #   injection. The Pico emulates the LTC, and whether it reproduces ADOW has
-  #   never been confirmed on hardware (see IFS08_HIL#96 test 4). Claim it only
+  #   never been confirmed on hardware (see IFS_HIL#96 test 4). Claim it only
   #   once a bench run demonstrates CellOpenWire actually fires.
   #   radio-nrf24 -- U23 is unpopulated on this backplane.
 

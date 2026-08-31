@@ -238,4 +238,4 @@ This is deliberately optimistic for the human — assumes they don't make mistak
 | `test/ams-hil-renumber-blocks-bc` (follow-up) | Renumber B-010..B-017 → B-020..B-027 and C-020..C-028 → C-030..C-045, delete obsolete C-034/C-035 | not started |
 | `feat/ams-hil-block-e-ltc-counters-impl` (follow-up) | Implement E-061..E-064 once AMS exposes the diag counters | blocked on AMS-side decision |
 | `feat/ams-hil-block-f-soak-impl` (follow-up) | Wire up the actual soak loops once the trigger-flash helper is in the operator's hands | blocked on operator opting in |
-| `feat/pico-emulator-injection-commands` (follow-up, IFS08_HIL) | Pico-side STOP_REPLY / INJECT_CELL_V / INJECT_CELL_T per §3 | blocked on Pico emulator branch owner |
+| `feat/pico-emulator-injection-commands` (follow-up, IFS_HIL) | Pico-side STOP_REPLY / INJECT_CELL_V / INJECT_CELL_T per §3 | blocked on Pico emulator branch owner |

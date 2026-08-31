@@ -12,7 +12,7 @@
 
 #define LINE_MAX 96
 
-#define FW_VERSION_STR "0.4.0"   // adds ADG731 mux snoop (IFS08_HIL#41)
+#define FW_VERSION_STR "0.4.0"   // adds ADG731 mux snoop (IFS_HIL#41)
 
 usb_cmd_stats_t g_cmd_stats;
 
@@ -265,7 +265,7 @@ void usb_cmd_init(void) {
 }
 
 void usb_cmd_service(void) {
-    // ONE getchar per call (IFS08_HIL#44). The earlier while-loop kept
+    // ONE getchar per call (IFS_HIL#44). The earlier while-loop kept
     // pulling bytes until the CDC RX buffer drained, with each call
     // to getchar_timeout_us(0) re-entering tud_task() inside the
     // pico-sdk. That could string together hundreds of µs of USB

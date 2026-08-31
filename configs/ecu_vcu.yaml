@@ -8,7 +8,7 @@ ecu:
     binary: /srv/hil/build/vcu/firmware.bin   # TODO(#56): point at the ECU08 .bin once CI builds it
     cmake_target: ECU08      # real firmware target; was vcu_firmware
   # TODO(#56): migrate flash_tool to the Rust can-flasher; tools.flash is legacy
-  # (IFS08_HIL CLAUDE.md known-drift) -- left as-is pending the CI flash-mechanism review.
+  # (IFS_HIL CLAUDE.md known-drift) -- left as-is pending the CI flash-mechanism review.
   flash_tool: tools.flash:flash
   reset_sequence:
     - off

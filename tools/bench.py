@@ -276,6 +276,146 @@ def _probe_slots(client):
 
 
 # --------------------------------------------------------------------------
+# host setup checks (doctor)
+# --------------------------------------------------------------------------
+#
+# `verify` answers "does the hardware match what this bench declares?".
+# `doctor` answers the question a NEW bench owner has: "did I build this Pi
+# correctly?" -- i.e. does the host match docs/getting-started.md. Both are
+# needed: a perfectly-described bench with an unpatched kernel module still
+# cannot talk to a carrier.
+#
+# Section numbers match the headings in docs/getting-started.md so a failure
+# points at the step to redo.
+
+APT_PACKAGES = ["python3-can", "can-utils", "device-tree-compiler", "xz-utils",
+                "libudev-dev", "pkg-config", "git", "curl"]
+REQUIRED_GROUPS = ["spi", "i2c", "gpio", "dialout", "netdev"]
+BOOT_CONFIG = "/boot/firmware/config.txt"
+CONFIG_LINES = ["dtoverlay=mcp2515-triple", "gpio=7=op,dl", "gpio=8=ip,pd"]
+UNITS = ["hil-psu-on", "hil-can-up", "hil-broker", "hil-dashboard"]
+
+
+def _sh(cmd):
+    """(rc, output). Shell-out is the point here -- these are host facts that
+    only the system can answer."""
+    try:
+        r = subprocess.run(cmd, shell=True, capture_output=True, text=True,
+                           timeout=20)
+        return r.returncode, (r.stdout + r.stderr).strip()
+    except Exception as exc:
+        return 1, str(exc)
+
+
+def doctor_checks():
+    """Yield (section, name, ok, detail) for every documented setup step."""
+    rc, out = _sh("dpkg -s " + " ".join(APT_PACKAGES) + " >/dev/null 2>&1")
+    yield ("2", "apt packages", rc == 0,
+           "all present" if rc == 0 else "one or more missing; see §2")
+
+    _, groups = _sh("id -nG")
+    missing = [g for g in REQUIRED_GROUPS if g not in groups.split()]
+    yield ("1", "user groups", not missing,
+           "ok" if not missing else f"missing: {' '.join(missing)}")
+
+    rc, _ = _sh("test -f /boot/firmware/overlays/mcp2515-triple.dtbo")
+    yield ("4", "device-tree overlay", rc == 0,
+           "installed" if rc == 0 else "mcp2515-triple.dtbo not in /boot/firmware/overlays")
+
+    _, cfg = _sh(f"cat {BOOT_CONFIG} 2>/dev/null")
+    absent = [l for l in CONFIG_LINES if l not in cfg]
+    yield ("4", "config.txt entries", not absent,
+           "ok" if not absent else f"missing: {', '.join(absent)}")
+
+    # The patched module cannot be identified by grepping the binary for
+    # "backplane_hil": the patch's markers are C comments, which the compiler
+    # strips, so that check fails on a correctly built bench. Compare against
+    # the stock module the build script preserves instead.
+    kver = os.uname().release
+    mod = f"/lib/modules/{kver}/kernel/drivers/net/can/spi/mcp251x.ko.xz"
+    rc_a, a = _sh(f"md5sum {mod} 2>/dev/null | cut -d' ' -f1")
+    rc_b, b = _sh(f"md5sum {mod}.orig 2>/dev/null | cut -d' ' -f1")
+    if rc_b != 0 or not b:
+        yield ("5", "patched mcp251x", False,
+               "no mcp251x.ko.xz.orig — the patched module was never built here")
+    else:
+        yield ("5", "patched mcp251x", a != b,
+               "differs from stock" if a != b else "identical to stock: patch not installed")
+
+    _, dm = _sh("dmesg 2>/dev/null | grep -c 'MCP2515 successfully initialized'")
+    ok = dm.isdigit() and int(dm) >= 3
+    yield ("5", "all three MCP2515 bound", ok, f"{dm or 0}/3 initialised")
+
+    # Not `test -r`: the drop-in is 0440 root:root, so the bench user cannot
+    # read it even when it is correctly installed. Ask sudo what it grants
+    # instead, which also proves the escalation actually works rather than that
+    # a file happens to exist.
+    _, sudo_l = _sh("sudo -n -l 2>/dev/null")
+    yield ("6", "sudoers drop-in", "ip link set can" in sudo_l,
+           "NOPASSWD ip link set canN granted" if "ip link set can" in sudo_l
+           else "no ip-link escalation for this user")
+
+    for unit in UNITS:
+        _, en = _sh(f"systemctl is-enabled {unit} 2>/dev/null")
+        _, ac = _sh(f"systemctl is-active {unit} 2>/dev/null")
+        yield ("7", f"{unit}", en == "enabled" and ac == "active",
+               f"enabled={en or '-'} active={ac or '-'}")
+
+    for dev in ("/dev/spidev0.3", "/dev/i2c-1"):
+        rc, _ = _sh(f"test -e {dev}")
+        yield ("8", dev, rc == 0, "present" if rc == 0 else "missing")
+
+    # `pinctrl get 7 8` (space-separated, as the docs had it) errors with
+    # "Too many arguments" on current pinctrl. Commas are the accepted form.
+    # Parse per line: pinctrl indents inconsistently and the first line comes
+    # back without its leading space, so substring matching on " 7:" is brittle.
+    _, pins = _sh("pinctrl get 7,8 2>/dev/null")
+    lines = {}
+    for line in pins.splitlines():
+        line = line.strip()
+        if ":" in line:
+            lines[line.split(":", 1)[0].strip()] = line
+    g7, g8 = lines.get("7", ""), lines.get("8", "")
+    yield ("8", "GPIO7 PS_ON# low", "op" in g7 and "lo" in g7,
+           g7 or "GPIO7 not reported")
+    yield ("8", "GPIO8 PWR_OK high", "ip" in g8 and "hi" in g8,
+           g8 or "GPIO8 not reported")
+
+    rc, _ = _sh("test -S /run/hil-broker/broker.sock")
+    yield ("8", "broker socket", rc == 0, "present" if rc == 0 else "missing")
+
+    _, code = _sh("curl -s -o /dev/null -w '%{http_code}' "
+                  "http://localhost:8080/api/status")
+    yield ("9", "dashboard :8080", code == "200", f"HTTP {code or '---'}")
+
+    rc, ver = _sh("can-flasher --version 2>/dev/null")
+    yield ("10", "can-flasher", rc == 0, ver or "not on PATH")
+
+
+def cmd_doctor(args):
+    """Check this host against the documented bench build."""
+    if not sys.platform.startswith("linux"):
+        sys.exit("doctor inspects the bench host — run it on the Pi")
+
+    failures = 0
+    section = None
+    for sec, name, ok, detail in doctor_checks():
+        if sec != section:
+            print(f"\n§{sec}  {'-' * 52}")
+            section = sec
+        print(f"  {'PASS' if ok else 'FAIL'}  {name:<26} {detail}")
+        failures += 0 if ok else 1
+
+    print()
+    if failures:
+        print(f"{failures} check(s) failed — see the matching section of "
+              "docs/getting-started.md")
+    else:
+        print("this bench matches the documented build")
+    return 1 if failures else 0
+
+
+# --------------------------------------------------------------------------
 # subcommands
 # --------------------------------------------------------------------------
 
@@ -610,6 +750,10 @@ def main():
     p = sub.add_parser("verify", help="probe and diff against the descriptor")
     p.add_argument("--bench", required=True)
     p.set_defaults(func=cmd_verify)
+
+    sub.add_parser("doctor",
+                   help="check this host against the documented bench build"
+                   ).set_defaults(func=cmd_doctor)
 
     args = ap.parse_args()
     return args.func(args)

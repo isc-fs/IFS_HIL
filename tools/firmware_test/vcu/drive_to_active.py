@@ -29,7 +29,7 @@ import sys
 import threading
 import time
 
-sys.path.insert(0, "/home/isc/IFS08_HIL")
+sys.path.insert(0, "/home/isc/IFS_HIL")
 from broker.server import BrokerClient                     # noqa: E402
 from tools.firmware_test.vcu import inverter_sim as INV    # noqa: E402
 from tools.firmware_test.vcu import ams_sim as AMS         # noqa: E402

@@ -14,8 +14,8 @@ ships a full fake backend so broker RPC work and test development
 happen entirely off-bench.
 
 ```sh
-$ git clone https://github.com/isc-fs/IFS08_HIL.git
-$ cd IFS08_HIL
+$ git clone https://github.com/isc-fs/IFS_HIL.git
+$ cd IFS_HIL
 $ python3 -m venv .venv
 $ . .venv/bin/activate
 $ pip install -e .
@@ -56,10 +56,10 @@ loop is:
 ```sh
 # from the workstation:
 $ rsync -avz --delete broker/ tools/ dashboard/ tests/ \
-        isc@<pi-ip>:/home/isc/IFS08_HIL/
+        isc@<pi-ip>:/home/isc/IFS_HIL/
 $ sshpass -p isc ssh isc@<pi-ip> "
     sudo systemctl restart hil-broker &&
-    pytest /home/isc/IFS08_HIL/tests/broker/ -q"
+    pytest /home/isc/IFS_HIL/tests/broker/ -q"
 ```
 
 or just commit + push + `git pull` on the Pi.
@@ -157,7 +157,8 @@ infra/
 docs/          every documentation file
 configs/       per-ECU YAML
 docker/        firmware build toolchain
-scripts/       launch.sh, build_stm32_binaries.sh
+scripts/       bench_setup.sh (new bench, start here), sync_to_pi.sh,
+               build_stm32_binaries.sh
 ```
 
 For deeper detail see the README's repo layout section and the

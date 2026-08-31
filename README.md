@@ -1,4 +1,4 @@
-# IFS08_HIL — Hardware-in-the-Loop testbench
+# IFS_HIL — Hardware-in-the-Loop testbench
 
 Automated STM32 ECU firmware validation on a Raspberry Pi. The bench
 orchestrates reproducible Docker firmware builds, CAN-based flashing,
@@ -65,6 +65,8 @@ flowchart TD
 
 ## Getting started
 
+- **In a hurry** — [`docs/quickstart.md`](docs/quickstart.md): the short path,
+  a bootstrap script plus four manual steps, ~60-90 min including one reboot.
 - **Fresh bench setup** — follow
   [`docs/getting-started.md`](docs/getting-started.md).
   From blank Pi OS to flashing an ECU in roughly 45 minutes.
@@ -112,7 +114,8 @@ flowchart TD
 │   └── udev/                    USB device stable-naming rules
 ├── docker/                      Firmware build toolchain image
 ├── configs/                     Per-ECU YAML configs (VCU, AMS, ...)
-├── scripts/                     launch.sh, build_stm32_binaries.sh
+├── scripts/                     bench_setup.sh (new bench, start here),
+│                                sync_to_pi.sh, build_stm32_binaries.sh
 └── .github/workflows/           CI: hil-build-trigger, hil-flash, …
 ```
 

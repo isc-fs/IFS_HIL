@@ -33,7 +33,7 @@ log = logging.getLogger(__name__)
 
 
 class AcuStim:
-    """ACU CAN stimulus on FDCAN1 (kernel `can0` on the IFS08_HIL bench)."""
+    """ACU CAN stimulus on FDCAN1 (kernel `can0` on the IFS_HIL bench)."""
 
     # Frame IDs — also exported here so callers don't have to import can_map
     DC_BUS_VOLTAGE_ID = 0x100         # STANDARD (11-bit), DLC 2, little-endian volts

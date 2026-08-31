@@ -269,7 +269,7 @@ The bench ships a pytest suite at `tests/hil/` that exercises the
 hardware through the broker. With the bench running:
 
 ```sh
-pi$ cd ~/IFS08_HIL
+pi$ cd ~/IFS_HIL
 pi$ pytest tests/hil/ -v
 ```
 

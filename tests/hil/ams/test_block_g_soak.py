@@ -288,7 +288,7 @@ class TestG102PerIcPecLocalisation:
     integrity check". Same Pico STOP_REPLY mechanism.
 
     See `tests/hil/ams/test_block_e_ltc.py::TestE067PerIcPecLocalisation`
-    for the Block E twin. Same caveat re: IFS08_HIL#44 saturating the
+    for the Block E twin. Same caveat re: IFS_HIL#44 saturating the
     baseline.
     """
 
@@ -320,7 +320,7 @@ class TestG102PerIcPecLocalisation:
             assert not collateral, (
                 "Per-IC PEC count climbed for chain indices outside the "
                 f"silenced module-1 pair (2, 3): {collateral}. "
-                "If IFS08_HIL#44 is open the baseline is saturated and "
+                "If IFS_HIL#44 is open the baseline is saturated and "
                 "this assertion can't fire cleanly; fix the bench first.")
         finally:
             pico_emu.resume_all()

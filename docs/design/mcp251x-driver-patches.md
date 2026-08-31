@@ -144,7 +144,7 @@ pi$ sudo apt-get install -y \
 Build:
 
 ```sh
-pi$ cd ~/IFS08_HIL/infra/kernel-module/mcp251x-patched
+pi$ cd ~/IFS_HIL/infra/kernel-module/mcp251x-patched
 pi$ ./build.sh
 ```
 
@@ -179,7 +179,7 @@ The patch targets `rpi-6.12.y`. When the running kernel changes,
 re-run `build.sh`:
 
 ```sh
-pi$ cd ~/IFS08_HIL/infra/kernel-module/mcp251x-patched
+pi$ cd ~/IFS_HIL/infra/kernel-module/mcp251x-patched
 pi$ ./build.sh
 ```
 

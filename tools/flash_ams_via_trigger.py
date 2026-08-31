@@ -97,13 +97,13 @@ def power_cycle(slot: int = 2,
                 tca_port: int = DEFAULT_TCA_PORT,
                 off_dwell_s: float = 3.0,
                 on_settle_s: float = 0.5) -> None:
-    # Broker client lives in the IFS08_HIL checkout on the bench Pi.
+    # Broker client lives in the IFS_HIL checkout on the bench Pi.
     # Try the in-repo path first (script run from `tools/`), then the
-    # canonical bench install at /home/isc/IFS08_HIL so the helper
+    # canonical bench install at /home/isc/IFS_HIL so the helper
     # also works when copied to /tmp.
     candidates = [
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "/home/isc/IFS08_HIL",
+        "/home/isc/IFS_HIL",
     ]
     for p in candidates:
         if p not in sys.path:

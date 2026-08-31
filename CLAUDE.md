@@ -1,13 +1,13 @@
-# Claude operating model — IFS08_HIL
+# Claude operating model — IFS_HIL
 
-You are working on the **IFS08_HIL** Hardware-in-the-Loop testbench for
+You are working on the **IFS_HIL** Hardware-in-the-Loop testbench for
 ISC Racing Team's Formula Student STM32 ECU suite. This file is the
 fast-path mental model for an assistant entering a new session. It is
 **operational, not architectural** — for the why, follow the file
 pointers below.
 
 Author: Raul Moran (ISC Racing Team). Repo:
-[`isc-fs/IFS08_HIL`](https://github.com/isc-fs/IFS08_HIL), working
+[`isc-fs/IFS_HIL`](https://github.com/isc-fs/IFS_HIL), working
 branch `dev`.
 
 ---
@@ -94,7 +94,7 @@ branch `dev`.
 
 ## Pi sync workflow (READ BEFORE PUSHING CODE TO THE BENCH)
 
-A bench Pi does **not** carry a git checkout. `~/IFS08_HIL/` on the bench
+A bench Pi does **not** carry a git checkout. `~/IFS_HIL/` on the bench
 is a non-git working copy maintained by rsync from a developer machine
 that does have the git checkout. This avoids storing GitHub credentials
 on the bench host and lets you test uncommitted changes against real
@@ -127,7 +127,7 @@ scripts/sync_to_pi.sh user@host                # override for a single run
 ```
 
 What the script does:
-- `rsync -avh` from `./` to `~/IFS08_HIL/` on the bench (override the
+- `rsync -avh` from `./` to `~/IFS_HIL/` on the bench (override the
   destination with `HIL_BENCH_PATH`).
 - **No `--delete`** — Pi-side WIP (measurement output, ad-hoc
   scripts) is preserved.
@@ -149,7 +149,7 @@ check which before deleting:
 ```sh
 comm -13 \
   <(git ls-files tests/hil/ams/ | xargs -n1 basename | sort) \
-  <(ssh "$HIL_BENCH_HOST" 'ls ~/IFS08_HIL/tests/hil/ams/*.py | xargs -n1 basename | sort')
+  <(ssh "$HIL_BENCH_HOST" 'ls ~/IFS_HIL/tests/hil/ams/*.py | xargs -n1 basename | sort')
 ```
 
 After sync, if you changed broker or dashboard code:
@@ -189,7 +189,8 @@ pytest both go through it via Unix-socket JSON-RPC.
 | What pin / address / netdev does X live on? | [`docs/hardware-reference.md`](docs/hardware-reference.md) |
 | What does broker RPC `Y` do? | [`docs/broker-api.md`](docs/broker-api.md) |
 | Day-to-day operator recipes | [`docs/operator-guide.md`](docs/operator-guide.md) |
-| Fresh-Pi bringup | [`docs/getting-started.md`](docs/getting-started.md) |
+| Fresh-Pi bringup (short path) | [`docs/quickstart.md`](docs/quickstart.md) |
+| Fresh-Pi bringup (with reasoning) | [`docs/getting-started.md`](docs/getting-started.md) |
 | Something broke | [`docs/troubleshooting.md`](docs/troubleshooting.md) |
 | HTTP API for the dashboard | [`docs/dashboard.md`](docs/dashboard.md) |
 | Why mcp251x is patched (5 patches) | [`docs/design/mcp251x-driver-patches.md`](docs/design/mcp251x-driver-patches.md) |
@@ -305,12 +306,26 @@ Break these and things go weird in non-obvious ways.
 pi$ systemctl is-active hil-psu-on hil-can-up hil-broker   # → active × 3
 pi$ ip -br link | grep can                                 # can0/can1/can2 UP
 pi$ ls /dev/spidev0.3 /dev/i2c-1                           # both exist
-pi$ pinctrl get 7 8                                        # 7=op lo, 8=ip hi
+pi$ pinctrl get 7,8                                        # 7=op lo, 8=ip hi
+                                                           # comma, not space:
+                                                           # `get 7 8` errors
 pi$ curl -s -o /dev/null -w '%{http_code}\n' \
         http://localhost:8080/api/status                   # 200
 ```
 
 All five pass = healthy. Any failure → [`docs/troubleshooting.md`](docs/troubleshooting.md).
+
+Or run the whole thing, including the parts the five lines above skip
+(kernel module, sudoers, overlay, packages):
+
+```sh
+pi$ cd ~/IFS_HIL && python3 -m tools.bench doctor   # host built per getting-started.md
+pi$ python3 -m tools.bench verify --bench <id>        # hardware matches its descriptor
+```
+
+`doctor` checks the **host build**; `verify` checks the **hardware** against
+what the bench declares. A new bench needs both to pass before it is worth
+registering a runner on it.
 
 ---
 
@@ -438,7 +453,7 @@ if you skip the explicit stop.)
 | `undervoltage detected!` in dmesg | Pi 5 V input weak (ATX 5VSBY < 3 A) | Move Pi to dedicated 5 V / 3 A supply |
 | Pytest all skipped | `HIL_BROKER_SOCKET` pointing nowhere | `unset HIL_BROKER_SOCKET`, or set to actual path |
 | MLC ≤ 1 mA after relay close | Fuse blown or relay didn't switch | Check F5–F14, listen for relay click, `tca.read_port(0x20, 0)` |
-| `Cannot initialize MCP2515. Wrong wiring?` | Patched module not active | `xz -dc /lib/modules/$(uname -r)/.../mcp251x.ko.xz \| strings \| grep backplane_hil` |
+| `Cannot initialize MCP2515. Wrong wiring?` | Patched module not active | `M=/lib/modules/$(uname -r)/kernel/drivers/net/can/spi/mcp251x.ko.xz; sudo md5sum "$M" "$M.orig"` — hashes must DIFFER. (Grepping the binary for `backplane_hil` can never work: those markers are C comments, stripped at compile time.) |
 | `/dev/spidev0.3` missing | Overlay didn't load | `grep dtoverlay /boot/firmware/config.txt`; `dmesg \| grep overlay` |
 | `Address already in use` on 8080 | Stray `nohup` dashboard fighting the service | `pkill -f dashboard/app.py && sudo systemctl restart hil-dashboard` |
 
@@ -459,7 +474,7 @@ vcgencmd get_throttled > /tmp/throttle.txt
 2. [`hil-build-trigger.yml`](.github/workflows/hil-build-trigger.yml)
    checks permission, dispatches
    [`hil-build-only.yml`](.github/workflows/hil-build-only.yml) in
-   IFS08_HIL with the SHA.
+   IFS_HIL with the SHA.
 3. Ubuntu runner builds firmware in the `ifs08hil` Docker image
    (Debian-bookworm + arm-gnu-toolchain 12.3.rel1) →
    `.bin`/`.hex`/`SHA256SUMS.txt` → posts ✅/❌ on the firmware PR.
@@ -574,7 +589,7 @@ module, systemd units). Off-bench on a Mac/Linux laptop you can:
 | "discover doesn't find anything" | Walk: (1) `--channel can2`? (2) carrier powered (INA ~130 mA)? (3) app already running → `send-raw 0x001 03 06 01` |
 | "ENOBUFS during flash" | `ip -o link show can2 \| grep qlen` → if 10, `systemctl restart hil-can-up`. Retry flash. |
 | "flash hangs / disconnects" | Check `journalctl -u hil-broker -f` + `dmesg -w` + flasher stderr. Often `restart-ms` recovery — retry is safe (verify-after + skip-write). |
-| "run the tests" | `cd ~/IFS08_HIL && pytest tests/hil/ -v`. Off-bench: add `--fake` broker + `HIL_BROKER_SOCKET`. |
+| "run the tests" | `cd ~/IFS_HIL && pytest tests/hil/ -v`. Off-bench: add `--fake` broker + `HIL_BROKER_SOCKET`. |
 | "add a new ECU" | Drop a `configs/ecu_<name>.yaml`, ensure CI workflow knows it, ensure carrier slot is assigned. Don't auto-assign — ask Raul. |
 | "add a broker RPC method" | Add the backend method to `broker/bus.py` (real) + `broker/fake_bus.py` (fake) → register in `broker/rpc.py` `build_method_table` → add proxy to `tools/hil_client.py` if useful → add `tests/broker/test_*.py` → document in `docs/broker-api.md`. |
 | "change a pin/address" | Edit `tools/hw_config.py` **only**. Hardware reference doc auto-becomes-stale; PR the doc update in the same commit. |

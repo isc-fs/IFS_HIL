@@ -89,6 +89,22 @@ pkill -f dashboard/app.py
 sudo systemctl restart hil-dashboard.service
 ```
 
+## `hil-agent.service` — NOT installed
+
+Shipped here but deliberately **not** part of a bench build, which is why
+[`docs/getting-started.md`](../../docs/getting-started.md) installs four units
+and this directory holds five.
+
+It execs `/srv/hil/scripts/run_hil_job.sh`, which does not exist in this
+repository — a leftover from an earlier design where the bench polled for work
+(see the `agent:` block in [`configs/hil_agent.yaml`](../../configs/hil_agent.yaml)).
+That approach is superseded by GitHub-dispatched runs
+(`.github/workflows/hil-test.yml`), where a self-hosted runner is the worker and
+routing is decided from the bench descriptors.
+
+Do not install or enable it. Left in the tree pending a decision to delete it
+along with `configs/hil_agent.yaml`.
+
 ## Service dependency order
 
 ```mermaid
