@@ -121,14 +121,23 @@ def test_a_build_recipe_exists_for_every_flashable_dut():
         assert rec["dut"] == dut
 
 
-def test_the_ecu_recipe_builds_the_firmware_not_the_sil_project():
-    """The ECU repo's ROOT CMakeLists.txt is project(ECU08_NSIL_Tests) — the
-    host test project. The ARM firmware is firmware/CMakeLists.txt. Anything
-    inferring the source dir from the repo layout builds the wrong thing and
-    would hand a host binary to the flasher."""
+def test_the_recipes_are_the_same_shape():
+    """isc-fs/IFS08-CE-ECU#235 moved the ECU firmware to the repo root, so both
+    recipes are now command-for-command identical apart from the output name.
+    Before that the ECU root was project(ECU08_NSIL_Tests) and building "the
+    repo" produced a HOST binary that would have been flashed to a carrier.
+
+    If this ever diverges again, the divergence is the thing to look at, not
+    the recipe."""
     import yaml as _yaml
     from tools.flash_dut import REPO_ROOT
-    rec = _yaml.safe_load((REPO_ROOT / "configs/firmware/ecu.yaml").read_text())
-    assert "-S firmware" in rec["configure"], (
-        "the ECU build must be told to use firmware/, not the repo root")
-    assert "ECU08.elf" in rec["elf"]
+    recs = {d: _yaml.safe_load((REPO_ROOT / f"configs/firmware/{d}.yaml").read_text())
+            for d in ("ams", "ecu")}
+    for d, r in recs.items():
+        assert r["configure"] == (
+            "cmake -B build -DCMAKE_TOOLCHAIN_FILE=cmake/gcc-arm-none-eabi.cmake"), (
+            f"{d} no longer builds the AMS way: {r['configure']}")
+        assert r["build"] == "cmake --build build -j"
+        assert r["elf"].startswith("build/")
+    assert recs["ams"]["elf"] == "build/AMS.elf"
+    assert recs["ecu"]["elf"] == "build/ECU08.elf"

@@ -1,19 +1,21 @@
 # How to build ECU firmware for a HIL run. See ams.yaml for why this lives here
 # rather than in the firmware repo.
 #
-# NOTE the source directory. The ECU repo's ROOT CMakeLists.txt is
-# `project(ECU08_NSIL_Tests)` -- the host/SIL test project, not firmware. The
-# ARM firmware is firmware/CMakeLists.txt (`project(ECU08 C CXX ASM)`), while the
-# toolchain file stays at the repo root. Anything that infers the source dir from
-# a repo layout gets this wrong and silently builds the wrong project.
+# Identical in shape to ams.yaml since isc-fs/IFS08-CE-ECU#235 moved the firmware
+# to the repo root. Before that, the root CMakeLists.txt was project(ECU08_NSIL_Tests)
+# -- the host test project -- and building "the repo" produced a host binary that
+# would have been flashed to a carrier.
 
 dut: ecu
 repo: isc-fs/IFS08-CE-ECU
 submodules: false
-toolchain_release: '14.2.Rel1'
+toolchain_release: '14.2.Rel1'          # carlosperate/arm-none-eabi-gcc-action
 
-configure: cmake -S firmware -B build-fw -DCMAKE_TOOLCHAIN_FILE="$PWD/cmake/gcc-arm-none-eabi.cmake"
-build: cmake --build build-fw -j
-elf: build-fw/ECU08.elf
+configure: cmake -B build -DCMAKE_TOOLCHAIN_FILE=cmake/gcc-arm-none-eabi.cmake
+build: cmake --build build -j
+elf: build/ECU08.elf
 
-layout_check: python3 scripts/check_flash_layout.py build-fw/ECU08.elf
+# Asserts .isr_vector starts exactly at 0x08020000 and that nothing lands in
+# sector 0 or 7, so the image cannot overwrite the bootloader it is written
+# next to. Mandatory, not advisory.
+layout_check: python3 scripts/check_flash_layout.py build/ECU08.elf
