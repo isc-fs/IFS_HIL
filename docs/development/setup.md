@@ -157,7 +157,8 @@ infra/
 docs/          every documentation file
 configs/       per-ECU YAML
 docker/        firmware build toolchain
-scripts/       launch.sh, build_stm32_binaries.sh
+scripts/       bench_bootstrap.sh, sync_to_pi.sh, build_stm32_binaries.sh
+               (launch.sh belongs to accu-charger, not this repo)
 ```
 
 For deeper detail see the README's repo layout section and the

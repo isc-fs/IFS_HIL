@@ -1,6 +1,38 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ---------------------------------------------------------------------------
+# NOT A HIL BENCH SCRIPT. Despite living in scripts/, this belongs to the
+# accu-charger project: it installs Docker and builds/runs the `accu-charger`
+# image. Nothing in this repository invokes it.
+#
+# Running it on a BACKPLANE_HIL bench actively breaks the bench:
+#   - adds `dtparam=spi=on`, a second claimant on SPI0 alongside our overlay
+#   - adds `dtoverlay=mcp2515-can0` (ONE controller, cs_pin 22 / irq 25) which
+#     conflicts with `mcp2515-triple` (THREE controllers on GPIO27/17/18,
+#     irq 4/5/6) -- they fight over the same bus
+#   - brings canN up with no sample-point and no txqueuelen, i.e. the 0.875
+#     mismatch that bus-offs every DUT and the qlen-10 ENOBUFS during flashing
+#
+# To bring a HIL bench up, you do not need a script: systemd does it at boot
+# (hil-psu-on -> hil-can-up -> hil-broker -> hil-dashboard). See
+# docs/quickstart.md.
+#
+# The guard below refuses to run on a host configured as a HIL bench. Remove
+# this file once the charger project has its own home.
+# ---------------------------------------------------------------------------
+for _cfg in /boot/firmware/config.txt /boot/config.txt; do
+    if [ -f "$_cfg" ] && grep -qE '^\s*dtoverlay=mcp2515-triple' "$_cfg"; then
+        echo "!! Refusing to run: $_cfg has dtoverlay=mcp2515-triple, so this" >&2
+        echo "   host is a BACKPLANE_HIL bench. This script would add a" >&2
+        echo "   conflicting overlay and reset the CAN bit timing." >&2
+        echo "   To start the bench: sudo systemctl start hil-psu-on hil-can-up \\" >&2
+        echo "                              hil-broker hil-dashboard" >&2
+        exit 1
+    fi
+done
+
+
 # ==============================
 # CONFIGURACIÓN DEL PROYECTO
 # ==============================

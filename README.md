@@ -114,7 +114,9 @@ flowchart TD
 │   └── udev/                    USB device stable-naming rules
 ├── docker/                      Firmware build toolchain image
 ├── configs/                     Per-ECU YAML configs (VCU, AMS, ...)
-├── scripts/                     launch.sh, build_stm32_binaries.sh
+├── scripts/                     bench_bootstrap.sh, sync_to_pi.sh,
+│                                build_stm32_binaries.sh (launch.sh is
+│                                accu-charger's, not ours)
 └── .github/workflows/           CI: hil-build-trigger, hil-flash, …
 ```
 

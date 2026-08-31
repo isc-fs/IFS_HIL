@@ -109,6 +109,29 @@ the bootstrap or by the bringup guide:
 Until those are documented, a second bench can honestly declare `dut-*` and
 little else. That is a known gap, not an oversight on your part.
 
+## Starting and stopping the bench
+
+There is no launch script, and you do not need one: **systemd brings the whole
+bench up at boot**, in dependency order — `hil-psu-on` → `hil-can-up` →
+`hil-broker` → `hil-dashboard`. Power the Pi on and the bench is live.
+
+For manual control:
+
+```sh
+pi$ sudo systemctl start hil-psu-on hil-can-up hil-broker hil-dashboard
+pi$ sudo systemctl stop  hil-dashboard hil-broker hil-can-up hil-psu-on   # reverse order
+pi$ systemctl is-active  hil-psu-on hil-can-up hil-broker hil-dashboard
+pi$ python3 -m tools.bench doctor      # everything above, plus the host build
+```
+
+`hil-psu-on`'s `ExecStop` drops `PS_ON#`, so stopping it powers the ATX rails
+down. Stop it last, and expect every SPI peripheral to go dark when you do.
+
+> **Ignore `scripts/launch.sh`.** It belongs to the accu-charger project, not
+> this one — it installs Docker and would add a CAN overlay that conflicts with
+> `mcp2515-triple`. It now refuses to run on a bench, but do not go looking for
+> it as the way to start things.
+
 ## Two gotchas worth knowing on day one
 
 - **The DAC bank latches.** If all four DACs report device id `0x0000` instead
