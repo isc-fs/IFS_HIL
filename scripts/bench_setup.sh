@@ -140,7 +140,11 @@ fi
 
 # ---- 2. packages --------------------------------------------------------
 step "2. System packages"
-PKGS="python3-can can-utils device-tree-compiler xz-utils libudev-dev pkg-config git curl linux-headers-$KVER"
+# gcc-arm-none-eabi + cmake are for the artifact FALLBACK: when a cloud build
+# cannot hand its artifact to the bench (a full GitHub artifact quota is the
+# known case), hil-test.yml rebuilds the same reviewed commit here instead of
+# taking the bench offline. Without them that path fails at the compile.
+PKGS="python3-can can-utils device-tree-compiler xz-utils libudev-dev pkg-config git curl gcc-arm-none-eabi cmake linux-headers-$KVER"
 NEED=""
 for p in $PKGS; do dpkg -s "$p" >/dev/null 2>&1 || NEED="$NEED $p"; done
 if [ -z "$NEED" ]; then
