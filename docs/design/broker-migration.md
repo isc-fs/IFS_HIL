@@ -102,7 +102,7 @@ changed shape.
 The original plan said *"adapt the flasher to route MCP2515 access
 through the broker"*. That assumed the flasher was something we
 owned and could easily modify. When we actually looked at
-[isc-fs/can-flasher](https://github.com/isc-fs/can-flasher), it
+[isc-fs/MingoCAN](https://github.com/isc-fs/MingoCAN), it
 turned out to be a Rust binary that speaks only SocketCAN, SLCAN,
 PCAN, or a virtual backend — with no pluggable broker transport.
 

@@ -218,7 +218,7 @@ that's the whole point of the mediator.
   real hardware.
 
 **`can-flasher`** — the Rust binary from
-[isc-fs/can-flasher](https://github.com/isc-fs/can-flasher)
+[isc-fs/MingoCAN](https://github.com/isc-fs/MingoCAN)
 
 - Does **not** go through the broker. Binds directly to the
   SocketCAN netdev `can2`.
