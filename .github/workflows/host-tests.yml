@@ -1,0 +1,68 @@
+name: Host tests
+
+# Guards the two things that break silently between bench runs.
+#
+# 1. COLLECTION. Importing every test module is the only check that a new test
+#    file, a moved fixture, or a stray `pytest_plugins` in a nested conftest has
+#    not broken the whole tree. #104 existed because exactly that broke and
+#    stayed broken -- invisible, because nothing ever ran a whole-tree
+#    collection. Three test files then landed (#109, #110) touching only
+#    tests/hil/**, which no workflow watched, so none of them were checked by CI
+#    at all.
+#
+# 2. The host-only suites -- `tests/` minus `tests/hil/`. They need no bench, so
+#    there is no reason for them to be unverified on every change.
+#
+# Deliberately NOT the hardware suites: tests/hil/** needs a real bench and runs
+# via hil-test.yml on a self-hosted runner. This workflow must stay cloud-only
+# and fast, so it can gate every PR without competing for bench time.
+
+on:
+  pull_request:
+    paths:
+      - 'tests/**'
+      - 'tools/**'
+      - 'configs/**'
+      - 'conftest.py'
+      - 'pyproject.toml'
+      - '.github/workflows/host-tests.yml'
+  push:
+    branches: [dev]
+    paths:
+      - 'tests/**'
+      - 'tools/**'
+      - 'configs/**'
+      - 'conftest.py'
+      - 'pyproject.toml'
+  workflow_dispatch:
+
+jobs:
+  host-tests:
+    name: Collection + host suites
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # The hardware deps live in the `[bench]` extra, so a plain editable
+      # install doubles as a standing check that the repo stays installable
+      # off-bench.
+      - name: Install
+        run: pip install --quiet -e .
+
+      # A missing dependency makes `pytest.importorskip` SKIP the guards rather
+      # than fail them -- so the suite goes green while testing nothing. Assert
+      # the imports up front, where a regression is loud.
+      - name: Assert guard dependencies are present
+        run: python -c "import jsonschema, yaml"
+
+      # `python -m pytest` (not bare `pytest`) so the repo root lands on
+      # sys.path, matching bench-inventory.yml.
+      - name: Whole-tree collection
+        run: python -m pytest tests/ --collect-only -q
+
+      - name: Host-only suites
+        run: python -m pytest tests/ --ignore=tests/hil -q -rs
