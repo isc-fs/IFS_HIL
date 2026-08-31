@@ -36,7 +36,7 @@ reboot.
   validated against `6.12.47+rpt-rpi-v8`.
 - An SSH client on your workstation.
 - A GitHub account with access to
-  [`isc-fs/can-flasher`](https://github.com/isc-fs/can-flasher)
+  [`isc-fs/MingoCAN`](https://github.com/isc-fs/MingoCAN)
   (private repo — you'll need `gh auth login` on the downloading host
   at install time).
 
@@ -333,7 +333,18 @@ pi$ sudo systemctl restart hil-dashboard
 ## 10. Install `can-flasher`
 
 `can-flasher` is the host-side tool that speaks the STM32 bootloader
-protocol. It's a Rust binary published as a private release.
+protocol. It's a Rust binary published as a release of `isc-fs/MingoCAN`
+(the old `isc-fs/can-flasher` URL redirects there).
+
+**Install 2.8.0 or newer, and upgrade an older one.** Builds before 2.8.0
+have no ISO-TP session recovery ([MingoCAN#506], fixed by #527) and NACK
+`BAD_SESSION` part-way through a large image — *after* the erase, so the
+carrier is left with no app and cannot be written back by the same tool.
+bench-01 sat on 2.5.5 and lost its AMS app exactly that way; 2.14.0 wrote
+the same 151072 B image first try. `tools/flash_dut.py` refuses to start
+on anything older, before it energises anything.
+
+[MingoCAN#506]: https://github.com/isc-fs/MingoCAN/issues/506
 
 On a workstation with `gh` authenticated:
 
@@ -341,8 +352,8 @@ On a workstation with `gh` authenticated:
 # pick the current release; do not pin an old one -- v1.1.2 was pinned here
 # for a long time while benches ran 2.5.5, and newer versions carry the
 # `logs` subcommand the AMS LOGFS work depends on.
-$ VER=$(gh release view -R isc-fs/can-flasher --json tagName --jq .tagName)
-$ gh release download "$VER" -R isc-fs/can-flasher \
+$ VER=$(gh release view -R isc-fs/MingoCAN --json tagName --jq .tagName)
+$ gh release download "$VER" -R isc-fs/MingoCAN \
        -p "can-flasher-$VER-aarch64-unknown-linux-gnu.tar.gz"
 $ scp can-flasher-$VER-aarch64-unknown-linux-gnu.tar.gz isc@<pi-ip>:/tmp/
 ```
@@ -418,7 +429,7 @@ provision distinct node IDs via `can-flasher config`.
 ## 12. First flash
 
 Use any `.bin` for the STM32H733ZG. The
-[`can-flasher`](https://github.com/isc-fs/can-flasher) repo ships a
+[`can-flasher`](https://github.com/isc-fs/MingoCAN) repo ships a
 trivial demo at `demo/MAIN_IFS08_DEMO.bin` — copy it to the Pi:
 
 ```sh

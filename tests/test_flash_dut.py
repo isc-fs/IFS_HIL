@@ -167,3 +167,29 @@ def test_a_silent_carrier_does_not_abort_the_flash():
     body = src[src.index("def _wait_for_carrier"):src.index("class FlashError")]
     assert "raise" not in body
     assert "continuing" in body
+
+
+def test_an_appless_board_can_still_be_recovered():
+    """The product string lives in the APP's bl_fwinfo_t record, so a carrier
+    whose app is missing or half-written reports none. Refusing there would
+    make the flasher useless in the one case it exists for. A failed AMS write
+    left MLC2 erased and appless, and the gate then locked recovery out."""
+    src = (Path(__file__).resolve().parent.parent / "tools" / "flash_dut.py").read_text()
+    assert "no app installed" in src
+    gate = src[src.index("want_product = profile.get"):src.index("# --- write")]
+    assert "appless" in gate
+    # the appless branch must be checked BEFORE the mismatch branch, or the
+    # empty product string falls through to "is not IFS08-CE-AMS" and raises
+    assert gate.index("appless and" if "appless and" in gate else "and appless") \
+        < gate.index("want_product not in row")
+
+
+def test_a_too_old_flasher_is_refused_before_anything_is_erased():
+    """2.5.5 NACKs BAD_SESSION part-way through a large image -- after the
+    erase -- leaving the carrier with no app. Checking afterwards is useless,
+    so the version gate must precede the power/erase sequence."""
+    src = (Path(__file__).resolve().parent.parent / "tools" / "flash_dut.py").read_text()
+    assert "MIN_FLASHER = (2, 8, 0)" in src
+    check_at = src.index("_assert_flasher_recent()\n", src.index("def flash") if "def flash" in src else 0)
+    power_at = src.index('print(f"power   :')
+    assert check_at < power_at, "version check must run before the carrier is energised"

@@ -31,6 +31,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -50,6 +51,43 @@ PROFILE_FOR_DUT = {
     # the directory is `vcu` for historical reasons; the canonical DUT name is `ecu`
     "ecu": "tests/hil/vcu/vcu_profile.yaml",
 }
+
+
+MIN_FLASHER = (2, 8, 0)
+
+
+def _assert_flasher_recent():
+    """Refuse to start with a can-flasher too old to finish the transfer.
+
+    2.5.5 NACKs BAD_SESSION part-way through a large image: its ISO-TP
+    reassembler has no session recovery, so a dropped frame kills the transfer
+    (isc-fs/MingoCAN#506, fixed by #527, shipped in 2.8.0). That is not a
+    harmless failure -- the erase has already happened by then, so the carrier
+    is left with NO APP. It cost bench-01's AMS exactly that: 2.5.5 wiped it
+    and could not write it back, while 2.14.0 flashed the same 151072 B image
+    first try.
+
+    Checked BEFORE anything is energised or erased, because afterwards is too
+    late to be useful.
+    """
+    try:
+        out = subprocess.run(["can-flasher", "--version"], capture_output=True,
+                             text=True, timeout=10).stdout
+        got = tuple(int(x) for x in re.search(r"(\d+)\.(\d+)\.(\d+)", out).groups())
+    except Exception as e:
+        raise FlashError(f"cannot determine the can-flasher version: {e}")
+    if got < MIN_FLASHER:
+        raise FlashError(
+            "can-flasher {} is too old to flash reliably; need >= {}.\n"
+            "  {} has no ISO-TP session recovery (MingoCAN#506) and NACKs\n"
+            "  BAD_SESSION part-way through a large image -- AFTER the erase,\n"
+            "  leaving the carrier with no app.\n"
+            "  Install a current build:\n"
+            "    gh release download --repo isc-fs/MingoCAN --pattern "
+            "'*aarch64-unknown-linux-gnu.tar.gz'".format(
+                ".".join(map(str, got)), ".".join(map(str, MIN_FLASHER)),
+                ".".join(map(str, got))))
+    return got
 
 
 def _wait_for_carrier(bus, timeout_s):
@@ -169,6 +207,12 @@ def flash(dut, bin_path, bench_id=None, dry=False, expect_sha=None,
     if dry:
         print("*** DRY RUN — nothing is energised, triggered or written ***")
 
+    # Before anything is energised or erased: a flasher that cannot finish the
+    # transfer will still have erased the app by the time it gives up.
+    if not dry:
+        v = _assert_flasher_recent()
+        print(f"flasher : can-flasher {'.'.join(map(str, v))}")
+
     client = None if dry else _client()
     before = None
     result = {"bench": desc["id"], "dut": dut, "slot": slot,
@@ -244,12 +288,31 @@ def flash(dut, bin_path, bench_id=None, dry=False, expect_sha=None,
             # says it IS, so it catches a mis-slotted or mis-provisioned carrier
             # that a node-id check would wave through.
             want_product = profile.get("bl_product")
-            if want_product and want_product not in row:
+
+            # The product string comes from the APP's bl_fwinfo_t record, not
+            # from the bootloader. A carrier whose app is missing or half
+            # written therefore reports no product at all -- and refusing there
+            # would make this tool useless in the one situation it exists for:
+            # recovering a board whose app is gone. Not hypothetical. A failed
+            # AMS write (can-flasher 2.5.5 NACKing BAD_SESSION mid-transfer)
+            # left MLC2 erased and appless, and this gate then locked the
+            # recovery out.
+            #
+            # Isolation still holds when the string is absent: every other DUT
+            # slot was de-energised above, and discovery asserted exactly one
+            # node. So proceed -- loudly, never silently.
+            appless = "no app installed" in row.lower()
+            if want_product and appless:
+                print(f"          !! this board reports NO APP INSTALLED, so it carries no")
+                print(f"             product string to check against {want_product}.")
+                print(f"             Proceeding on isolation alone: MLC{slot} is the only")
+                print(f"             carrier powered, and exactly one node answered.")
+            elif want_product and want_product not in row:
                 raise FlashError(
                     f"the bootloader that answered is not {want_product}:\n"
                     f"    {row}\n"
                     f"  Refusing to flash {dut} firmware onto it.")
-            if want_product:
+            elif want_product:
                 print(f"          identity confirmed: {want_product}")
 
         # --- write ---------------------------------------------------------

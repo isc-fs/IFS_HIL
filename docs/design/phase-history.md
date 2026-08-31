@@ -202,9 +202,9 @@ Closed the Phase 4 loop with declarative boot-time bring-up:
 ### Side quest — `can-flasher` aarch64-linux binary
 
 **Not a PR in this repo**; landed in
-[isc-fs/can-flasher](https://github.com/isc-fs/can-flasher) as:
+[isc-fs/MingoCAN](https://github.com/isc-fs/MingoCAN) as:
 
-- Repo `isc-fs/can-flasher` commit `794509c` — added
+- Repo `isc-fs/MingoCAN` commit `794509c` — added
   `aarch64-unknown-linux-gnu` target to the release CI matrix.
 - Tag `v1.1.2` cut as a CI-only release (`Cargo.toml` 1.1.1 →
   1.1.2) to publish the new binary.

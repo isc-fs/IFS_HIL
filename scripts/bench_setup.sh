@@ -290,18 +290,31 @@ fi
 
 # ---- can-flasher --------------------------------------------------------
 step "can-flasher"
-if command -v can-flasher >/dev/null 2>&1; then
+# 2.8.0 is the floor, not a preference. Older builds have no ISO-TP session
+# recovery (isc-fs/MingoCAN#506, fixed by #527) and NACK BAD_SESSION part-way
+# through a large image -- AFTER the erase, so the carrier is left with no app.
+# bench-01 sat on 2.5.5 precisely because this step used to accept ANY existing
+# install, and it wiped the AMS before anyone noticed.
+FLASHER_MIN="2.8.0"
+_ver_lt() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" = "$1" ] && [ "$1" != "$2" ]; }
+
+if command -v can-flasher >/dev/null 2>&1 && \
+   ! _ver_lt "$(can-flasher --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)" "$FLASHER_MIN"; then
     c_ok "$(can-flasher --version 2>/dev/null | head -1)"
     mark_done flasher
+elif command -v can-flasher >/dev/null 2>&1 && (! command -v gh >/dev/null 2>&1 || ! gh auth status >/dev/null 2>&1); then
+    c_skip "can-flasher $(can-flasher --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1) is older than $FLASHER_MIN and cannot"
+    c_skip "  finish a large flash — it erases, then fails. Upgrade it before flashing:"
+    c_skip "  docs/getting-started.md section 10."
 elif ! command -v gh >/dev/null 2>&1 || ! gh auth status >/dev/null 2>&1; then
     # A private release: without gh auth here it must come from a workstation.
     c_skip "not installed, and gh is unavailable or unauthenticated on this Pi."
     c_skip "  Install from a workstation — docs/getting-started.md section 10."
 else
     c_do "download and install the current can-flasher release"
-    run "VER=\$(gh release view -R isc-fs/can-flasher --json tagName --jq .tagName) && \
+    run "VER=\$(gh release view -R isc-fs/MingoCAN --json tagName --jq .tagName) && \
          cd /tmp && \
-         gh release download \"\$VER\" -R isc-fs/can-flasher -p \"can-flasher-\$VER-aarch64-unknown-linux-gnu.tar.gz\" --clobber && \
+         gh release download \"\$VER\" -R isc-fs/MingoCAN -p \"can-flasher-\$VER-aarch64-unknown-linux-gnu.tar.gz\" --clobber && \
          tar -xzf can-flasher-\$VER-aarch64-unknown-linux-gnu.tar.gz && \
          sudo install -m 0755 can-flasher-\$VER-aarch64-unknown-linux-gnu/can-flasher /usr/local/bin/"
     mark_done flasher

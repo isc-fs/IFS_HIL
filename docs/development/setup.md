@@ -115,7 +115,7 @@ Conventional-Commits-ish prefixes, split by concern:
   `v0.4.0`) if a released binary or shipped artefact is involved.
 - For `can-flasher` releases, the tag on the upstream repo
   drives the release CI; see
-  [isc-fs/can-flasher](https://github.com/isc-fs/can-flasher)'s
+  [isc-fs/MingoCAN](https://github.com/isc-fs/MingoCAN)'s
   `release.yml`.
 
 ---
