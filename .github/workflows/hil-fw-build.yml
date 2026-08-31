@@ -41,6 +41,13 @@ on:
       sha256:
         description: "sha256 of that .bin, for the bench to re-check"
         value: ${{ jobs.build.outputs.sha256 }}
+      uploaded:
+        description: >-
+          "true" if the artifact actually reached storage. The compile can
+          succeed while the upload fails -- the org's artifact quota is the
+          known case -- and the bench needs to tell those apart: one means
+          fall back to building locally, the other means stop.
+        value: ${{ jobs.build.outputs.uploaded }}
     secrets:
       FIRMWARE_TOKEN:
         required: false
@@ -59,6 +66,7 @@ jobs:
       artifact: ${{ steps.pack.outputs.artifact }}
       bin_name: ${{ steps.pack.outputs.bin_name }}
       sha256:   ${{ steps.pack.outputs.sha256 }}
+      uploaded: ${{ steps.upload.outcome == 'success' }}
     steps:
       - name: Checkout IFS_HIL (for the recipe)
         uses: actions/checkout@v4
@@ -150,7 +158,14 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "built $BIN  sha256 $SUM"
 
+      # continue-on-error: a failed UPLOAD must not be reported as a failed
+      # BUILD. The firmware compiled and passed the layout gate; only the
+      # handoff broke. hil-test.yml reads the `uploaded` output and falls back
+      # to building on the bench, so a full artifact quota no longer takes the
+      # whole fleet offline.
       - name: Upload
+        id: upload
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.pack.outputs.artifact }}
@@ -158,6 +173,11 @@ jobs:
           # Short on purpose: this is a per-PR build, and an unbounded retention
           # is what filled the org's artifact quota and broke a green bench run.
           retention-days: 3
+
+      - name: Note an upload failure
+        if: steps.upload.outcome != 'success'
+        run: |
+          echo "::warning::Artifact upload failed (quota?). The firmware built and passed the layout gate; hil-test.yml will build it on the bench instead."
 
       - name: Summary
         run: |
@@ -170,4 +190,5 @@ jobs:
             echo "| commit | \`${{ inputs.firmware_sha }}\` |"
             echo "| sha256 | \`${{ steps.pack.outputs.sha256 }}\` |"
             echo "| layout gate | passed |"
+            echo "| artifact uploaded | ${{ steps.upload.outcome == 'success' && 'yes' || 'NO — bench will rebuild' }} |"
           } >> "$GITHUB_STEP_SUMMARY"

@@ -69,6 +69,15 @@ on:
         required: false
         type: string
         default: ""
+      allow_bench_build:
+        description: >-
+          Permit the bench to rebuild the firmware itself when the cloud
+          artifact is unavailable, even for a commit not merged to dev/main.
+          Building runs that commit's own CMakeLists on the bench, so set
+          this only for code you trust.
+        required: false
+        type: boolean
+        default: false
 
   workflow_call:
     inputs:
@@ -80,6 +89,7 @@ on:
       comment_on:   { type: string, required: false, default: "" }
       comment_repo: { type: string, required: false, default: "" }
       firmware_ref: { type: string, required: false, default: "" }
+      allow_bench_build: { type: boolean, required: false, default: false }
 
 jobs:
   # ---------------------------------------------------------------------
@@ -302,11 +312,118 @@ jobs:
           ( candump -t d "$DEV" > artifacts/candump.log 2>/dev/null & echo $! > /tmp/candump.pid ) || true
 
       - name: Fetch the built firmware
-        if: needs.build.result == 'success'
+        if: needs.build.result == 'success' && needs.build.outputs.uploaded == 'true'
         uses: actions/download-artifact@v4
         with:
           name: ${{ needs.build.outputs.artifact }}
           path: fw
+
+      - name: Use the downloaded image
+        if: needs.build.result == 'success' && needs.build.outputs.uploaded == 'true'
+        run: |
+          {
+            echo "FW_IMAGE=fw/${{ needs.build.outputs.bin_name }}"
+            echo "FW_SHA256=${{ needs.build.outputs.sha256 }}"
+            echo "FW_SOURCE=cloud-artifact"
+          } >> "$GITHUB_ENV"
+
+      # ------------------------------------------------------------------
+      # Fallback. The firmware COMPILED and passed the layout gate, but its
+      # artifact never reached storage -- the org is on the free plan, and a
+      # full quota fails the upload while the build itself is fine. Rather
+      # than take the fleet offline for the 6-12 h GitHub takes to recalculate
+      # usage, the bench rebuilds the same commit from the same reviewed
+      # recipe. The bench toolchain is the release the recipe pins.
+      #
+      # This crosses the boundary hil-fw-build.yml documents, on purpose: a
+      # PR's own CMakeLists should not execute next to the broker socket, the
+      # NOPASSWD ip link rule and the spi/i2c/gpio groups. So it is allowed
+      # ONLY for a commit already merged into the firmware repo's dev or main
+      # -- code that has been through review. Anything else must opt in with
+      # allow_bench_build, and the log says so.
+      # ------------------------------------------------------------------
+      - name: Fallback — rebuild on the bench
+        if: needs.build.result == 'success' && needs.build.outputs.uploaded != 'true'
+        env:
+          DUT: ${{ needs.resolve.outputs.dut }}
+          FW_REPO: ${{ needs.resolve.outputs.fw_repo }}
+          FW_SHA: ${{ needs.resolve.outputs.fw_sha }}
+          ALLOW: ${{ inputs.allow_bench_build }}
+        run: |
+          set -euo pipefail
+          echo "::warning::Cloud artifact unavailable — rebuilding $FW_SHA on the bench."
+
+          R="configs/firmware/${DUT}.yaml"
+          test -f "$R" || { echo "::error::no build recipe $R"; exit 1; }
+
+          python3 - "$R" > "$RUNNER_TEMP/recipe.env" <<'PY'
+          import sys, yaml, shlex
+          r = yaml.safe_load(open(sys.argv[1]))
+          for k in ("repo", "configure", "build", "elf", "layout_check",
+                    "toolchain_release"):
+              print("RCP_%s=%s" % (k.upper(), shlex.quote(str(r[k]))))
+          PY
+          . "$RUNNER_TEMP/recipe.env"
+
+          # The same guard the cloud build applies: the recipe pins the repo,
+          # and a run naming a different one is either a bug or an attempt to
+          # build something else under this DUT's name.
+          if [ "$RCP_REPO" != "$FW_REPO" ]; then
+            echo "::error::dut '$DUT' is pinned to $RCP_REPO but the run asked for $FW_REPO"
+            exit 1
+          fi
+
+          # A bench provisioned before this fallback existed will not have the
+          # cross-compiler. Say so plainly -- otherwise this surfaces as a
+          # confusing cmake error about a missing compiler.
+          for t in arm-none-eabi-gcc arm-none-eabi-objcopy cmake; do
+            command -v "$t" >/dev/null 2>&1 || {
+              echo "::error::$t is not installed on this bench, so the firmware cannot be"
+              echo "rebuilt here. Install it with: sudo apt-get install -y gcc-arm-none-eabi cmake"
+              echo "(scripts/bench_setup.sh installs these on a fresh bench.)"
+              exit 1
+            }
+          done
+
+          SRC="$RUNNER_TEMP/fw-src"
+          rm -rf "$SRC"
+          git clone --quiet --filter=blob:none "https://github.com/${FW_REPO}.git" "$SRC"
+          git -C "$SRC" fetch --quiet origin "$FW_SHA"
+
+          if [ "$ALLOW" != "true" ]; then
+            MERGED=no
+            for b in dev main; do
+              if git -C "$SRC" merge-base --is-ancestor "$FW_SHA" "origin/$b" 2>/dev/null; then
+                MERGED="$b"; break
+              fi
+            done
+            if [ "$MERGED" = "no" ]; then
+              echo "::error::Refusing to build $FW_SHA on the bench: not merged into dev or main."
+              echo "Building runs that commit's own CMakeLists on the bench, next to the"
+              echo "broker socket and the hardware groups. For unreviewed code, either wait"
+              echo "for the artifact quota to clear or re-dispatch with allow_bench_build=true."
+              exit 1
+            fi
+            echo "commit is merged into origin/$MERGED — bench build permitted"
+          else
+            echo "::warning::allow_bench_build=true — building an unreviewed commit on the bench"
+          fi
+
+          git -C "$SRC" checkout --quiet --detach "$FW_SHA"
+          echo "recipe pins arm-none-eabi $RCP_TOOLCHAIN_RELEASE; bench has $(arm-none-eabi-gcc -dumpversion)"
+
+          ( cd "$SRC" && eval "$RCP_CONFIGURE" && eval "$RCP_BUILD" && eval "$RCP_LAYOUT_CHECK" )
+
+          BIN="$(basename "${RCP_ELF%.elf}").bin"
+          mkdir -p "$SRC/out"
+          arm-none-eabi-objcopy -O binary "$SRC/$RCP_ELF" "$SRC/out/$BIN"
+          SUM=$(sha256sum "$SRC/out/$BIN" | cut -d' ' -f1)
+          echo "bench-built $BIN  sha256 $SUM"
+          {
+            echo "FW_IMAGE=$SRC/out/$BIN"
+            echo "FW_SHA256=$SUM"
+            echo "FW_SOURCE=bench-rebuild"
+          } >> "$GITHUB_ENV"
 
       # flock, not just the concurrency group: it also covers anyone who SSHes
       # in and runs pytest by hand while a dispatched run is live.
@@ -317,27 +434,37 @@ jobs:
       # judging it.
       - name: Flash and run suite
         id: run
+        # FW_IMAGE / FW_SHA256 / FW_SOURCE come from GITHUB_ENV, set by whichever
+        # path produced the image -- the cloud artifact or the bench rebuild.
+        # They are deliberately NOT re-declared here: a step-level env would
+        # override the job-level value and silently pin this to the cloud build's
+        # sha256, which a bench rebuild does not share.
         env:
           DUT: ${{ needs.resolve.outputs.dut }}
-          BIN: ${{ needs.build.outputs.bin_name }}
-          FW_SHA256: ${{ needs.build.outputs.sha256 }}
-          DID_BUILD: ${{ needs.build.result }}
+          WANTED_FW: ${{ needs.resolve.outputs.fw_sha }}
         run: |
           flock -w 3000 /tmp/hil-bench.lock bash -euo pipefail -c '
-            if [ "$DID_BUILD" = "success" ]; then
-              echo "::group::flash $DUT"
+            if [ -n "${FW_IMAGE:-}" ]; then
+              echo "::group::flash $DUT  (image from ${FW_SOURCE:-unknown})"
               # --expect-sha256 re-checks the image on the bench: the artifact
               # round-trip is the one place a build and a flash can disagree.
               #
               # No --restore-relays: the bench stays isolated on the DUT under
               # test for the whole suite. A run from the ECU repo powers the ECU
               # carrier and nothing else.
-              python3 -m tools.flash_dut                 --dut "$DUT"                 --bin "fw/$BIN"                 --bench "$HIL_BENCH"                 --expect-sha256 "$FW_SHA256"                 --out artifacts/flash.json
+              python3 -m tools.flash_dut --dut "$DUT" --bin "$FW_IMAGE" --bench "$HIL_BENCH" --expect-sha256 "$FW_SHA256" --out artifacts/flash.json
               echo "::endgroup::"
+            elif [ -n "${WANTED_FW:-}" ]; then
+              # Firmware WAS under test but no image reached the bench. Running
+              # the suite now would judge whatever the carrier happens to hold
+              # and report it as a verdict on $WANTED_FW -- a false green, which
+              # is worse than a red run.
+              echo "::error::firmware $WANTED_FW was under test but no image reached the bench"
+              exit 1
             else
-              echo "no firmware built — running the suite against whatever is on the carrier"
+              echo "bench-only run — no firmware requested; testing whatever is on the carrier"
             fi
-            python3 -m pytest ${{ inputs.suite }} ${{ inputs.pytest_args }}               -v --junitxml=artifacts/junit.xml
+            python3 -m pytest ${{ inputs.suite }} ${{ inputs.pytest_args }} -v --junitxml=artifacts/junit.xml
           '
 
       - name: Stop capture + collect logs
