@@ -564,11 +564,13 @@ class TestA013FirmwareInfoMatchesSource:
     Asserts the semver against the source `VERSION` file (the release-gate
     check) + the BL node ID, and that the git-hash field is populated.
 
-    Full git-hash equality is NOT enforced on the bench: the Pi is a
-    non-git rsync working copy, and the Docker firmware build embeds a
-    fixed fallback hash because `firmware/` carries no `.git` (flagged to
-    the AMS team). If a real git checkout is available at AMS_SOURCE_DIR,
-    the hash is cross-checked and logged but not asserted.
+    The git-hash is asserted STRICT when an expected SHA is available
+    (AMS #323's `-DGIT_HASH` stamps the real SHA into `0x6C6`): from the
+    `AMS_GIT_HASH` env, a `firmware/GIT_HASH` file, or a git checkout at
+    `AMS_SOURCE_DIR`. Without any of those it falls back to a populated
+    (non-zero) check. Build the bench image with
+    `-DGIT_HASH=$(git -C <ams-repo> rev-parse --short=8 HEAD)` and run with
+    `AMS_GIT_HASH` set to the same value to exercise the strict path.
     """
 
     def test_a013(self, fresh_boot, pit_diag, ams_profile):
@@ -606,22 +608,35 @@ class TestA013FirmwareInfoMatchesSource:
             f"0x6C6[7] bl_node_id = 0x{fw_id[7]:02X}, "
             f"expected 0x{expected_node_id:02X}")
 
-        # Git-hash field must at least be populated (non-zero).
+        # Git-hash: STRICT when an expected SHA is available (AMS #323 lets
+        # the build stamp the real hash via -DGIT_HASH). Source order:
+        #   1. AMS_GIT_HASH env (set at test-run time to the build's SHA)
+        #   2. firmware/GIT_HASH file (written next to firmware/VERSION)
+        #   3. `git rev-parse --short=8 HEAD` in AMS_SOURCE_DIR (CI / dev box)
+        # If none is available, fall back to a populated (non-zero) check.
         git_bytes = bytes(fw_id[3:7])
         assert any(git_bytes), (
-            "0x6C6[3..6] git_hash is all-zero -- firmware_info hash field "
-            "not populated.")
-        # Cross-check against a real checkout if one is available; log-only,
-        # since the HIL Docker build embeds a fallback hash (firmware/ has
-        # no .git) and the Pi has no git at all.
-        try:
-            git_hash = subprocess.check_output(
-                ["git", "rev-parse", "--short=8", "HEAD"], cwd=src,
-                timeout=2, text=True, stderr=subprocess.DEVNULL).strip()
-            if git_bytes != bytes.fromhex(git_hash)[:4]:
-                logging.getLogger(__name__).warning(
-                    "0x6C6 git_hash %s != source HEAD %s -- expected on the "
-                    "HIL Docker build (firmware/ has no .git -> fallback).",
-                    git_bytes.hex(), git_hash)
-        except Exception:
-            pass   # no git checkout at src (the Pi is non-git) -- semver is enough
+            "0x6C6[3..6] git_hash is all-zero -- pass -DGIT_HASH=<sha> at "
+            "build time (AMS #323) so firmware_info carries real provenance.")
+        expected_hash = os.environ.get("AMS_GIT_HASH", "").strip()
+        if not expected_hash and (src / "GIT_HASH").exists():
+            expected_hash = (src / "GIT_HASH").read_text().strip()
+        if not expected_hash:
+            try:
+                expected_hash = subprocess.check_output(
+                    ["git", "rev-parse", "--short=8", "HEAD"], cwd=src,
+                    timeout=2, text=True, stderr=subprocess.DEVNULL).strip()
+            except Exception:
+                expected_hash = ""
+        if expected_hash:
+            exp = bytes.fromhex(expected_hash)[:4]
+            assert git_bytes == exp, (
+                f"0x6C6[3..6] git_hash = {git_bytes.hex()}, expected "
+                f"{exp.hex()} (from {expected_hash}). Build with "
+                "-DGIT_HASH=$(git rev-parse --short=8 HEAD) so the stamp "
+                "matches the source HEAD.")
+        else:
+            logging.getLogger(__name__).warning(
+                "0x6C6 git_hash %s present but no expected SHA to assert "
+                "against -- set AMS_GIT_HASH or firmware/GIT_HASH.",
+                git_bytes.hex())
