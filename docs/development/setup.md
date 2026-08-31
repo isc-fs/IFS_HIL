@@ -18,15 +18,25 @@ $ git clone https://github.com/isc-fs/IFS08_HIL.git
 $ cd IFS08_HIL
 $ python3 -m venv .venv
 $ . .venv/bin/activate
-$ pip install -e '.[dev]' 2>/dev/null || pip install -e .
-$ pip install pytest pytest-html
+$ pip install -e .
 ```
 
-`RPi.GPIO` / `spidev` / `smbus2` will fail to install on non-Pi
-hosts — that's fine. `tools/__init__.py` wraps its driver re-exports
-in a `try/except ImportError` so the package imports cleanly
-without them. The broker's fake backend + unit tests work without
-any of the Pi-only packages.
+The hardware drivers live in a separate `[bench]` extra and are
+installed only on the Pi. `spidev` compiles against
+`<linux/spi/spidev.h>` and `RPi.GPIO` against `<sys/epoll.h>`, so
+neither builds on macOS — and because a single failed build aborts the
+whole install, keeping them out of the core set is what makes
+`pip install -e .` succeed on a laptop at all.
+
+`tools/__init__.py` wraps its driver re-exports in a
+`try/except ImportError`, so the package imports cleanly without them,
+and the broker's fake backend plus the unit tests need none of them.
+
+On the bench itself, add the extra:
+
+```sh
+pi$ pip install -e '.[bench]'
+```
 
 ```sh
 $ python3 -m pytest tests/broker/ -v

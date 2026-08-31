@@ -31,12 +31,11 @@ jobs:
         with:
           python-version: '3.11'
 
-      # Dependencies are installed directly rather than via `pip install -e .`:
-      # the package still lists spidev / RPi.GPIO as hard requirements, which
-      # cannot build off a Pi. Descriptor tooling is pure Python by design so it
-      # runs anywhere, including a contributor's laptop.
-      - name: Install tooling deps
-        run: pip install --quiet pyyaml jsonschema pytest
+      # Plain `pip install -e .` on a non-Pi runner: the hardware deps live in
+      # the `[bench]` extra, so this doubles as a standing check that the repo
+      # stays installable off-bench.
+      - name: Install
+        run: pip install --quiet -e .
 
       - name: Validate every bench descriptor
         run: python -m tools.bench validate

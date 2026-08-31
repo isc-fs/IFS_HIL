@@ -8,16 +8,30 @@ version = "0.1.0"
 description = "CLI utilities and automation helpers for the Raspberry Pi HIL bench."
 readme = "README.md"
 requires-python = ">=3.10"
+# Core. Must install anywhere, including a contributor's laptop: everything here
+# is pure Python or ships wheels for macOS and Linux.
 dependencies = [
     "typer>=0.9",
     "pytest>=7.4",
     "pytest-html>=4.0",
-    "spidev>=3.5",
-    "smbus2>=0.4",
-    "RPi.GPIO>=0.7",
     "python-can>=4.0",
     "pyyaml>=6.0",
     "jsonschema>=4.0",
+]
+
+[project.optional-dependencies]
+# Hardware access, Pi-only. spidev compiles against <linux/spi/spidev.h> and
+# RPi.GPIO against <sys/epoll.h>, so neither builds on macOS. Keeping them out of
+# the core set is what lets `pip install -e .` succeed off-bench -- while they
+# were required, a contributor could not install this repo at all, which made the
+# fake-backend workflow the docs promise unreachable.
+#
+# broker/bus.py imports all three lazily (inside the real backend's setup), so
+# the fake backend and every offline tool work without this extra.
+bench = [
+    "spidev>=3.5",
+    "smbus2>=0.4",
+    "RPi.GPIO>=0.7",
 ]
 
 [project.scripts]
