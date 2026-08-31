@@ -6,6 +6,11 @@ __pycache__/
 .env
 .env.*
 *.egg-info/
+.pytest_cache/
+
+# Per-session KPI ledgers dropped by tests/hil/ams/kpi_plugin.py
+# (aggregated by scripts/hil_kpi_report.py)
+.kpi/
 
 # CMake build outputs
 build/

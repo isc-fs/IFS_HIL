@@ -182,6 +182,10 @@ lifecycle and emits a JSON ledger per session. Aggregator script
 (`scripts/hil_kpi_report.py`) rolls per-session ledgers into a
 multi-session report.
 
+The plugin is registered from the rootdir `conftest.py` — pytest only
+honours `pytest_plugins` there — so it loads on every invocation, not
+just AMS ones. `--no-kpi` turns it off.
+
 **Per-session metrics:**
 
 | Metric | What it measures | Why it matters |
