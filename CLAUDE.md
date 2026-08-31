@@ -94,33 +94,41 @@ branch `dev`.
 
 ## Pi sync workflow (READ BEFORE PUSHING CODE TO THE BENCH)
 
-The HIL bench Pi (`isc@192.168.0.123` on the lab LAN, `isc@100.96.95.78`
-via Tailscale when off-network) does **not** carry a git checkout.
-`/home/isc/IFS08_HIL/` is a non-git working copy maintained by rsync
-from a developer machine that does have the git checkout. This avoids
-storing GitHub credentials on the bench host and lets you test
-uncommitted changes against real hardware before pushing.
+A bench Pi does **not** carry a git checkout. `~/IFS08_HIL/` on the bench
+is a non-git working copy maintained by rsync from a developer machine
+that does have the git checkout. This avoids storing GitHub credentials
+on the bench host and lets you test uncommitted changes against real
+hardware before pushing.
+
+### Bench hosts
+
+Bench addresses live **here only** — never inline in scripts or recipes.
+Select one per shell with `HIL_BENCH_HOST`. `scripts/sync_to_pi.sh` has
+**no default host**: with more than one bench on the fleet, silently
+syncing to somebody else's bench is worse than an error.
+
+| Bench | Lab LAN | Off-network (Tailscale) | Fitted |
+|---|---|---|---|
+| `bench-01` | `isc@192.168.0.123` | `isc@100.96.95.78` | `ams-carrier` (MLC2) · `ecu-carrier` (MLC4) · `pico-ltc` · `pack-current` · `ntc-interposer` |
+
+```sh
+export HIL_BENCH_HOST=isc@192.168.0.123   # lab LAN
+export HIL_BENCH_HOST=isc@100.96.95.78    # off-network via Tailscale (slower)
+```
 
 **Always sync via the script. Do not `git clone` or `git pull` on
 the Pi.**
 
 ```sh
-# from the repo root on your Mac, on the lab LAN
-scripts/sync_to_pi.sh                          # default isc@192.168.0.123
+# from the repo root on your Mac
+scripts/sync_to_pi.sh                          # → $HIL_BENCH_HOST
 scripts/sync_to_pi.sh --dry-run                # show changes only
-
-# off-network via Tailscale (slower but works from anywhere)
-scripts/sync_to_pi.sh isc@100.96.95.78
-
-# any other host
-scripts/sync_to_pi.sh user@host
-
-# if key auth isn't set up yet:
-HIL_SSH_PASS=isc scripts/sync_to_pi.sh
+scripts/sync_to_pi.sh user@host                # override for a single run
 ```
 
 What the script does:
-- `rsync -avh` from `./` to `~/IFS08_HIL/` on the Pi.
+- `rsync -avh` from `./` to `~/IFS08_HIL/` on the bench (override the
+  destination with `HIL_BENCH_PATH`).
 - **No `--delete`** — Pi-side WIP (measurement output, ad-hoc
   scripts) is preserved.
 - Excludes: `.git/`, `__pycache__/`, `*.pyc`, `.pytest_cache/`,
@@ -141,19 +149,20 @@ check which before deleting:
 ```sh
 comm -13 \
   <(git ls-files tests/hil/ams/ | xargs -n1 basename | sort) \
-  <(ssh isc@192.168.0.123 'ls ~/IFS08_HIL/tests/hil/ams/*.py | xargs -n1 basename | sort')
+  <(ssh "$HIL_BENCH_HOST" 'ls ~/IFS08_HIL/tests/hil/ams/*.py | xargs -n1 basename | sort')
 ```
 
 After sync, if you changed broker or dashboard code:
 
 ```sh
-ssh isc@192.168.0.123 'sudo systemctl restart hil-broker hil-dashboard'
+ssh "$HIL_BENCH_HOST" 'sudo systemctl restart hil-broker hil-dashboard'
 ```
 
-For one-time SSH key setup (recommended):
+For one-time SSH key setup — **per developer**, so access is attributable
+and revocable. Do not share an account password around the team:
 
 ```sh
-ssh-copy-id isc@192.168.0.123   # type "isc" once
+ssh-copy-id "$HIL_BENCH_HOST"
 ```
 
 ---
@@ -481,15 +490,14 @@ whim. Confirm with Raul before touching them.
   lists U22 *and* U23 (`NRF24L01_Breakout` ×2). Either an unpopulated
   spare or a docs lag.
 
-- **CI uses `--channel can0`.**
-  [`configs/ecu_*.yaml`](configs/),
-  [`configs/hil_agent.yaml`](configs/hil_agent.yaml), and
+- **CI still flashes through legacy `tools/flash.py`.** The `can0` half of
+  this is fixed — [`configs/ecu_*.yaml`](configs/),
+  [`configs/hil_agent.yaml`](configs/hil_agent.yaml) and
   [`.github/workflows/hil-flash.yml`](.github/workflows/hil-flash.yml)
-  all reference `can0`. But carriers live on `can2`. This is a CI
-  bug; manual flashing should always use `can2`. Fix needs:
-  YAML updates + hil-flash.yml `--channel` arg + verification that
-  `tools/flash.py` (legacy) vs `can-flasher` (current runtime tool)
-  story is consistent.
+  now all target `can2`, where the carriers actually live. What remains:
+  the workflow runs `python -m tools.flash`, which is legacy — runtime
+  flashing is the Rust `can-flasher`. Migration is TODO(#56). Until it
+  lands, treat the CI flash path as unexercised against a real carrier.
 
 - **`tools/mcp2515.py` and `tools/flash.py` are legacy.** Runtime CAN
   is kernel mcp251x; runtime flasher is the Rust `can-flasher`
@@ -570,7 +578,7 @@ module, systemd units). Off-bench on a Mac/Linux laptop you can:
 | "the dashboard is red" | `systemctl status hil-broker`, `journalctl -u hil-broker -b -n 50`. If broker is down, find why before restarting. |
 | "I'm getting undervoltage warnings" | `vcgencmd get_throttled`. If non-zero, the fix is hardware (better 5 V supply on Pi VBUS) — do not patch in software. |
 | "deploy a new firmware via CI" | Push to firmware repo, open PR, comment `/hil-build <subdir>`. CI handles the rest. |
-| "sync to Pi" / "deploy to bench" / "push code to bench" | `scripts/sync_to_pi.sh` from repo root on the Mac. Restart services if broker/dashboard code changed: `ssh isc@192.168.0.123 'sudo systemctl restart hil-broker hil-dashboard'`. Never `git clone` / `git pull` on the Pi. |
+| "sync to Pi" / "deploy to bench" / "push code to bench" | Confirm `$HIL_BENCH_HOST` names the intended bench (see **Bench hosts**), then `scripts/sync_to_pi.sh` from repo root on the Mac. Restart services if broker/dashboard code changed: `ssh "$HIL_BENCH_HOST" 'sudo systemctl restart hil-broker hil-dashboard'`. Never `git clone` / `git pull` on the Pi. |
 | "regenerate fab files" | KiCad work in `docs/BACKPLANE_HIL/`. Outputs in `docs/BACKPLANE_HIL/production/`. PCB is working — confirm scope before regenerating. |
 | "review my PR" | Look for: (1) any direct `/dev/*` opens outside broker (NACK); (2) hw_config.py vs docs drift; (3) breaks the 6 invariants? (4) test coverage in `tests/broker/` for new RPCs; (5) sane systemd dependency order. |
 | "commit this" / *(after any coherent change)* | If on `dev`, branch off first (`feat/`, `fix/`, `docs/`, etc.). Stage only the relevant files (no `-A`), use conventional-commit style, commit without asking. **Never commit to `main`, `jb`, or directly on `dev`.** |

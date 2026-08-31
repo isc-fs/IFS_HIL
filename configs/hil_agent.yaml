@@ -4,7 +4,9 @@ agent:
   scripts_dir: /srv/hil/scripts
   firmware_build_dir: /srv/hil/build
   logs_dir: /srv/hil/logs
-  can_channel: can0          # default flash channel (CAN 1)
+  can_channel: can2          # flash bus = PCB CAN1 (U17) = kernel can2, where the
+                             # MLC carriers live (operating-model invariant #3:
+                             # kernel names are inverted vs PCB silk); was can0
   targets:
     - name: vcu
       config: configs/ecu_vcu.yaml

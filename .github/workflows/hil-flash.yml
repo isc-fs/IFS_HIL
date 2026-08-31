@@ -2,7 +2,9 @@ name: HIL Flash
 
 # Flashes a pre-built firmware artifact to a target ECU via the CAN bootloader.
 # Runs directly on the Raspberry Pi self-hosted runner (label: hil-rpi), which
-# has SocketCAN (can0) wired to the backplane MCP2515 CAN 1 bus.
+# has SocketCAN (can2) wired to the backplane MCP2515 CAN 1 bus. Kernel netdev
+# names are inverted vs the PCB silk -- PCB "CAN1" (U17) is kernel can2, and the
+# MLC carriers live there. See operating-model invariant #3.
 #
 # Expected to be called by hil-build-only.yml after a successful build,
 # but can also be triggered manually from the GitHub Actions UI.
@@ -108,10 +110,10 @@ jobs:
 
           echo "Target ECU : $ECU"
           echo "Firmware   : $FW"
-          echo "CAN channel: can0"
+          echo "CAN channel: can2"
 
           python -m tools.flash "$FW" \
-            --channel can0 \
+            --channel can2 \
             --verbose
 
       - name: Post flash result to PR

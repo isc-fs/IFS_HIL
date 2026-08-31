@@ -39,3 +39,9 @@ docs/AMS IFS08/
 *.obj
 *.elf
 
+# Local bench working dirs. Large, machine-specific, never versioned.
+# firmware/: local firmware checkouts + built .bin artifacts (hundreds of MB)
+# .kpi/: hil_kpi_report.py output
+firmware/
+.kpi/
+
