@@ -28,7 +28,7 @@ None of this is quick if a prerequisite is missing, so check first:
 ## One script, run it until it stops asking
 
 ```sh
-pi$ git clone https://github.com/isc-fs/IFS08_HIL.git && cd IFS08_HIL
+pi$ git clone https://github.com/isc-fs/IFS_HIL.git && cd IFS_HIL
 pi$ ./scripts/bench_setup.sh --bench bench-NN --dry-run   # read what it will do
 pi$ ./scripts/bench_setup.sh --bench bench-NN
 ```

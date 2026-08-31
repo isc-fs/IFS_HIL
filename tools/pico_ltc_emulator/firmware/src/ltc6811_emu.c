@@ -72,7 +72,7 @@ static const uint8_t *current_response = response_pool[RSP_RDCVA];
 // gated until the parse completes. Without this split, the pump leaked
 // the previous xact's response into chip 1's data bytes while chip 1's
 // PEC came from the new response → chip-1-only PEC failures on the
-// master (IFS08_HIL#44 residual). See ltc6811_emu_service().
+// master (IFS_HIL#44 residual). See ltc6811_emu_service().
 static const uint8_t *preparse_response = response_pool[RSP_RDCVA];
 static void rebuild_all_responses(void);
 
@@ -534,7 +534,7 @@ void ltc6811_emu_service(void) {
     if (!cs_now) {
         // Pump data bytes into the TX FIFO, choosing the source per
         // chain position so a mid-xact command swap can't split a
-        // single chip across two responses (the IFS08_HIL#44 chip-1
+        // single chip across two responses (the IFS_HIL#44 chip-1
         // residual):
         //   - chip 0 (data idx 0..7): always `preparse_response` (the
         //     pre-load-time snapshot). chip 0's first 4 bytes were

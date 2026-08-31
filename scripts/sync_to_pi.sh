@@ -2,7 +2,7 @@
 # Sync the local working copy to the HIL bench Pi via rsync.
 #
 # Use this instead of `git pull` on the Pi — the bench Pi's
-# ~/IFS08_HIL/ is a NON-git working copy maintained from a
+# ~/IFS_HIL/ is a NON-git working copy maintained from a
 # developer machine that has the real git checkout. Avoids storing
 # GitHub credentials on the bench host and lets you test uncommitted
 # changes against real hardware.
@@ -18,7 +18,7 @@
 # fleet, silently syncing to someone else's bench is worse than an error.
 # Bench addresses live in CLAUDE.md ("Bench hosts").
 #
-# Destination defaults to ~/IFS08_HIL/ on the bench (relative to the remote
+# Destination defaults to ~/IFS_HIL/ on the bench (relative to the remote
 # user's home); override with HIL_BENCH_PATH if a bench differs.
 #
 # Auth:
@@ -71,7 +71,7 @@ EOF
 fi
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-DEST_PATH="${HIL_BENCH_PATH:-IFS08_HIL/}"
+DEST_PATH="${HIL_BENCH_PATH:-IFS_HIL/}"
 SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 
 if [ -n "${HIL_SSH_PASS:-}" ]; then

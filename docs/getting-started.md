@@ -98,8 +98,8 @@ pi$ sudo apt-get install -y \
 ## 3. Clone the repo
 
 ```sh
-pi$ git clone https://github.com/isc-fs/IFS08_HIL.git
-pi$ cd IFS08_HIL
+pi$ git clone https://github.com/isc-fs/IFS_HIL.git
+pi$ cd IFS_HIL
 pi$ git checkout dev
 ```
 
@@ -117,7 +117,7 @@ the extra, or the real broker backend cannot open the buses.
 
 (The `--break-system-packages` flag is Pi OS Bookworm's opt-in for
 system-wide `pip install`. If you prefer a venv, create one in
-`~/IFS08_HIL/.venv`, activate it, and drop the flag.)
+`~/IFS_HIL/.venv`, activate it, and drop the flag.)
 
 ---
 
@@ -131,7 +131,7 @@ covers this; we ship a custom one.
 Compile and install the overlay:
 
 ```sh
-pi$ cd ~/IFS08_HIL
+pi$ cd ~/IFS_HIL
 pi$ dtc -@ -I dts -O dtb \
        -o infra/devicetree/mcp2515-triple.dtbo \
           infra/devicetree/mcp2515-triple.dts
@@ -177,7 +177,7 @@ three hardware-level quirks (see
 for why). Our out-of-tree build fixes them.
 
 ```sh
-pi$ cd ~/IFS08_HIL/infra/kernel-module/mcp251x-patched
+pi$ cd ~/IFS_HIL/infra/kernel-module/mcp251x-patched
 pi$ ./build.sh
 ```
 
@@ -212,7 +212,7 @@ The broker runs as the `isc` user. Managing `canN` link state
 escalation via `sudo -n`:
 
 ```sh
-pi$ cd ~/IFS08_HIL
+pi$ cd ~/IFS_HIL
 pi$ sudo cp infra/sudoers.d/hil-broker /etc/sudoers.d/hil-broker
 pi$ sudo chmod 0440 /etc/sudoers.d/hil-broker
 pi$ sudo visudo -c    # parse-check; "parsed OK"
@@ -237,7 +237,7 @@ Four units manage the bench at boot, in this order:
 Install all four:
 
 ```sh
-pi$ cd ~/IFS08_HIL/infra/systemd
+pi$ cd ~/IFS_HIL/infra/systemd
 pi$ sudo cp hil-psu-on.service hil-can-up.service \
             hil-broker.service hil-dashboard.service \
             /etc/systemd/system/
@@ -300,7 +300,7 @@ Or check the whole build in one go — this runs every assertion in this
 guide and names the section to redo for anything that fails:
 
 ```sh
-pi$ cd ~/IFS08_HIL && python3 -m tools.bench doctor
+pi$ cd ~/IFS_HIL && python3 -m tools.bench doctor
 # Expected, on a correctly built bench:
 #   ...
 #   this bench matches the documented build
@@ -495,8 +495,8 @@ curl -fsSL -o runner.tar.gz \
 tar xzf runner.tar.gz
 
 # a registration token is short-lived; mint one with:
-#   gh api -X POST repos/isc-fs/IFS08_HIL/actions/runners/registration-token --jq .token
-./config.sh --url https://github.com/isc-fs/IFS08_HIL \
+#   gh api -X POST repos/isc-fs/IFS_HIL/actions/runners/registration-token --jq .token
+./config.sh --url https://github.com/isc-fs/IFS_HIL \
             --token <REGISTRATION_TOKEN> \
             --name bench-02 \
             --labels "$(python -m tools.bench labels --bench bench-02)"

@@ -4,7 +4,7 @@ AMS CAN frame definitions.
 Source of truth: `isc-fs/IFS08-CE-AMS/docs/CAN_MAP.md`. Keep these in sync
 when the firmware's `Core/Inc/app/ams_config.hpp` changes.
 
-Bus assignment on the IFS08_HIL bench (kernel netdev ↔ firmware bus):
+Bus assignment on the IFS_HIL bench (kernel netdev ↔ firmware bus):
 
     FDCAN1 (vehicle / ACU)  →  kernel `can0`  (PCB CAN3, U21)
     FDCAN2 (BMS + BL)       →  kernel `can2`  (PCB CAN1, U17, also visible on can1

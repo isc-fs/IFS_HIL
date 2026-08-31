@@ -23,7 +23,7 @@ extern "C" {
 #define CELLS_PER_LTC     12
 // Sized to cover the full ADG731 32-channel selector space the AMS
 // uses to route up to 20 NTCs per LTC into the LTC's GPIO1 (see
-// IFS08_HIL#41 + ams_config.hpp::Adg731ChannelMap). `temp_dC[ltc][N]`
+// IFS_HIL#41 + ams_config.hpp::Adg731ChannelMap). `temp_dC[ltc][N]`
 // is the value AMS sees on AUX1 when the mux selector points at
 // channel N -- the Pico snoops WRCOMM to track which N is active and
 // feeds the right slot into the RDAUXA AUX1 bytes. Slots 0..4 also

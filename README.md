@@ -1,4 +1,4 @@
-# IFS08_HIL — Hardware-in-the-Loop testbench
+# IFS_HIL — Hardware-in-the-Loop testbench
 
 Automated STM32 ECU firmware validation on a Raspberry Pi. The bench
 orchestrates reproducible Docker firmware builds, CAN-based flashing,

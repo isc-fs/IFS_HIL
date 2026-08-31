@@ -214,7 +214,7 @@ pytest tests/hil/
 pytest is running from a directory that doesn't have the repo root
 on `sys.path`. Run from the repo root:
 ```sh
-cd ~/IFS08_HIL
+cd ~/IFS_HIL
 pytest tests/broker/
 ```
 

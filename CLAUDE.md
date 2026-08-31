@@ -1,13 +1,13 @@
-# Claude operating model — IFS08_HIL
+# Claude operating model — IFS_HIL
 
-You are working on the **IFS08_HIL** Hardware-in-the-Loop testbench for
+You are working on the **IFS_HIL** Hardware-in-the-Loop testbench for
 ISC Racing Team's Formula Student STM32 ECU suite. This file is the
 fast-path mental model for an assistant entering a new session. It is
 **operational, not architectural** — for the why, follow the file
 pointers below.
 
 Author: Raul Moran (ISC Racing Team). Repo:
-[`isc-fs/IFS08_HIL`](https://github.com/isc-fs/IFS08_HIL), working
+[`isc-fs/IFS_HIL`](https://github.com/isc-fs/IFS_HIL), working
 branch `dev`.
 
 ---
@@ -94,7 +94,7 @@ branch `dev`.
 
 ## Pi sync workflow (READ BEFORE PUSHING CODE TO THE BENCH)
 
-A bench Pi does **not** carry a git checkout. `~/IFS08_HIL/` on the bench
+A bench Pi does **not** carry a git checkout. `~/IFS_HIL/` on the bench
 is a non-git working copy maintained by rsync from a developer machine
 that does have the git checkout. This avoids storing GitHub credentials
 on the bench host and lets you test uncommitted changes against real
@@ -127,7 +127,7 @@ scripts/sync_to_pi.sh user@host                # override for a single run
 ```
 
 What the script does:
-- `rsync -avh` from `./` to `~/IFS08_HIL/` on the bench (override the
+- `rsync -avh` from `./` to `~/IFS_HIL/` on the bench (override the
   destination with `HIL_BENCH_PATH`).
 - **No `--delete`** — Pi-side WIP (measurement output, ad-hoc
   scripts) is preserved.
@@ -149,7 +149,7 @@ check which before deleting:
 ```sh
 comm -13 \
   <(git ls-files tests/hil/ams/ | xargs -n1 basename | sort) \
-  <(ssh "$HIL_BENCH_HOST" 'ls ~/IFS08_HIL/tests/hil/ams/*.py | xargs -n1 basename | sort')
+  <(ssh "$HIL_BENCH_HOST" 'ls ~/IFS_HIL/tests/hil/ams/*.py | xargs -n1 basename | sort')
 ```
 
 After sync, if you changed broker or dashboard code:
@@ -319,7 +319,7 @@ Or run the whole thing, including the parts the five lines above skip
 (kernel module, sudoers, overlay, packages):
 
 ```sh
-pi$ cd ~/IFS08_HIL && python3 -m tools.bench doctor   # host built per getting-started.md
+pi$ cd ~/IFS_HIL && python3 -m tools.bench doctor   # host built per getting-started.md
 pi$ python3 -m tools.bench verify --bench <id>        # hardware matches its descriptor
 ```
 
@@ -474,7 +474,7 @@ vcgencmd get_throttled > /tmp/throttle.txt
 2. [`hil-build-trigger.yml`](.github/workflows/hil-build-trigger.yml)
    checks permission, dispatches
    [`hil-build-only.yml`](.github/workflows/hil-build-only.yml) in
-   IFS08_HIL with the SHA.
+   IFS_HIL with the SHA.
 3. Ubuntu runner builds firmware in the `ifs08hil` Docker image
    (Debian-bookworm + arm-gnu-toolchain 12.3.rel1) →
    `.bin`/`.hex`/`SHA256SUMS.txt` → posts ✅/❌ on the firmware PR.
@@ -589,7 +589,7 @@ module, systemd units). Off-bench on a Mac/Linux laptop you can:
 | "discover doesn't find anything" | Walk: (1) `--channel can2`? (2) carrier powered (INA ~130 mA)? (3) app already running → `send-raw 0x001 03 06 01` |
 | "ENOBUFS during flash" | `ip -o link show can2 \| grep qlen` → if 10, `systemctl restart hil-can-up`. Retry flash. |
 | "flash hangs / disconnects" | Check `journalctl -u hil-broker -f` + `dmesg -w` + flasher stderr. Often `restart-ms` recovery — retry is safe (verify-after + skip-write). |
-| "run the tests" | `cd ~/IFS08_HIL && pytest tests/hil/ -v`. Off-bench: add `--fake` broker + `HIL_BROKER_SOCKET`. |
+| "run the tests" | `cd ~/IFS_HIL && pytest tests/hil/ -v`. Off-bench: add `--fake` broker + `HIL_BROKER_SOCKET`. |
 | "add a new ECU" | Drop a `configs/ecu_<name>.yaml`, ensure CI workflow knows it, ensure carrier slot is assigned. Don't auto-assign — ask Raul. |
 | "add a broker RPC method" | Add the backend method to `broker/bus.py` (real) + `broker/fake_bus.py` (fake) → register in `broker/rpc.py` `build_method_table` → add proxy to `tools/hil_client.py` if useful → add `tests/broker/test_*.py` → document in `docs/broker-api.md`. |
 | "change a pin/address" | Edit `tools/hw_config.py` **only**. Hardware reference doc auto-becomes-stale; PR the doc update in the same commit. |

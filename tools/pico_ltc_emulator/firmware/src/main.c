@@ -39,7 +39,7 @@ int main(void) {
     ltc6811_emu_init();
     usb_cmd_init();
 
-    // USB service rate-limit (IFS08_HIL#44 conservative fix).
+    // USB service rate-limit (IFS_HIL#44 conservative fix).
     //
     // The earlier `if (gpio_get(CSN)) usb_cmd_service();` gate failed
     // because tud_task() inside getchar_timeout_us can run for

@@ -1,5 +1,5 @@
 """
-Block U -- microSD datalogger MULTI-RUN validation (IFS08_HIL #91).
+Block U -- microSD datalogger MULTI-RUN validation (IFS_HIL #91).
 
 #91 asked: exercise the MLC2 microSD logger across >= 3 boot cycles
 (>= 60 s each), confirm each run is retrievable as its own sealed,

@@ -31,7 +31,7 @@ manually instead — stop the service first to free port 8080:
 
 ```sh
 pi$ sudo systemctl stop hil-dashboard
-pi$ cd ~/IFS08_HIL
+pi$ cd ~/IFS_HIL
 pi$ python3 dashboard/app.py --port 8080 --poll-interval 2.0
 ```
 

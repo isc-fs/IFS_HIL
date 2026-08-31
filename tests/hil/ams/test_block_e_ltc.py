@@ -39,7 +39,7 @@ from tools.firmware_test.ams import can_map as M
 PICO_INJECTION_PENDING = (
     "Blocked on Pico emulator INJECT/STOP commands "
     "(see docs/ams-hil/test-plan-v1.5.0.md §3 + the matching "
-    "IFS08_HIL pico_ltc_emulator issue once filed)."
+    "IFS_HIL pico_ltc_emulator issue once filed)."
 )
 
 # E-061..E-064 read LTC counters from the pit-diag stream (AMS PR #248
@@ -116,7 +116,7 @@ class TestE063PecClean:
     AMS PR #269, this is directly readable.
 
     NOTE: This test will FAIL today on the MLC2 bench because of
-    IFS08_HIL#44 (wire-level PEC corruption — chain-wide ~70% failure rate
+    IFS_HIL#44 (wire-level PEC corruption — chain-wide ~70% failure rate
     + chip 1 outlier). The test SHOULD fail in that state — the assertion
     is correct, the bench is broken. Mark expected-fail until #44 lands."""
 
@@ -133,7 +133,7 @@ class TestE063PecClean:
             "Non-zero PEC errors per IC over the observation window: "
             + ", ".join(f"IC{i}={c}{' (SATURATED ≥255)' if c == 0xFF else ''}"
                         for i, c in nonzero)
-            + ". Suspect wire-level signal integrity (see IFS08_HIL#44)."
+            + ". Suspect wire-level signal integrity (see IFS_HIL#44)."
         )
 
 
@@ -267,7 +267,7 @@ class TestE067PerIcPecLocalisation:
     `0x6C7[4]` + `0x6C7[5]` climb above zero while every other byte
     in `0x6C7` + `0x6C8` stays at 0.
 
-    NOTE: With IFS08_HIL#44 still open (wire-level PEC corruption
+    NOTE: With IFS_HIL#44 still open (wire-level PEC corruption
     affecting all chain positions ~70 % of polls, chip 1 outlier),
     every IC's counter is already non-zero at boot. This test SHOULD
     fail until #44 is resolved on the bench side — the assertion is
@@ -296,7 +296,7 @@ class TestE067PerIcPecLocalisation:
             assert delta[5] > 0, f"chain index 5 PEC count did not climb (Δ={delta[5]})"
 
             # Every other index must have stayed at zero delta. With
-            # IFS08_HIL#44 the baseline is already saturated for every
+            # IFS_HIL#44 the baseline is already saturated for every
             # chip, so the delta IS zero (saturation absorbs new errors)
             # — that confounds the test until #44 lands. Surface that
             # explicitly in the failure message.
@@ -306,7 +306,7 @@ class TestE067PerIcPecLocalisation:
             assert not collateral, (
                 "Per-IC PEC count climbed for chain indices outside "
                 f"the silenced module-2 pair (4, 5): {collateral}. "
-                "If IFS08_HIL#44 is still open the baseline is "
+                "If IFS_HIL#44 is still open the baseline is "
                 "saturated at 0xFF, which masks this assertion. "
                 "Drop the bench's PEC corruption first.")
         finally:

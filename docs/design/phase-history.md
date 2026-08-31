@@ -30,8 +30,8 @@ runtime behaviour.
 Landed directly on `dev`.
 
 Before this, the bench was the Phase-0 state captured in
-**[PR #12](https://github.com/isc-fs/IFS08_HIL/pull/12)** and
-**[PR #13](https://github.com/isc-fs/IFS08_HIL/pull/13)**: the
+**[PR #12](https://github.com/isc-fs/IFS_HIL/pull/12)** and
+**[PR #13](https://github.com/isc-fs/IFS_HIL/pull/13)**: the
 Flask dashboard, register-level Python drivers, pytest suite, with
 the known contention caveat ("never run scripts while the dashboard
 is up").
@@ -40,7 +40,7 @@ is up").
 
 ## Phase 1 — Broker skeleton
 
-**PR**: [#14](https://github.com/isc-fs/IFS08_HIL/pull/14) (2026-04-21).
+**PR**: [#14](https://github.com/isc-fs/IFS_HIL/pull/14) (2026-04-21).
 
 Shipped:
 
@@ -67,7 +67,7 @@ passed.
 
 ## Phase 2 — Dashboard cutover
 
-**PR**: [#15](https://github.com/isc-fs/IFS08_HIL/pull/15) (2026-04-21).
+**PR**: [#15](https://github.com/isc-fs/IFS_HIL/pull/15) (2026-04-21).
 
 - Extended broker RPC surface from 12 methods to 25, with
   per-driver methods to match `tools/*.py` 1:1 so proxy classes
@@ -91,7 +91,7 @@ zero of those. HIL suite still 93 passed / 11 skipped.
 
 ## Phase 3 — Pytest cutover
 
-**PR**: [#16](https://github.com/isc-fs/IFS08_HIL/pull/16) (2026-04-21).
+**PR**: [#16](https://github.com/isc-fs/IFS_HIL/pull/16) (2026-04-21).
 
 - Extended broker with more driver-method variants needed by
   tests (`dac.reset`, `dac.read_device_id`, `can.init`,
@@ -123,7 +123,7 @@ driver so the flasher's SocketCAN path works natively."
 
 ### Phase 4 groundwork — patched module + overlay
 
-**PR**: [#17](https://github.com/isc-fs/IFS08_HIL/pull/17) (2026-04-21).
+**PR**: [#17](https://github.com/isc-fs/IFS_HIL/pull/17) (2026-04-21).
 
 - `infra/devicetree/mcp2515-triple.dts` — custom device-tree
   overlay binding all three MCP2515s on cs-gpios GPIO27/17/18
@@ -145,7 +145,7 @@ TX/RX round-trips cleanly on all three.
 
 ### Phase 4 fix — wake-from-sleep
 
-**PR**: [#18](https://github.com/isc-fs/IFS08_HIL/pull/18) (2026-04-21).
+**PR**: [#18](https://github.com/isc-fs/IFS_HIL/pull/18) (2026-04-21).
 
 Under PR #17 alone, the `ip link set canN up` path (which calls
 `mcp251x_hw_wake`) failed with `RTNETLINK Connection timed out`.
@@ -158,7 +158,7 @@ End of PR #18: `canN` reliably come up under any ordering.
 
 ### Phase 4 broker migration — SocketCAN backend
 
-**PR**: [#19](https://github.com/isc-fs/IFS08_HIL/pull/19) (2026-04-21).
+**PR**: [#19](https://github.com/isc-fs/IFS_HIL/pull/19) (2026-04-21).
 
 - `tools/hw_config.py`: `SPI_DEVICE 0 → 3` (the `spidev@3` added
   by the overlay).
@@ -183,7 +183,7 @@ skipped, dashboard HTTP 200 throughout, every non-CAN RPC
 
 ### Phase 4 wiring — systemd + sudoers + flasher install
 
-**PR**: [#20](https://github.com/isc-fs/IFS08_HIL/pull/20) (2026-04-22).
+**PR**: [#20](https://github.com/isc-fs/IFS_HIL/pull/20) (2026-04-22).
 
 Closed the Phase 4 loop with declarative boot-time bring-up:
 
@@ -254,10 +254,10 @@ round of CI / Docker-build infrastructure that landed in the
 
 | PR | Scope |
 |---|---|
-| [#1](https://github.com/isc-fs/IFS08_HIL/pull/1), [#2](https://github.com/isc-fs/IFS08_HIL/pull/2), [#3](https://github.com/isc-fs/IFS08_HIL/pull/3) | Workflow bootstrap: optional token, workflow refactor, firmware-repo CMake toolchain. |
-| [#4](https://github.com/isc-fs/IFS08_HIL/pull/4), [#5](https://github.com/isc-fs/IFS08_HIL/pull/5), [#7](https://github.com/isc-fs/IFS08_HIL/pull/7) | Artifact packaging (bin/hex from elf; no `/` in names). |
-| [#6](https://github.com/isc-fs/IFS08_HIL/pull/6) | First failing DV STM32 test committed. |
-| [#8](https://github.com/isc-fs/IFS08_HIL/pull/8), [#9](https://github.com/isc-fs/IFS08_HIL/pull/9), [#10](https://github.com/isc-fs/IFS08_HIL/pull/10), [#11](https://github.com/isc-fs/IFS08_HIL/pull/11) | PR-comment trigger bot + artifact-download link. |
+| [#1](https://github.com/isc-fs/IFS_HIL/pull/1), [#2](https://github.com/isc-fs/IFS_HIL/pull/2), [#3](https://github.com/isc-fs/IFS_HIL/pull/3) | Workflow bootstrap: optional token, workflow refactor, firmware-repo CMake toolchain. |
+| [#4](https://github.com/isc-fs/IFS_HIL/pull/4), [#5](https://github.com/isc-fs/IFS_HIL/pull/5), [#7](https://github.com/isc-fs/IFS_HIL/pull/7) | Artifact packaging (bin/hex from elf; no `/` in names). |
+| [#6](https://github.com/isc-fs/IFS_HIL/pull/6) | First failing DV STM32 test committed. |
+| [#8](https://github.com/isc-fs/IFS_HIL/pull/8), [#9](https://github.com/isc-fs/IFS_HIL/pull/9), [#10](https://github.com/isc-fs/IFS_HIL/pull/10), [#11](https://github.com/isc-fs/IFS_HIL/pull/11) | PR-comment trigger bot + artifact-download link. |
 
 These are the pieces that will hook into Phase 4's flasher to
 close the loop on "firmware PR → CI flash → 🟢 / 🔴 comment."

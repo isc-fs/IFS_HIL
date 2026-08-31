@@ -358,13 +358,13 @@ if [ -f "$HOME/actions-runner/.runner" ]; then
 elif [ -z "$RUNNER_TOKEN" ] && ! ( command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1 ); then
     c_skip "no --runner-token and gh is unavailable here."
     c_skip "  Mint one and re-run:"
-    c_skip "    gh api -X POST repos/isc-fs/IFS08_HIL/actions/runners/registration-token --jq .token"
+    c_skip "    gh api -X POST repos/isc-fs/IFS_HIL/actions/runners/registration-token --jq .token"
     c_skip "  Labels this bench should register with:"
     c_skip "    $LABELS"
 else
     c_do "download, configure and start a runner labelled: $LABELS"
     if [ -z "$RUNNER_TOKEN" ]; then
-        run "RUNNER_TOKEN=\$(gh api -X POST repos/isc-fs/IFS08_HIL/actions/runners/registration-token --jq .token)"
+        run "RUNNER_TOKEN=\$(gh api -X POST repos/isc-fs/IFS_HIL/actions/runners/registration-token --jq .token)"
     fi
     # The asset name embeds the version, so .../latest/download/<name> 404s --
     # resolve the tag first. svc.sh does not exist until config.sh has run.
@@ -372,7 +372,7 @@ else
          RUNNER_VER=\$(curl -fsSL https://api.github.com/repos/actions/runner/releases/latest | sed -n 's/.*\"tag_name\": *\"v\\([^\"]*\\)\".*/\\1/p') && \
          curl -fsSL -o runner.tar.gz \"https://github.com/actions/runner/releases/download/v\${RUNNER_VER}/actions-runner-linux-arm64-\${RUNNER_VER}.tar.gz\" && \
          tar xzf runner.tar.gz"
-    run "cd '$HOME/actions-runner' && ./config.sh --unattended --url https://github.com/isc-fs/IFS08_HIL \
+    run "cd '$HOME/actions-runner' && ./config.sh --unattended --url https://github.com/isc-fs/IFS_HIL \
          --token \"\${RUNNER_TOKEN}\" --name '$BENCH_ID' --labels '$LABELS' --replace"
     run "cd '$HOME/actions-runner' && sudo ./svc.sh install \"$(id -un)\" && sudo ./svc.sh start"
     mark_done runner

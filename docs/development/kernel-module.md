@@ -90,7 +90,7 @@ Iterative edits happen **in** the work tree. Once you're happy:
    curl -fsSL -o mcp251x.c.orig \
        "https://raw.githubusercontent.com/raspberrypi/linux/rpi-6.12.y/drivers/net/can/spi/mcp251x.c"
    diff -u mcp251x.c.orig mcp251x.c \
-       > ~/IFS08_HIL/infra/kernel-module/mcp251x-patched/0001-backplane-hil-spi-quirks.patch
+       > ~/IFS_HIL/infra/kernel-module/mcp251x-patched/0001-backplane-hil-spi-quirks.patch
    ```
 2. Run the patch through `build.sh` on a fresh machine to verify
    it applies cleanly against upstream.
