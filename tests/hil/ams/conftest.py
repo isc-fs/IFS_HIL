@@ -90,11 +90,89 @@ def soak_scale(request) -> float:
 # Configuration
 # ---------------------------------------------------------------------------
 
+def _bench_wiring(desc: dict) -> dict:
+    """The bench-physical half of the profile, resolved from the descriptor.
+
+    These keys used to be hardcoded in ams_profile.yaml, which tied the AMS
+    suite to one bench: another rig with the AMS in a different slot, or the
+    current fixture on a different DAC, needed a forked profile. They live in
+    `configs/benches/<id>.yaml` now, and the key names here are unchanged so no
+    test has to know where the value came from.
+    """
+    from tools.bench import slot_for_dut
+
+    can = desc["can"]
+    acu = can["acu"]["dev"]
+    r = desc.get("routing", {})
+    pc = r.get("pack_current", {})
+    hb = r.get("current_heartbeat", {})
+    tsms = r.get("tsms", {})
+    dash = r.get("dash_chg", {})
+    rr = r.get("relay_readback", {})
+
+    wiring = {
+        "mlc_slot":   slot_for_dut(desc, "ams"),
+        "bus_acu":    acu,
+        # Same physical bus as the app since the v1.6.0 multi-FDCAN BL, unless a
+        # bench routes the bootloader somewhere else.
+        "bus_bms_bl": can.get("bms_bl", {}).get("dev", acu),
+
+        "pack_current_dac_idx":  pc.get("dac"),
+        "pack_current_dac_ch_p": pc.get("ch_p"),
+        "pack_current_dac_ch_n": pc.get("ch_n"),
+        "pack_current_cm_v":     pc.get("zero_volts"),
+
+        "current_heartbeat_dac_idx":     hb.get("dac"),
+        "current_heartbeat_dac_channel": hb.get("channel"),
+
+        "tsms_tca_addr": tsms.get("tca"),
+        "tsms_tca_port": tsms.get("port"),
+        "tsms_tca_pin":  tsms.get("pin"),
+
+        "dash_chg_tca_addr": dash.get("tca"),
+        "dash_chg_tca_port": dash.get("port"),
+        "dash_chg_tca_pin":  dash.get("pin"),
+    }
+    if rr:
+        for name in ("ams_ok", "air_p", "air_n", "prech"):
+            wiring[f"{name}_adc_idx"] = rr.get("adc")
+            wiring[f"{name}_adc_channel"] = rr.get(name)
+
+    # A bench that does not describe a piece of wiring has not opted out of it,
+    # it has simply not said -- so drop the key and let the consuming fixture
+    # skip on its absence, exactly as it did when the profile omitted it.
+    return {k: v for k, v in wiring.items() if v is not None}
+
+
 @pytest.fixture(scope="session")
 def ams_profile() -> dict:
-    """Tunable test thresholds, loaded once per session."""
+    """Tunable test thresholds, loaded once per session.
+
+    Two layers: bench-independent firmware facts and test expectations from
+    ams_profile.yaml, overlaid with this bench's physical wiring from its
+    descriptor. Flat, same keys as before, so tests are unaware of the split.
+    """
     with PROFILE_PATH.open() as f:
-        return yaml.safe_load(f)
+        profile = yaml.safe_load(f)
+
+    try:
+        from tools.bench import load_bench
+        desc = load_bench()
+    except Exception as exc:
+        pytest.skip(f"no usable bench descriptor ({exc}); "
+                    "see configs/benches/ and $HIL_BENCH")
+
+    overlap = set(profile) & set(_bench_wiring(desc))
+    if overlap:
+        # Both layers defining a key means the split has drifted back together,
+        # and which one wins would depend on merge order. Fail loudly instead.
+        raise AssertionError(
+            "these keys are defined in BOTH ams_profile.yaml and the bench "
+            f"descriptor: {sorted(overlap)}. Bench-physical values belong only "
+            "in configs/benches/.")
+
+    profile.update(_bench_wiring(desc))
+    return profile
 
 
 # ---------------------------------------------------------------------------
