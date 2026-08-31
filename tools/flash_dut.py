@@ -52,6 +52,36 @@ PROFILE_FOR_DUT = {
 }
 
 
+def _wait_for_carrier(bus, timeout_s):
+    """Block until the carrier emits any CAN frame, or timeout_s elapses.
+
+    The boot trigger is an APP-level command: the running firmware has to be up
+    and listening for it. A fixed sleep is a guess, and the guess was wrong.
+    bench-01's ECU takes 2.11 s from power-on to its first frame against a
+    former settle of 0.5 s, so a dispatched flash sent the trigger ~1.6 s before
+    anything could hear it and then failed with "no bootloader answered" -- a
+    message that reads like a dead board rather than a race.
+
+    Finding no traffic is NOT fatal: a carrier with no valid app sits in the
+    bootloader and is still flashable. Discovery remains the real gate.
+    """
+    t0 = time.time()
+    out = ""
+    try:
+        r = subprocess.run(["candump", "-T", str(int(timeout_s * 1000)), "-n", "1", bus],
+                           capture_output=True, text=True, timeout=timeout_s + 5)
+        out = r.stdout.strip()
+    except Exception:
+        pass
+    dt = time.time() - t0
+    if out:
+        print(f"          carrier is talking after {dt:.2f} s")
+    else:
+        print(f"          no traffic within {dt:.1f} s — carrier may already be in "
+              f"the bootloader, or have no valid app; continuing")
+    return bool(out)
+
+
 class FlashError(RuntimeError):
     pass
 
@@ -173,6 +203,10 @@ def flash(dut, bin_path, bench_id=None, dry=False, expect_sha=None,
                     f"MLC{slot} drew only {mA:.1f} mA — carrier not seated, or fuse blown")
 
         # --- into the bootloader ------------------------------------------
+        # Wait for the app to be listening before shouting at it.
+        if not dry:
+            _wait_for_carrier(bus, float(profile.get("app_wake_timeout_s", 10.0)))
+
         trig_id = int(profile.get("bl_trigger_id", 0x002))
         payload = profile["bl_trigger_payload"]
         frame = f"{trig_id:03X}#{payload}"

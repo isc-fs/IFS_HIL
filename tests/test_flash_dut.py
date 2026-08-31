@@ -5,6 +5,8 @@ dangerous to get wrong: which slot a DUT is in, which OTHER carriers must be
 dark before flashing, and which boot trigger identifies which DUT.
 """
 
+from pathlib import Path
+
 import pytest
 
 yaml = pytest.importorskip("yaml")
@@ -141,3 +143,27 @@ def test_the_recipes_are_the_same_shape():
         assert r["elf"].startswith("build/")
     assert recs["ams"]["elf"] == "build/AMS.elf"
     assert recs["ecu"]["elf"] == "build/ECU08.elf"
+
+
+def test_flasher_waits_for_the_app_before_triggering():
+    """The boot trigger is an APP-level command, so the firmware has to be up
+    and listening. bench-01's ECU takes 2.11 s from power-on to its first frame
+    against the old 0.5 s settle, so a dispatched flash sent the trigger ~1.6 s
+    too early and failed with "no bootloader answered" -- which reads like a
+    dead board, not a race. The wait must happen BEFORE the trigger is sent."""
+    src = (Path(__file__).resolve().parent.parent / "tools" / "flash_dut.py").read_text()
+    assert "_wait_for_carrier" in src
+    wait_at = src.index("_wait_for_carrier(bus")
+    trigger_at = src.index('bl_trigger_payload')
+    assert wait_at < trigger_at, "the carrier wait must precede the boot trigger"
+
+
+def test_a_silent_carrier_does_not_abort_the_flash():
+    """A carrier with no valid app sits in the bootloader and is still
+    flashable. Discovery is the real gate, so absence of traffic must not raise
+    -- otherwise the flasher could never recover a board with a bad app, which
+    is exactly when you need it most."""
+    src = (Path(__file__).resolve().parent.parent / "tools" / "flash_dut.py").read_text()
+    body = src[src.index("def _wait_for_carrier"):src.index("class FlashError")]
+    assert "raise" not in body
+    assert "continuing" in body
