@@ -194,8 +194,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install (with hardware extra)
-        run: pip install --quiet -e ".[bench]"
+      # Deliberately NOT `pip install -e .` here. Two reasons, both real:
+      #   1. Pi OS Bookworm is PEP 668 externally-managed, so a plain pip
+      #      install fails outright (error: externally-managed-environment).
+      #   2. Worse, an editable install from THIS workspace would repoint the
+      #      system-wide `hil-bench` package away from /home/isc/IFS_HIL, which
+      #      hil-broker.service runs from -- a CI run would silently reconfigure
+      #      the bench daemon. --break-system-packages would "fix" (1) and make
+      #      (2) certain.
+      # The bench already has the dependencies (docs/getting-started.md §3); this
+      # checkout supplies tools/ and broker/ via cwd on sys.path, which is why
+      # every step below uses `python3 -m`.
+      - name: Check the bench has what the suite needs
+        run: |
+          python3 - <<'PYCHK'
+          import importlib.util, sys
+          need = ("yaml", "jsonschema", "pytest", "can")
+          missing = [m for m in need if importlib.util.find_spec(m) is None]
+          if missing:
+              sys.exit("missing on this bench: " + ", ".join(missing) +
+                       " -- see docs/getting-started.md section 3")
+          print("dependencies present:", ", ".join(need))
+          PYCHK
 
       # The bench proves it still is what it claims before anything runs. A
       # descriptor that has drifted from reality is worse than no descriptor:
@@ -204,7 +224,7 @@ jobs:
       - name: Preflight — bench matches its descriptor
         id: preflight
         continue-on-error: ${{ inputs.allow_degraded }}
-        run: python -m tools.bench verify --bench "$HIL_BENCH"
+        run: python3 -m tools.bench verify --bench "$HIL_BENCH"
 
       - name: Record what is under test
         run: |
@@ -216,14 +236,14 @@ jobs:
             echo "suite:    ${{ inputs.suite }}"
             echo "degraded: ${{ inputs.allow_degraded }}"
             echo ""
-            python -m tools.bench describe 2>&1 || true
+            python3 -m tools.bench describe 2>&1 || true
           } > artifacts/bench-state.txt
 
       - name: Capture CAN traffic
         run: |
           # Best-effort: the bus name comes from the descriptor, and a bench
           # without candump should not fail the run.
-          DEV=$(python -c "from tools.bench import load_bench; print(load_bench()['can']['acu']['dev'])")
+          DEV=$(python3 -c "from tools.bench import load_bench; print(load_bench()['can']['acu']['dev'])")
           echo "CANDUMP_DEV=$DEV" >> "$GITHUB_ENV"
           ( candump -t d "$DEV" > artifacts/candump.log 2>/dev/null & echo $! > /tmp/candump.pid ) || true
 
@@ -233,7 +253,7 @@ jobs:
         id: run
         run: |
           flock -w 5400 /tmp/hil-bench.lock \
-            python -m pytest ${{ inputs.suite }} ${{ inputs.pytest_args }} \
+            python3 -m pytest ${{ inputs.suite }} ${{ inputs.pytest_args }} \
               -v --junitxml=artifacts/junit.xml
 
       - name: Stop capture + collect logs
