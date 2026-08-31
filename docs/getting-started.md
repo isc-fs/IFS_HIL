@@ -115,6 +115,52 @@ The `[bench]` extra pulls in the Pi-only hardware drivers (`spidev`,
 so the repo stays installable on a developer laptop; on a bench you want
 the extra, or the real broker backend cannot open the buses.
 
+---
+
+## Join the fleet (self-hosted runner)
+
+Required for dispatched runs (`.github/workflows/hil-test.yml`). Without a
+runner the test job sits in **Queued** forever rather than failing — GitHub
+does not error on an unmatched `runs-on` — so the workflow checks for one up
+front and tells you if it is missing.
+
+First describe the bench, then register a runner carrying exactly the labels
+the descriptor declares:
+
+```sh
+# on your laptop, from the repo root
+python -m tools.bench describe --draft bench-02 --out configs/benches/bench-02.yaml
+# fill in the FIXMEs, then:
+python -m tools.bench validate
+python -m tools.bench labels --bench bench-02
+#   -> self-hosted,hil-bench,bench-02,dut-ams,stim-cells,...
+```
+
+```sh
+# on the bench
+mkdir -p ~/actions-runner && cd ~/actions-runner
+curl -o r.tar.gz -L https://github.com/actions/runner/releases/latest/download/actions-runner-linux-arm64.tar.gz
+tar xzf r.tar.gz
+
+# a registration token is short-lived; mint one with:
+#   gh api -X POST repos/isc-fs/IFS08_HIL/actions/runners/registration-token --jq .token
+./config.sh --url https://github.com/isc-fs/IFS08_HIL \
+            --token <REGISTRATION_TOKEN> \
+            --name bench-02 \
+            --labels "$(python -m tools.bench labels --bench bench-02)"
+
+sudo ./svc.sh install && sudo ./svc.sh start
+```
+
+The labels **are** the routing table: a dispatch asks for capabilities, the
+resolve job turns those into labels, and GitHub picks a bench that carries
+them. If you rewire a bench, update its descriptor *and* re-run `config.sh`
+with the new label set, or it will keep attracting runs it can no longer serve.
+
+> A self-hosted runner executes workflow code from this repository on the bench
+> host. Keep the repo's write access to people you would trust with the
+> hardware.
+
 (The `--break-system-packages` flag is Pi OS Bookworm's opt-in for
 system-wide `pip install`. If you prefer a venv, create one in
 `~/IFS08_HIL/.venv`, activate it, and drop the flag.)

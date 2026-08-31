@@ -1,0 +1,242 @@
+name: HIL Test
+
+# Run a HIL suite on a bench that can actually serve it, without anyone
+# touching hardware:
+#
+#   gh workflow run hil-test.yml \
+#     -f capabilities=dut-ams,stim-temps,fault-temp-open \
+#     -f suite=tests/hil/ams/test_block_u_microsd_multirun.py
+#
+# `resolve` runs on a cloud runner and matches the requested capabilities against
+# configs/benches/*.yaml, then the test job runs on whichever bench carries the
+# matching labels. Nothing here names a host.
+#
+# REQUIRES a self-hosted runner registered with the labels a descriptor declares
+# (`python -m tools.bench labels --bench <id>`). Without one the test job queues
+# rather than failing, which looks like a hang -- see docs/development/setup.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      capabilities:
+        description: "Comma-separated capabilities the suite needs (e.g. dut-ams,stim-temps)"
+        required: false
+        type: string
+        default: ""
+      bench:
+        description: "Pin to a specific bench id (overrides capability matching)"
+        required: false
+        type: string
+        default: ""
+      suite:
+        description: "pytest target, e.g. tests/hil/ams/test_block_a_boot.py"
+        required: true
+        type: string
+      pytest_args:
+        description: "Extra pytest args (e.g. -k something, -m 'not soak')"
+        required: false
+        type: string
+        default: ""
+      allow_degraded:
+        description: "Run even if the bench fails its own preflight (NOT recommended)"
+        required: false
+        type: boolean
+        default: false
+      comment_on:
+        description: "Issue or PR number to post the result to (optional)"
+        required: false
+        type: string
+        default: ""
+
+  workflow_call:
+    inputs:
+      capabilities: { type: string, required: false, default: "" }
+      bench:        { type: string, required: false, default: "" }
+      suite:        { type: string, required: true }
+      pytest_args:  { type: string, required: false, default: "" }
+      allow_degraded: { type: boolean, required: false, default: false }
+      comment_on:   { type: string, required: false, default: "" }
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Which bench can serve this? Cloud runner, no hardware access -- which is
+  # exactly why the inventory is committed to the repo rather than served by
+  # the benches themselves.
+  # ---------------------------------------------------------------------
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      bench: ${{ steps.pick.outputs.bench }}
+      labels: ${{ steps.pick.outputs.labels }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install
+        run: pip install --quiet -e .
+
+      - name: Pick a bench
+        id: pick
+        run: |
+          python -m tools.bench resolve \
+            ${{ inputs.capabilities && format('--capabilities {0}', inputs.capabilities) || '' }} \
+            ${{ inputs.bench && format('--bench {0}', inputs.bench) || '' }} \
+            --github-output
+
+      # A `runs-on` with no matching runner does not fail -- GitHub queues the job
+      # indefinitely, which presents as a hang and has no useful error anywhere.
+      # Check up front so the failure names the cause. Listing runners needs
+      # elevated permissions the default token may not have, so a 403 warns and
+      # continues rather than blocking the run.
+      - name: Check a runner carries these labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LABELS: ${{ steps.pick.outputs.labels }}
+          BENCH: ${{ steps.pick.outputs.bench }}
+        run: |
+          if ! gh api "repos/${{ github.repository }}/actions/runners" > /tmp/runners.json 2>/dev/null; then
+            echo "::warning::Cannot list runners with this token, skipping the check. If the test job sits in Queued, no runner carries $LABELS."
+            exit 0
+          fi
+          python - <<'PY'
+          import json, os, sys
+          want = set(json.loads(os.environ["LABELS"]))
+          runners = json.load(open("/tmp/runners.json"))["runners"]
+          if any(want <= {l["name"] for l in r["labels"]} and r["status"] == "online"
+                 for r in runners):
+              print("A runner carries", " ".join(sorted(want)))
+              sys.exit(0)
+          print("::error::No online self-hosted runner carries all of: "
+                + " ".join(sorted(want)))
+          print("Register one on that bench with the labels from:")
+          print(f"  python -m tools.bench labels --bench {os.environ['BENCH']}")
+          sys.exit(1)
+          PY
+
+      - name: Summary
+        run: |
+          {
+            echo "### Resolved to \`${{ steps.pick.outputs.bench }}\`"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| requested | \`${{ inputs.capabilities || '(none)' }}\` |"
+            echo "| suite | \`${{ inputs.suite }}\` |"
+            echo "| runner labels | \`${{ steps.pick.outputs.labels }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------
+  # Run it on that bench.
+  # ---------------------------------------------------------------------
+  test:
+    needs: resolve
+    runs-on: ${{ fromJSON(needs.resolve.outputs.labels) }}
+    # Per-bench queue. Two developers dispatching at once serialise on the bench
+    # they resolved to, while different benches run in parallel. cancel-in-progress
+    # is false because killing a run mid-way leaves hardware energised in an
+    # arbitrary state.
+    concurrency:
+      group: hil-bench-${{ needs.resolve.outputs.bench }}
+      cancel-in-progress: false
+    timeout-minutes: 90
+    env:
+      HIL_BENCH: ${{ needs.resolve.outputs.bench }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install (with hardware extra)
+        run: pip install --quiet -e ".[bench]"
+
+      # The bench proves it still is what it claims before anything runs. A
+      # descriptor that has drifted from reality is worse than no descriptor:
+      # it attracts runs the bench cannot serve, and the failure shows up an
+      # hour later looking like a firmware bug.
+      - name: Preflight — bench matches its descriptor
+        id: preflight
+        continue-on-error: ${{ inputs.allow_degraded }}
+        run: python -m tools.bench verify --bench "$HIL_BENCH"
+
+      - name: Record what is under test
+        run: |
+          mkdir -p artifacts
+          {
+            echo "bench:    $HIL_BENCH"
+            echo "commit:   ${{ github.sha }}"
+            echo "suite:    ${{ inputs.suite }}"
+            echo "degraded: ${{ inputs.allow_degraded }}"
+            echo ""
+            python -m tools.bench describe 2>&1 || true
+          } > artifacts/bench-state.txt
+
+      - name: Capture CAN traffic
+        run: |
+          # Best-effort: the bus name comes from the descriptor, and a bench
+          # without candump should not fail the run.
+          DEV=$(python -c "from tools.bench import load_bench; print(load_bench()['can']['acu']['dev'])")
+          echo "CANDUMP_DEV=$DEV" >> "$GITHUB_ENV"
+          ( candump -t d "$DEV" > artifacts/candump.log 2>/dev/null & echo $! > /tmp/candump.pid ) || true
+
+      # flock, not just the concurrency group: it also covers anyone who SSHes
+      # in and runs pytest by hand while a dispatched run is live.
+      - name: Run suite
+        id: run
+        run: |
+          flock -w 5400 /tmp/hil-bench.lock \
+            python -m pytest ${{ inputs.suite }} ${{ inputs.pytest_args }} \
+              -v --junitxml=artifacts/junit.xml
+
+      - name: Stop capture + collect logs
+        if: always()
+        run: |
+          [ -f /tmp/candump.pid ] && kill "$(cat /tmp/candump.pid)" 2>/dev/null || true
+          journalctl -u hil-broker -u hil-can-up -u hil-psu-on -n 400 --no-pager \
+            > artifacts/services.log 2>&1 || true
+          ip -details -statistics link show "${CANDUMP_DEV:-can2}" \
+            > artifacts/can-link.txt 2>&1 || true
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hil-${{ needs.resolve.outputs.bench }}-${{ github.run_id }}
+          path: artifacts/
+          retention-days: 30
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### ${{ steps.run.outcome == 'success' && '🟢' || '🔴' }} \`${{ inputs.suite }}\` on \`$HIL_BENCH\`"
+            echo ""
+            echo "- preflight: ${{ steps.preflight.outcome }}"
+            echo "- result: ${{ steps.run.outcome }}"
+            echo "- commit: \`${{ github.sha }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment result
+        if: always() && inputs.comment_on != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const ok = '${{ steps.run.outcome }}' === 'success';
+            const body = [
+              `### ${ok ? '🟢' : '🔴'} HIL run on \`${{ needs.resolve.outputs.bench }}\``,
+              '',
+              `| | |`,
+              `|---|---|`,
+              `| suite | \`${{ inputs.suite }}\` |`,
+              `| preflight | ${{ steps.preflight.outcome }} |`,
+              `| result | ${{ steps.run.outcome }} |`,
+              `| commit | \`${{ github.sha }}\` |`,
+              '',
+              `[Full logs and JUnit XML](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
+            ].join('\n');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: Number('${{ inputs.comment_on }}'),
+              body,
+            });
