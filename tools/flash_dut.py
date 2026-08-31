@@ -197,7 +197,22 @@ def flash(dut, bin_path, bench_id=None, dry=False, expect_sha=None):
                     f"{len(found)} nodes answered discover: {found}. Another carrier is "
                     "still powered — refusing to flash, this is how the wrong board "
                     "gets written.")
-            print(f"          one node: {found[0]}")
+            row = found[0]
+            print(f"          one node: {row}")
+            # Identity gate. Stronger than the node id, which is provisioned into
+            # flash separately from the firmware constant and does drift: on
+            # bench-01 the AMS bootloader answers 0x01 while ams_config.hpp
+            # declares AmsNodeId = 0x02. The product string is what the board
+            # says it IS, so it catches a mis-slotted or mis-provisioned carrier
+            # that a node-id check would wave through.
+            want_product = profile.get("bl_product")
+            if want_product and want_product not in row:
+                raise FlashError(
+                    f"the bootloader that answered is not {want_product}:\n"
+                    f"    {row}\n"
+                    f"  Refusing to flash {dut} firmware onto it.")
+            if want_product:
+                print(f"          identity confirmed: {want_product}")
 
         # --- write ---------------------------------------------------------
         addr = profile["app_flash_address"]

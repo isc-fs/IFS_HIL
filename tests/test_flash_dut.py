@@ -75,3 +75,19 @@ def test_every_known_dut_has_a_profile_file():
     from tools.flash_dut import REPO_ROOT
     for dut, rel in PROFILE_FOR_DUT.items():
         assert (REPO_ROOT / rel).is_file(), f"{dut} points at a missing profile: {rel}"
+
+
+def test_each_dut_declares_the_product_its_bootloader_reports():
+    """The identity gate. bl_node_id is provisioned into flash separately from
+    the firmware constant and demonstrably drifts — bench-01's AMS carrier
+    answers 0x01 while ams_config.hpp declares AmsNodeId = 0x02. The product
+    string is what the board says it IS, so it catches a mis-slotted or
+    mis-provisioned carrier that a node-id check would wave through."""
+    products = {}
+    for dut in ("ams", "ecu"):
+        _, profile, _ = resolve(dut, "bench-01")
+        assert "bl_product" in profile, f"{dut} profile declares no bl_product"
+        products[dut] = profile["bl_product"]
+    assert products["ams"] != products["ecu"]
+    assert products["ams"] == "IFS08-CE-AMS"
+    assert products["ecu"] == "IFS08-CE-ECU"
