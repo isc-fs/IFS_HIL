@@ -100,6 +100,13 @@ routing:
     tca: 0x21       # P11 -> AMS PF10
     port: 1
     pin: 1
+  # Carrier power relays K1..K4. Hardcoded in four places before this
+  # (conftest, flash_ams_via_trigger, bench.py, hw_config); a bench that wires
+  # them differently had no way to say so. pin = slot - 1.
+  carrier_power:
+    tca: 0x20
+    port: 0
+
   # AMS relay GPIOs PB4..PB7 tapped to bench ADC3 (broker idx 2) ch0..3.
   relay_readback:
     adc: 2
