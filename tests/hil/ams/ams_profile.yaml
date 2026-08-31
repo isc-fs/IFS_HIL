@@ -23,6 +23,18 @@ mlc_boot_settle_s:        0.5        # delay after relay close before discover
                                      # short enough to catch BL before auto-jump
 
 # -- Bootloader -------------------------------------------------------
+# Boot trigger that drops a running app back into the bootloader. The two
+# DUTs share bl_node_id 0x01 and are told apart by THIS payload, so it must
+# come from the profile -- tools/firmware_test/flash_helper.py:195 hardcodes
+# the AMS value and would never drop an ECU into its BL.
+# What the bootloader reports as Product in `can-flasher discover`.
+# A STRONGER identity gate than bl_node_id: the BL node id is provisioned
+# into flash separately from the firmware constant, and on bench-01 the AMS
+# carrier answers 0x01 while ams_config.hpp declares AmsNodeId = 0x02. The
+# product string does not drift that way.
+bl_product:               "IFS08-CE-AMS"
+bl_trigger_id:            0x002
+bl_trigger_payload:       "B007AD11"   # AMS bootloader.hpp BlBootReqPayload
 bl_node_id:               0x01       # kAmsNodeId in ams_config.hpp (option-1 per isc-fs/IFS08-CE-AMS#123)
 bl_discover_timeout_ms:   3000       # `--timeout-ms` on `can-flasher discover`
 bl_per_frame_timeout_ms:  30000      # `--timeout` (per ISO-TP transaction)

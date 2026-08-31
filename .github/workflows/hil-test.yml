@@ -115,6 +115,9 @@ jobs:
     outputs:
       bench: ${{ steps.pick.outputs.bench }}
       labels: ${{ steps.pick.outputs.labels }}
+      dut: ${{ steps.fw.outputs.dut }}
+      fw_repo: ${{ steps.fw.outputs.repo }}
+      fw_sha: ${{ steps.fw.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
 
@@ -163,6 +166,38 @@ jobs:
           sys.exit(1)
           PY
 
+      # firmware_ref arrives as "<branch>@<sha>" from the firmware repo trigger.
+      # Absent it, this is a bench-only run: no build, no flash, just the suite.
+      - name: Work out what firmware is under test
+        id: fw
+        env:
+          CAPS: ${{ inputs.capabilities }}
+          REF: ${{ inputs.firmware_ref }}
+          COMMENT_REPO: ${{ inputs.comment_repo }}
+        run: |
+          DUT=""
+          for c in ${CAPS//,/ }; do
+            case "$c" in dut-*) DUT="${c#dut-}"; break ;; esac
+          done
+          SHA=""; BRANCH=""
+          if [ -n "$REF" ]; then
+            case "$REF" in
+              *@*) BRANCH="${REF%@*}"; SHA="${REF##*@}" ;;
+              *)   BRANCH="$REF" ;;
+            esac
+          fi
+          {
+            echo "dut=$DUT"
+            echo "repo=$COMMENT_REPO"
+            echo "sha=$SHA"
+            echo "branch=$BRANCH"
+          } >> "$GITHUB_OUTPUT"
+          if [ -n "$SHA" ] && [ -n "$DUT" ] && [ -n "$COMMENT_REPO" ]; then
+            echo "firmware under test: $COMMENT_REPO@$SHA as dut '$DUT'"
+          else
+            echo "no firmware to build — bench-only run"
+          fi
+
       - name: Summary
         run: |
           {
@@ -176,10 +211,29 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------
+  # Build the PR's firmware, on a cloud runner. Skipped entirely for a
+  # bench-only run, so the existing "just run a suite" path is untouched.
+  # ---------------------------------------------------------------------
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.fw_sha != '' && needs.resolve.outputs.dut != ''
+    uses: ./.github/workflows/hil-fw-build.yml
+    with:
+      dut: ${{ needs.resolve.outputs.dut }}
+      firmware_repo: ${{ needs.resolve.outputs.fw_repo }}
+      firmware_sha: ${{ needs.resolve.outputs.fw_sha }}
+    secrets:
+      FIRMWARE_TOKEN: ${{ secrets.HIL_CROSS_REPO_PAT }}
+
+  # ---------------------------------------------------------------------
   # Run it on that bench.
   # ---------------------------------------------------------------------
   test:
-    needs: resolve
+    needs: [resolve, build]
+    # `always()` because build is SKIPPED on a bench-only run, and a skipped
+    # dependency would otherwise skip this too. A build that actually FAILED
+    # must still stop us: the bench is never contacted with an unbuilt image.
+    if: always() && needs.resolve.result == 'success' && needs.build.result != 'failure'
     runs-on: ${{ fromJSON(needs.resolve.outputs.labels) }}
     # Per-bench queue. Two developers dispatching at once serialise on the bench
     # they resolved to, while different benches run in parallel. cancel-in-progress
@@ -247,14 +301,44 @@ jobs:
           echo "CANDUMP_DEV=$DEV" >> "$GITHUB_ENV"
           ( candump -t d "$DEV" > artifacts/candump.log 2>/dev/null & echo $! > /tmp/candump.pid ) || true
 
+      - name: Fetch the built firmware
+        if: needs.build.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact }}
+          path: fw
+
       # flock, not just the concurrency group: it also covers anyone who SSHes
       # in and runs pytest by hand while a dispatched run is live.
-      - name: Run suite
+      #
+      # Flash and test share ONE lock deliberately. Two locked steps would leave
+      # a window between them in which a hand-run pytest could land on the bench
+      # mid-flash, or between a flash and the suite that is supposed to be
+      # judging it.
+      - name: Flash and run suite
         id: run
+        env:
+          DUT: ${{ needs.resolve.outputs.dut }}
+          BIN: ${{ needs.build.outputs.bin_name }}
+          FW_SHA256: ${{ needs.build.outputs.sha256 }}
+          DID_BUILD: ${{ needs.build.result }}
         run: |
-          flock -w 5400 /tmp/hil-bench.lock \
-            python3 -m pytest ${{ inputs.suite }} ${{ inputs.pytest_args }} \
-              -v --junitxml=artifacts/junit.xml
+          flock -w 3000 /tmp/hil-bench.lock bash -euo pipefail -c '
+            if [ "$DID_BUILD" = "success" ]; then
+              echo "::group::flash $DUT"
+              # --expect-sha256 re-checks the image on the bench: the artifact
+              # round-trip is the one place a build and a flash can disagree.
+              #
+              # No --restore-relays: the bench stays isolated on the DUT under
+              # test for the whole suite. A run from the ECU repo powers the ECU
+              # carrier and nothing else.
+              python3 -m tools.flash_dut                 --dut "$DUT"                 --bin "fw/$BIN"                 --bench "$HIL_BENCH"                 --expect-sha256 "$FW_SHA256"                 --out artifacts/flash.json
+              echo "::endgroup::"
+            else
+              echo "no firmware built — running the suite against whatever is on the carrier"
+            fi
+            python3 -m pytest ${{ inputs.suite }} ${{ inputs.pytest_args }}               -v --junitxml=artifacts/junit.xml
+          '
 
       - name: Stop capture + collect logs
         if: always()

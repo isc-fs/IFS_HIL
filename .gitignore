@@ -40,8 +40,11 @@ docs/AMS IFS08/
 *.elf
 
 # Local bench working dirs. Large, machine-specific, never versioned.
-# firmware/: local firmware checkouts + built .bin artifacts (hundreds of MB)
+# /firmware/: local firmware checkouts + built .bin artifacts (hundreds of MB)
 # .kpi/: hil_kpi_report.py output
-firmware/
-.kpi/
+#
+# Leading slash matters: an unanchored `firmware/` matches at ANY depth and
+# silently swallowed configs/firmware/, the reviewed build recipes.
+/firmware/
+/.kpi/
 

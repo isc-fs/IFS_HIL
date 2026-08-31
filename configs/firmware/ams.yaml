@@ -1,0 +1,24 @@
+# How to build AMS firmware for a HIL run.
+#
+# Owned by IFS_HIL and reviewed here, never taken from the pull request being
+# tested: the build runs on a cloud runner, but the image it produces is written
+# to a real carrier. A PR must not be able to change how its own firmware is
+# built and then have that firmware flashed to shared hardware.
+#
+# Mirrors the repo's own `Firmware cross-compile` job in build-tests.yml, so a
+# HIL build and a CI build are the same build.
+
+dut: ams
+repo: isc-fs/IFS08-CE-AMS
+submodules: false
+toolchain_release: '14.2.Rel1'          # carlosperate/arm-none-eabi-gcc-action
+
+# CMakeLists.txt is at the repo root for the AMS.
+configure: cmake -B build -DCMAKE_TOOLCHAIN_FILE=cmake/gcc-arm-none-eabi.cmake
+build: cmake --build build -j
+elf: build/AMS.elf
+
+# Asserts .isr_vector starts exactly at 0x08020000 and that nothing lands in
+# sector 0 or 7. This is the gate that stops a mis-linked image reaching the
+# bootloader's app slot, so it is mandatory, not advisory.
+layout_check: python3 scripts/check_flash_layout.py build/AMS.elf
