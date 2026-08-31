@@ -34,6 +34,7 @@
 #include <math.h>
 
 #include "ltc6811_emu.h"
+#include "ntc_aux_table.h"
 #include "cell_state.h"
 #include "pec15.h"
 #include "spi_slave_pio.pio.h"
@@ -124,39 +125,47 @@ static inline uint16_t mV_to_ltc(uint16_t mV) {
     return (v > 0xFFFFu) ? 0xFFFFu : (uint16_t)v;
 }
 
-// Temperature-to-NTC-divider voltage. AMS firmware decodes AUX as a
-// resistor divider with a Beta-model NTC:
-//   V_aux_mV  = NtcVrefMv * R_ntc / (NtcSeriesR + R_ntc)
-//   R_ntc(T)  = NtcR25 * exp(Beta * (1/T_K - 1/T0))
-// per Core/Inc/app/ams_config.hpp:
+// Temperature-to-NTC-divider voltage.
+//
+// The AMS recovers thermistor resistance from the observed AUX voltage as
+//   R_ntc = NtcPullupOhm * V_aux / (NtcVrefMv - V_aux)
+// and then converts R -> T with the MANUFACTURER R-T TABLE
+// (Core/Inc/app/ntc_table.hpp, generated from docs/ntc_rt_table.csv), not a
+// single-beta fit. Per ams_config.hpp:
 //   NtcVrefMv    = 3000     (LTC6811 VREF2)
-//   NtcSeriesR   = 10000 Ω  (divider pull-up)
-//   NtcR25       = 10000 Ω
-//   NtcBeta      = 3380 K
-//   NtcT0Kelvin  = 298.15 K (25 °C)
+//   NtcPullupOhm = 6800     (R145 / R170 pull-up to VREF2)
 //
-// For target temp dC (deci-°C, 250 = 25 °C):
-//   T_K   = dC/10 + 273.15
-//   R     = 10000 * exp(3380 * (1/T_K - 1/298.15))
-//   V_aux = 3000 * R / (10000 + R)
-//   aux_u16 = V_aux * 10   (u16 100 µV units the LTC chip emits)
+// This emulator used to invert a BETA MODEL with two constants that the AMS
+// firmware no longer has -- a 10 kOhm series resistor and beta = 3380 (the
+// beta of a Murata NCP15XH103J, not the fitted Fenghua CMFB103F3950 whose
+// beta is 3950). Both were removed from the AMS in #457 when the real table
+// was ported; the emulator was never updated and kept citing them.
 //
-// Earlier stand-in was off by 10× and the firmware's Steinhart
-// decoder mapped my "25 °C" output (150 mV) to ~113 °C, tripping the
-// CellOverTempC = 60 °C predicate and forcing the FSM to Error.
+// The result was a silent calibration error in every temperature the bench
+// asserted: seeding 25 C read 34 C, 10 C read 20 C, 60 C read 65 C
+// (IFS_HIL#117). The 25 C case shows it is the pull-up rather than beta --
+// at T0 the beta term cancels, so a matched divider would read exactly 25.
+// Overstating the pull-up as 10 k emits 1500 mV where the AMS expects
+// 1785.7 mV, and the AMS reads that back as 34 C.
+//
+// So: emit the AUX voltage straight from the SAME table the AMS decodes
+// with, interpolated to a tenth of a degree. The round-trip is then exact by
+// construction, rather than two independent models happening to agree.
 static inline uint16_t dC_to_ltc(int16_t dC) {
-    const float t_K  = (float)dC / 10.0f + 273.15f;
-    const float beta = 3380.0f;
-    const float t0   = 298.15f;
-    const float r25  = 10000.0f;
-    const float rs   = 10000.0f;
-    const float vref = 3000.0f;            // mV
-    const float r    = r25 * expf(beta * (1.0f / t_K - 1.0f / t0));
-    const float v_aux_mV = vref * r / (rs + r);
-    const float aux_100uV = v_aux_mV * 10.0f;
-    if (aux_100uV < 0.0f)        return 0u;
-    if (aux_100uV > 65535.0f)    return 65535u;
-    return (uint16_t)(aux_100uV + 0.5f);
+    const int32_t t_min_dC = (int32_t)NTC_AUX_T_MIN_C * 10;
+    const int32_t t_max_dC = (int32_t)NTC_AUX_T_MAX_C * 10;
+    const int32_t d = (int32_t)dC;
+
+    if (d <= t_min_dC) return k_ntc_aux_100uV[0];
+    if (d >= t_max_dC) return k_ntc_aux_100uV[NTC_AUX_COUNT - 1];
+
+    const int32_t idx  = (d - t_min_dC) / 10;
+    const int32_t frac = (d - t_min_dC) - idx * 10;      // tenths into the step
+    const int32_t a    = (int32_t)k_ntc_aux_100uV[idx];
+    const int32_t b    = (int32_t)k_ntc_aux_100uV[idx + 1];
+
+    // b < a: the table falls with temperature. Signed arithmetic throughout.
+    return (uint16_t)(a + ((b - a) * frac) / 10);
 }
 
 ltc_stats_t g_ltc_stats;

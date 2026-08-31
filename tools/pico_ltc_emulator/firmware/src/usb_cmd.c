@@ -12,7 +12,7 @@
 
 #define LINE_MAX 96
 
-#define FW_VERSION_STR "0.4.0"   // adds ADG731 mux snoop (IFS_HIL#41)
+#define FW_VERSION_STR "0.5.0"   // NTC AUX from the manufacturer R-T table (IFS_HIL#117)
 
 usb_cmd_stats_t g_cmd_stats;
 
