@@ -13,6 +13,9 @@ Why this exists rather than `hil-flash.yml` + `tools/flash.py`:
   * The real, exercised path is the `can-flasher` CLI (isc-fs/MingoCAN), which
     every live bench test already uses via tools/firmware_test/flash_helper.py.
 
+The bench is left ISOLATED on the target DUT unless --restore-relays is given:
+a run started from the ECU repo powers the ECU carrier and nothing else.
+
 Everything bench-specific is resolved, never hardcoded: the carrier slot and its
 relay come from configs/benches/<id>.yaml, and the node id, app address and boot
 trigger come from the DUT profile.
@@ -112,7 +115,8 @@ def other_dut_slots(desc, target_slot):
     return sorted(out)
 
 
-def flash(dut, bin_path, bench_id=None, dry=False, expect_sha=None):
+def flash(dut, bin_path, bench_id=None, dry=False, expect_sha=None,
+          restore_relays=False):
     bin_path = Path(bin_path).resolve()
     if not bin_path.is_file():
         raise FlashError(f"image not found: {bin_path}")
@@ -235,15 +239,29 @@ def flash(dut, bin_path, bench_id=None, dry=False, expect_sha=None):
             result["flashed"] = True
 
     finally:
-        # Restore whatever the relays were doing before. The AMS needs the ECU's
-        # continuous 0x100 or it trips VcuStale, so leaving other slots dark has
-        # consequences beyond this run.
-        if client is not None and before is not None:
+        # By default the bench is left ISOLATED: target powered, every other DUT
+        # carrier dark. A run started from the ECU repo should exercise the ECU
+        # alone, and restoring the snapshot here would re-energise the AMS the
+        # instant the ECU flash finished -- putting a second node on the bus for
+        # the whole test.
+        #
+        # --restore-relays opts back into the snapshot for the cases where the
+        # DUTs genuinely need each other: the AMS trips VcuStale without the
+        # ECU's continuous 0x100, so an AMS FSM suite wants the ECU powered.
+        if restore_relays and client is None:
+            print("restore : would re-energise the previously powered carriers")
+        elif client is None:
+            kept = ", ".join(f"MLC{s}" for s, _ in others) or "none"
+            print(f"isolate : would leave MLC{slot} powered; still dark: {kept}")
+        elif before is not None and restore_relays:
             try:
                 client.call("tca.write_port", addr=tca, port=port, value=before)
                 print(f"restore : relay port back to 0x{before:02X}")
             except Exception as exc:                       # noqa: BLE001
                 print(f"restore : FAILED to restore relays: {exc}", file=sys.stderr)
+        elif client is not None:
+            kept = ", ".join(f"MLC{s}" for s, _ in others) or "none"
+            print(f"isolate : left MLC{slot} powered; still dark: {kept}")
 
     return result
 
@@ -256,11 +274,18 @@ def main():
     ap.add_argument("--bench")
     ap.add_argument("--expect-sha256")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--restore-relays", action="store_true",
+                    help="re-energise the carriers that were on before. Default is "
+                         "to leave the bench isolated on the target DUT, which is "
+                         "what a single-DUT suite wants; use this when the suite "
+                         "needs another carrier alive (an AMS FSM run needs the "
+                         "ECU's 0x100 or it trips VcuStale).")
     ap.add_argument("--out", help="write a JSON record of the flash here")
     args = ap.parse_args()
 
     try:
-        res = flash(args.dut, args.bin, args.bench, args.dry_run, args.expect_sha256)
+        res = flash(args.dut, args.bin, args.bench, args.dry_run,
+                    args.expect_sha256, args.restore_relays)
     except FlashError as exc:
         print(f"\n!! {exc}", file=sys.stderr)
         return 1

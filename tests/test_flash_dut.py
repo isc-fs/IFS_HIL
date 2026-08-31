@@ -91,3 +91,16 @@ def test_each_dut_declares_the_product_its_bootloader_reports():
     assert products["ams"] != products["ecu"]
     assert products["ams"] == "IFS08-CE-AMS"
     assert products["ecu"] == "IFS08-CE-ECU"
+
+
+def test_isolation_is_the_default_not_restore():
+    """A run started from the ECU repo must exercise the ECU alone. Restoring
+    the relay snapshot after flashing would re-energise the AMS immediately and
+    put a second node on the bus for the whole suite, so isolation is the
+    default and restore is opt-in."""
+    import inspect
+
+    from tools.flash_dut import flash
+    sig = inspect.signature(flash)
+    assert sig.parameters["restore_relays"].default is False, (
+        "restore_relays must default to False — isolation is the safe default")
