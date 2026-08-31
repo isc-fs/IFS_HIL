@@ -265,8 +265,15 @@ jobs:
           ip -details -statistics link show "${CANDUMP_DEV:-can2}" \
             > artifacts/can-link.txt 2>&1 || true
 
+      # Non-fatal on purpose. These artifacts are provenance, not the result:
+      # the verdict is already in the step summary and the PR comment. A run
+      # that flashed, tested and passed must not go red because the account's
+      # artifact storage quota is full -- which is exactly what happened on the
+      # first successful bench run (run 33385267560).
       - name: Upload artifacts
+        id: upload
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: hil-${{ needs.resolve.outputs.bench }}-${{ github.run_id }}
@@ -282,6 +289,9 @@ jobs:
             echo "- preflight: ${{ steps.preflight.outcome }}"
             echo "- result: ${{ steps.run.outcome }}"
             echo "- commit: \`${{ github.sha }}\`"
+            if [ "${{ steps.upload.outcome }}" = "failure" ]; then
+              echo "- :warning: artifacts were NOT uploaded (storage quota?) — logs above still hold the detail"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       # Commenting on a firmware PR is cross-repo, so it needs the PAT; the
