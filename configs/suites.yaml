@@ -1,0 +1,61 @@
+# Named test suites, per DUT.
+#
+# A developer labelling a PR `hil-test` should not have the whole tree thrown at
+# them. Before this existed the label ran `tests/hil/vcu/` -- all 63 ECU cases,
+# including ones bench-01 structurally cannot pass (the E-blocks need an
+# inverter it does not have; C-004 and L-005 need the AMS alive, but flash_dut
+# de-energises MLC2 to flash the ECU). Every PR came back red whatever it
+# contained, which is how a signal stops being read.
+#
+# So: `smoke` is the default and must be GREEN on a healthy bench with a flight
+# build. Everything else is opt-in, by name:
+#
+#     /hil-test              -> smoke
+#     /hil-test dv           -> the DV block
+#     /hil-test full         -> everything
+#     /hil-test tests/hil/vcu/test_block_c_fsm.py   -> still works; a path is
+#                                                      passed through unchanged
+#
+# Adding a case to `smoke` is a promise that it passes on bench-01 unattended.
+# If it needs hardware the bench does not declare, it belongs in a named suite.
+
+ecu:
+  # Green on bench-01 with a flight build, 20 cases. Verified in run 33665979193.
+  smoke:
+    - tests/hil/vcu/test_block_a_boot.py        # boot, BL discover, flash+jump
+    - tests/hil/vcu/test_block_b_fdcan.py       # the two buses stay independent
+    - tests/hil/vcu/test_block_b_heartbeat.py   # 0x100 cadence + dc_bus decode
+    - tests/hil/vcu/test_block_f_ams.py         # AMS gate on a stubbed AMS
+    - tests/hil/vcu/test_block_f_real_ams.py    # AMS gate against the real one
+    - tests/hil/vcu/test_block_i_health.py      # 0x704 health / liveness
+  full:
+    - tests/hil/vcu/
+  # Needs the AMS powered; flash_dut isolation leaves MLC2 dark, so these fail
+  # in a dispatched ECU run today. Kept named so they can be run deliberately.
+  dv:
+    - tests/hil/vcu/test_block_l_dv.py
+  fsm:
+    - tests/hil/vcu/test_block_c_fsm.py
+  # Needs a real inverter. bench-01 declares none, so expect failures there.
+  inverter:
+    - tests/hil/vcu/test_block_e_inverter.py
+    - tests/hil/vcu/test_block_e_fault_recovery.py
+  telemetry:
+    - tests/hil/vcu/test_block_j_telemetry.py
+    - tests/hil/vcu/test_block_h_pitdiag.py
+
+ams:
+  # NOT green today: A-005/A-006/A-014 fail on IFS_HIL#116 (3 of 95 cells read
+  # the NTC AUX voltage). Kept honest rather than trimmed to look green -- the
+  # failures are real and tracked.
+  smoke:
+    - tests/hil/ams/test_block_a_boot.py
+  full:
+    - tests/hil/ams/
+  balancing:
+    - tests/hil/ams/test_block_bal.py
+  safety:
+    - tests/hil/ams/test_block_b_safety.py
+  relays:
+    - tests/hil/ams/test_block_r_relays.py
+    - tests/hil/ams/test_block_f_relays.py

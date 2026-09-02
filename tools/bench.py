@@ -392,6 +392,47 @@ def doctor_checks():
     yield ("10", "can-flasher", rc == 0, ver or "not on PATH")
 
 
+SUITES_FILE = REPO_ROOT / "configs" / "suites.yaml"
+
+
+def load_suites():
+    """Named pytest targets per DUT, from configs/suites.yaml."""
+    if not SUITES_FILE.is_file():
+        return {}
+    import yaml
+    return yaml.safe_load(SUITES_FILE.read_text()) or {}
+
+
+def resolve_suite(dut, spec):
+    """Expand a suite SPEC into pytest targets.
+
+    A developer should be able to say what to run without memorising paths, and
+    without being handed the whole tree. So:
+
+      ""            -> the DUT's `smoke` suite (must be green on a good bench)
+      "dv"          -> that DUT's named suite
+      "tests/..."   -> passed through untouched, so an arbitrary path or a
+                       single `file::Class::case` still works
+
+    Anything containing "/" or "::" is treated as a path. An unknown NAME is an
+    error rather than a silent fall-through to the whole tree -- a typo that
+    quietly ran 63 cases instead of 20 is exactly the surprise this removes.
+    """
+    spec = (spec or "").strip()
+    suites = load_suites().get(dut, {})
+
+    if spec and ("/" in spec or "::" in spec):
+        return spec.split()
+
+    name = spec or "smoke"
+    if name not in suites:
+        known = ", ".join(sorted(suites)) or "(none defined)"
+        raise SystemExit(
+            f"unknown suite '{name}' for dut '{dut}'. Known: {known}\n"
+            f"  or give a path, e.g. tests/hil/{dut}/test_block_a_boot.py")
+    return list(suites[name])
+
+
 def cmd_doctor(args):
     """Check this host against the documented bench build."""
     if not sys.platform.startswith("linux"):
@@ -418,6 +459,11 @@ def cmd_doctor(args):
 # --------------------------------------------------------------------------
 # subcommands
 # --------------------------------------------------------------------------
+
+def cmd_suite(args):
+    for t in resolve_suite(args.dut, args.suite):
+        print(t)
+
 
 def cmd_validate(args):
     try:
@@ -738,6 +784,11 @@ def main():
     p.add_argument("--github-output", action="store_true",
                    help="also append bench/labels to $GITHUB_OUTPUT")
     p.set_defaults(func=cmd_resolve)
+
+    p = sub.add_parser("suite", help="expand a suite name (or path) to pytest targets")
+    p.add_argument("--dut", required=True)
+    p.add_argument("--suite", default="", help="name (smoke/dv/full/...) or a path")
+    p.set_defaults(func=cmd_suite)
 
     p = sub.add_parser("describe", help="probe the live bench")
     p.add_argument("--deep", action="store_true",

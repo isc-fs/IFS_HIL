@@ -128,6 +128,7 @@ jobs:
       dut: ${{ steps.fw.outputs.dut }}
       fw_repo: ${{ steps.fw.outputs.repo }}
       fw_sha: ${{ steps.fw.outputs.sha }}
+      suite: ${{ steps.suite.outputs.targets }}
     steps:
       - uses: actions/checkout@v4
 
@@ -207,6 +208,28 @@ jobs:
           else
             echo "no firmware to build — bench-only run"
           fi
+
+      # A developer picks WHAT to run. They should not need to know paths, and
+      # they should not get the whole tree by default -- the label used to run
+      # all 63 ECU cases, including ones this bench structurally cannot pass, so
+      # every PR came back red regardless of its contents. configs/suites.yaml
+      # maps a name per DUT; a path is passed through untouched; empty means
+      # `smoke`, which is required to be green on a healthy bench.
+      - name: Expand the suite
+        id: suite
+        env:
+          DUT: ${{ steps.fw.outputs.dut }}
+          SUITE: ${{ inputs.suite }}
+        run: |
+          if [ -z "$DUT" ]; then
+            echo "targets=$SUITE" >> "$GITHUB_OUTPUT"
+            echo "no dut resolved; passing the suite through unchanged: $SUITE"
+            exit 0
+          fi
+          TARGETS="$(python -m tools.bench suite --dut "$DUT" --suite "$SUITE" | tr '\n' ' ')"
+          echo "targets=$TARGETS" >> "$GITHUB_OUTPUT"
+          echo "suite '${SUITE:-smoke}' -> $TARGETS"
+
 
       - name: Summary
         run: |
@@ -481,7 +504,7 @@ jobs:
             else
               echo "bench-only run — no firmware requested; testing whatever is on the carrier"
             fi
-            python3 -m pytest ${{ inputs.suite }} ${{ inputs.pytest_args }} -v --junitxml=artifacts/junit.xml
+            python3 -m pytest ${{ needs.resolve.outputs.suite }} ${{ inputs.pytest_args }} -v --junitxml=artifacts/junit.xml
           '
 
       - name: Stop capture + collect logs
