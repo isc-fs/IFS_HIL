@@ -551,12 +551,68 @@ jobs:
 
       # Commenting on a firmware PR is cross-repo, so it needs the PAT; the
       # default GITHUB_TOKEN is scoped to this repository only.
+      # Turn the JUnit XML into something a developer can read without leaving
+      # the PR. A bare red tick plus a link means opening Actions, finding the
+      # job and scrolling past 500 lines of candump to learn which case failed --
+      # so most people re-run it or stop reading it.
+      - name: Summarise the run
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import pathlib, xml.etree.ElementTree as ET
+
+          src = pathlib.Path("artifacts/junit.xml")
+          out = pathlib.Path("artifacts/summary.md")
+          out.parent.mkdir(parents=True, exist_ok=True)
+          if not src.is_file():
+              out.write_text("")
+              raise SystemExit(0)
+
+          root = ET.parse(src).getroot()
+          suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
+          tot = fail = err = skip = 0
+          rows = []
+          for ts in suites:
+              tot  += int(ts.get("tests") or 0)
+              fail += int(ts.get("failures") or 0)
+              err  += int(ts.get("errors") or 0)
+              skip += int(ts.get("skipped") or 0)
+              for tc in ts.iter("testcase"):
+                  for kind in ("failure", "error"):
+                      node = tc.find(kind)
+                      if node is None:
+                          continue
+                      why = (node.get("message") or node.text or "").strip()
+                      why = why.splitlines()[0] if why else "(no message)"
+                      if len(why) > 180:
+                          why = why[:177] + "..."
+                      rows.append((tc.get("name") or "?", why.replace("|", "\\|")))
+
+          passed = tot - fail - err - skip
+          lines = ["", "**%d passed, %d failed, %d skipped**" % (passed, fail + err, skip), ""]
+          if rows:
+              lines += ["| failed case | why |", "|---|---|"]
+              for name, why in rows[:15]:
+                  lines.append("| `%s` | %s |" % (name, why))
+              if len(rows) > 15:
+                  lines.append("| ... | and %d more |" % (len(rows) - 15))
+              lines.append("")
+          out.write_text("\n".join(lines))
+          print("\n".join(lines))
+          PY
+
       - name: Comment result
         if: always() && inputs.comment_on != ''
         uses: actions/github-script@v7
         with:
           github-token: ${{ inputs.comment_repo != '' && secrets.HIL_CROSS_REPO_PAT || github.token }}
           script: |
+            const fs = require('fs');
+            // Written by the previous step from artifacts/junit.xml. Absent when the
+            // run died before pytest (failed preflight or flash), in which case the
+            // table is simply omitted.
+            let summary = '';
+            try { summary = fs.readFileSync('artifacts/summary.md', 'utf8'); } catch (e) {}
             const ok = '${{ steps.run.outcome }}' === 'success';
             const body = [
               `### ${ok ? '🟢' : '🔴'} HIL run on \`${{ needs.resolve.outputs.bench }}\``,
@@ -569,6 +625,7 @@ jobs:
               `| commit | \`${{ github.sha }}\` |`,
               `| firmware | \`${{ inputs.firmware_ref || 'n/a' }}\` |`,
               '',
+              summary,
               `[Full logs and JUnit XML](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
             ].join('\n');
             const target = '${{ inputs.comment_repo }}' || `${context.repo.owner}/${context.repo.repo}`;
