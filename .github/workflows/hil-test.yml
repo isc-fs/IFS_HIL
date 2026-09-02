@@ -41,9 +41,13 @@ on:
         type: string
         default: ""
       suite:
-        description: "pytest target, e.g. tests/hil/ams/test_block_a_boot.py"
-        required: true
+        description: >-
+          Suite NAME from configs/suites.yaml (smoke / dv / full / ...) or a
+          pytest path. Empty means `smoke`, which is why this is not required:
+          a caller that wants the sensible default should not have to name it.
+        required: false
         type: string
+        default: ""
       pytest_args:
         description: "Extra pytest args (e.g. -k something, -m 'not soak')"
         required: false
@@ -83,7 +87,7 @@ on:
     inputs:
       capabilities: { type: string, required: false, default: "" }
       bench:        { type: string, required: false, default: "" }
-      suite:        { type: string, required: true }
+      suite:        { type: string, required: false, default: "" }
       pytest_args:  { type: string, required: false, default: "" }
       allow_degraded: { type: boolean, required: false, default: false }
       comment_on:   { type: string, required: false, default: "" }

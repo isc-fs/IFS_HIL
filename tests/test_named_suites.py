@@ -70,3 +70,17 @@ def test_smoke_excludes_what_the_bench_cannot_serve():
 def test_smoke_is_narrower_than_full():
     for dut in load_suites():
         assert resolve_suite(dut, "smoke") != resolve_suite(dut, "full")
+
+
+def test_the_suite_input_is_optional_on_every_trigger():
+    """`smoke` is the default, so a caller wanting it must not have to name it.
+    While `suite` was `required: true` a dispatch with an empty value was
+    rejected outright -- HTTP 422 "Required input 'suite' not provided" -- which
+    is how the firmware repo's bare label failed after it stopped forcing a path.
+    """
+    wf = yaml.safe_load((ROOT / ".github" / "workflows" / "hil-test.yml").read_text())
+    on = wf[True]
+    for trigger in ("workflow_dispatch", "workflow_call"):
+        spec = on[trigger]["inputs"]["suite"]
+        assert spec.get("required") is False, f"{trigger}: suite must be optional"
+        assert spec.get("default", None) == "", f"{trigger}: suite must default to empty"
