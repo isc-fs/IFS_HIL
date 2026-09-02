@@ -33,6 +33,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -433,6 +434,78 @@ def resolve_suite(dut, spec):
     return list(suites[name])
 
 
+BENCH_LOCK = "/tmp/hil-bench.lock"
+
+
+def _sh(cmd, quiet=False):
+    """Run a shell command, returning True on success. Recovery is best-effort
+    at every rung: a step that cannot run must not stop the ladder."""
+    r = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    if not quiet:
+        print(f"    $ {cmd}" + ("" if r.returncode == 0 else f"   -> rc={r.returncode}"))
+    return r.returncode == 0
+
+
+def _psu_cycle(off_s=5.0, on_s=6.0):
+    """POR the rails. This is what actually un-wedges a DAC80504 -- a broker
+    restart alone re-opens the SPI handle without resetting the chip."""
+    try:
+        from broker.server import BrokerClient
+        c = BrokerClient(os.environ.get("HIL_BROKER_SOCKET", "/run/hil-broker/broker.sock"))
+    except Exception as e:
+        print(f"    cannot reach the broker to cycle the PSU: {e}")
+        return False
+    try:
+        print("    PSU off"); c.call("psu.power", on=False); time.sleep(off_s)
+        print("    PSU on");  c.call("psu.power", on=True);  time.sleep(on_s)
+        return True
+    except Exception as e:
+        print(f"    PSU cycle failed: {e}")
+        return False
+
+
+def recover(level):
+    """One rung of the recovery ladder. Cheapest first.
+
+    1  restart the broker. Sometimes enough on its own.
+    2  POR the rails, then rebuild everything that a POR knocks over.
+
+    Level 2 reloads mcp251x deliberately: a PSU cycle resets the MCP2515s while
+    the kernel still believes the interfaces are up, so CAN goes silent with the
+    link still reading UP/ERROR-ACTIVE. That looks exactly like a dead DUT and
+    has been misdiagnosed as a brick.
+    """
+    if level <= 1:
+        print("  recovery 1: restarting the broker")
+        _sh("sudo systemctl restart hil-broker")
+        time.sleep(6)
+        return
+
+    print("  recovery 2: PSU power-on-reset, then CAN + broker")
+    _psu_cycle()
+    _sh("sudo modprobe -r mcp251x"); time.sleep(2)
+    _sh("sudo modprobe mcp251x");    time.sleep(3)
+    _sh("sudo systemctl restart hil-can-up"); time.sleep(3)
+    _sh("sudo systemctl restart hil-broker"); time.sleep(6)
+
+
+def cmd_recover(args):
+    """Bring a wedged bench back, under the bench lock.
+
+    The lock is not optional. Level 2 power-cycles the rails, and doing that
+    while another run is mid-flash is precisely the interrupted-write that
+    leaves an H7 unrecoverable (F-077). Taking it here rather than in the
+    caller means a hand-run recovery is protected too.
+    """
+    import fcntl
+    with open(BENCH_LOCK, "w") as lk:
+        print(f"  waiting for the bench lock ({BENCH_LOCK})")
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        print("  lock held; nothing else can be flashing")
+        recover(args.level)
+    return 0
+
+
 def cmd_doctor(args):
     """Check this host against the documented bench build."""
     if not sys.platform.startswith("linux"):
@@ -789,6 +862,13 @@ def main():
     p.add_argument("--dut", required=True)
     p.add_argument("--suite", default="", help="name (smoke/dv/full/...) or a path")
     p.set_defaults(func=cmd_suite)
+
+    p = sub.add_parser("recover",
+                       help="unwedge a bench that fails its own preflight")
+    p.add_argument("--bench")
+    p.add_argument("--level", type=int, default=2,
+                   help="1 = broker restart, 2 = PSU power-on-reset + CAN + broker")
+    p.set_defaults(func=cmd_recover)
 
     p = sub.add_parser("describe", help="probe the live bench")
     p.add_argument("--deep", action="store_true",

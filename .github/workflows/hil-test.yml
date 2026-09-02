@@ -312,10 +312,33 @@ jobs:
       # descriptor that has drifted from reality is worse than no descriptor:
       # it attracts runs the bench cannot serve, and the failure shows up an
       # hour later looking like a firmware bug.
+      # The bench's DAC80504s wedge -- five separate times in one day -- and the
+      # cure is always the same escalating ritual: restart the broker, and if that
+      # is not enough, power-on-reset the rails and rebuild CAN behind them. Doing
+      # that by hand meant a red verdict on a PR whose firmware was fine, so do it
+      # here instead and only fail if the bench is genuinely unfit.
+      #
+      # `bench recover` takes the bench lock itself: level 2 cycles the rails, and
+      # doing that while another run is mid-flash is the interrupted write that
+      # leaves an H7 unrecoverable (F-077).
       - name: Preflight — bench matches its descriptor
         id: preflight
-        continue-on-error: ${{ inputs.allow_degraded }}
-        run: python3 -m tools.bench verify --bench "$HIL_BENCH"
+        continue-on-error: ${{{{ inputs.allow_degraded }}}}
+        run: |
+          for lvl in 0 1 2; do
+            if [ "$lvl" != 0 ]; then
+              echo "::warning::preflight failed — attempting recovery level $lvl"
+              python3 -m tools.bench recover --bench "$HIL_BENCH" --level "$lvl" || true
+            fi
+            if python3 -m tools.bench verify --bench "$HIL_BENCH"; then
+              if [ "$lvl" != 0 ]; then
+                echo "::warning::bench needed recovery level $lvl before it matched its descriptor"
+              fi
+              exit 0
+            fi
+          done
+          echo "::error::bench still does not match its descriptor after recovery — it needs a human"
+          exit 1
 
       - name: Record what is under test
         run: |
