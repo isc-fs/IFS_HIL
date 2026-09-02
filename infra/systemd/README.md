@@ -89,6 +89,39 @@ pkill -f dashboard/app.py
 sudo systemctl restart hil-dashboard.service
 ```
 
+## `hil-bench-watchdog.service` + `.timer`
+
+Verifies the bench against its descriptor every 5 minutes and recovers it
+if it has drifted. Install BOTH — the service alone never fires.
+
+HIL runs are unattended. bench-01's DAC80504s stop answering their device
+id often enough (five times in one day, IFS_HIL#124) that waiting for a
+human to notice is not a plan, and `hil-test.yml`'s preflight only
+recovers when a run happens to start — too late for the developer who
+triggered it, and never for an idle bench.
+
+The recovery ladder is `tools/bench.py recover`: level 1 restarts the
+broker (~6 s, often enough), level 2 power-on-resets the rails and rebuilds
+CAN behind them (~27 s). It stops at the first rung that works.
+
+**It never acts on a busy bench.** The lock is taken non-blocking, so a run
+mid-flash or mid-suite is left strictly alone — level 2 cycles the rails,
+and doing that during a flash is the interrupted write that leaves an H7
+unrecoverable (F-077). Waiting for the lock would be just as wrong: the
+watchdog would queue behind a 90-minute soak and then fire into the next
+run.
+
+Runs `--verbose`, so the journal records healthy checks too. That baseline
+is the point: a bench recovering on *every* cycle is a worsening fault, and
+that is only visible against a run of quiet passes.
+
+```sh
+sudo cp hil-bench-watchdog.service hil-bench-watchdog.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now hil-bench-watchdog.timer
+journalctl -u hil-bench-watchdog -f
+```
+
 ## `hil-agent.service` — NOT installed
 
 Shipped here but deliberately **not** part of a bench build, which is why

@@ -506,6 +506,78 @@ def cmd_recover(args):
     return 0
 
 
+def _verify_quiet(bench_id):
+    """True if the bench currently matches its descriptor."""
+    import io, contextlib
+    ns = argparse.Namespace(bench=bench_id)
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            rc = cmd_verify(ns)
+    except SystemExit as e:
+        rc = e.code or 0
+    except Exception:
+        return False, buf.getvalue()
+    return rc == 0, buf.getvalue()
+
+
+def cmd_watchdog(args):
+    """Keep the bench fit without anyone watching.
+
+    These runs are unattended: a bench that wedges at 02:00 stays wedged until
+    somebody notices, and the DAC80504s wedge often enough that "somebody
+    notices" is not a plan. Run this from a systemd timer.
+
+    It takes the bench lock NON-BLOCKING and gives up immediately if it cannot.
+    A run holding the lock is mid-flash or mid-suite, and level 2 recovery
+    power-cycles the rails -- doing that during a flash is the interrupted
+    write that leaves an H7 unrecoverable (F-077). Waiting would be just as
+    wrong: the watchdog would queue behind a 90-minute soak and fire into the
+    next run.
+    """
+    import fcntl
+    bench_id = args.bench or os.environ.get("HIL_BENCH")
+    if not bench_id:
+        benches = load_descriptors()
+        if len(benches) == 1:
+            bench_id = next(iter(benches))
+        else:
+            sys.exit("several benches are described; pass --bench or set $HIL_BENCH")
+
+    ok, _ = _verify_quiet(bench_id)
+    if ok:
+        if args.verbose:
+            print(f"{bench_id}: healthy")
+        return 0
+
+    with open(BENCH_LOCK, "w") as lk:
+        try:
+            fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            # Someone is flashing or testing. Their preflight owns recovery.
+            print(f"{bench_id}: unhealthy, but the bench is busy — leaving it alone")
+            return 0
+
+        # Re-check under the lock: the run that just finished may have fixed it,
+        # and a needless rail cycle disturbs every carrier on the bench.
+        ok, out = _verify_quiet(bench_id)
+        if ok:
+            print(f"{bench_id}: recovered on its own before we intervened")
+            return 0
+
+        print(f"{bench_id}: FAILS its descriptor — recovering")
+        print(out.rstrip())
+        for level in (1, 2):
+            recover(level)
+            ok, out = _verify_quiet(bench_id)
+            if ok:
+                print(f"{bench_id}: healthy again after recovery level {level}")
+                return 0
+        print(f"{bench_id}: STILL unhealthy after level 2 — needs a human")
+        print(out.rstrip())
+        return 1
+
+
 def cmd_doctor(args):
     """Check this host against the documented bench build."""
     if not sys.platform.startswith("linux"):
@@ -887,6 +959,13 @@ def main():
     p.add_argument("--level", type=int, default=2,
                    help="1 = broker restart, 2 = PSU power-on-reset + CAN + broker")
     p.set_defaults(func=cmd_recover)
+
+    p = sub.add_parser("watchdog",
+                       help="verify, and recover if needed; skips if the bench is busy")
+    p.add_argument("--bench")
+    p.add_argument("--verbose", action="store_true",
+                   help="also log when the bench is healthy")
+    p.set_defaults(func=cmd_watchdog)
 
     p = sub.add_parser("describe", help="probe the live bench")
     p.add_argument("--deep", action="store_true",
