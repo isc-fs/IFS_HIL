@@ -163,7 +163,16 @@ def ams_firmware_bin(ams_profile) -> Path:
     """Path to the AMS app .bin built with `-DAMS_BMS_HIL_STUB=1`.
     Default `/tmp/AMS.bin`; override with `AMS_FIRMWARE_BIN`. Skips
     if missing so off-bench `pytest tests/` stays clean."""
-    p = Path(os.environ.get("AMS_FIRMWARE_BIN", "/tmp/AMS.bin"))
+    env = os.environ.get("AMS_FIRMWARE_BIN")
+    if not env and os.environ.get("GITHUB_ACTIONS"):
+        pytest.fail(
+            "AMS_FIRMWARE_BIN is unset in CI. A dispatched run must point the "
+            "reflash fixtures at the image under test, or A-003 flashes a stale "
+            "local binary over it and every later case reports on that. "
+            "hil-test.yml exports this right after flashing. (The AMS escaped "
+            "this only because /tmp/AMS.bin happens not to exist on bench-01, "
+            "so its A-003 skipped -- luck, not design.)")
+    p = Path(env or "/tmp/AMS.bin")
     if not p.is_file():
         pytest.skip(f"AMS firmware not found at {p} (set AMS_FIRMWARE_BIN)")
     return p
