@@ -572,7 +572,7 @@ def cmd_watchdog(args):
         # Before the ladder: recovery is what destroys the evidence.
         try:
             capture_wedge_evidence(bench_id, out.strip()[:400])
-        except Exception as e:
+        except (Exception, SystemExit) as e:
             print(f"  evidence capture failed (continuing to recover): {e}")
         for level in (1, 2):
             recover(level)
@@ -611,7 +611,12 @@ def capture_wedge_evidence(bench_id, reason, samples=6):
     }
     try:
         client = _client()
-    except Exception as e:
+    except (Exception, SystemExit) as e:
+        # SystemExit, not just Exception: _client() calls sys.exit() when the
+        # broker socket is missing, and a wedged bench is exactly when the
+        # broker may also be sick. Catching only Exception let that propagate
+        # and killed the watchdog BEFORE it could recover -- diagnosis taking
+        # down the thing it was meant to inform.
         ev["error"] = f"no broker: {e}"
         client = None
 

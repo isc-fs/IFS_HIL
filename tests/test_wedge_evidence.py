@@ -76,7 +76,11 @@ def test_a_missing_broker_is_recorded_not_raised(monkeypatch, tmp_path):
     throw, or it takes recovery down with it."""
     monkeypatch.setattr(bench, "WEDGE_LOG", str(tmp_path / "w.jsonl"))
     def boom():
-        raise RuntimeError("socket gone")
+        # The REAL failure mode: _client() calls sys.exit() when the broker
+        # socket is missing. SystemExit is a BaseException, so an `except
+        # Exception` does not catch it -- this test used to raise RuntimeError
+        # and passed against code that would have died on a real bench.
+        sys.exit("no broker socket at /run/hil-broker/broker.sock")
     monkeypatch.setattr(bench, "_client", boom)
     ev = bench.capture_wedge_evidence("bench-01", "test", samples=2)
-    assert "error" in ev and "socket gone" in ev["error"]
+    assert "error" in ev and "no broker socket" in ev["error"]
