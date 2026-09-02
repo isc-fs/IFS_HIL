@@ -107,6 +107,20 @@ routing:
     tca: 0x20
     port: 0
 
+  # ECU pedal driver: DAC1 (U12, broker idx 0) -> ECU ADC3. Recorded here so a
+  # failing DAC can say what it takes down with it -- a wedged idx 0 kills brake
+  # and APPS injection for every ECU test that uses them, and the preflight used
+  # to report only "stim-pack-current" (which is idx 3, and was healthy).
+  #
+  # NB tests/hil/vcu/vcu_profile.yaml still carries its own pedal_dac_idx /
+  # *_dac_channel copy. This is the bench-physical fact and should become the
+  # single source; the profile has not been pointed at it yet.
+  pedals:
+    dac: 0
+    brake: 0        # ch0 -> PF7  / A1 / ADC3_INP3 = S_BRAKE
+    apps1: 1        # ch1 -> PF8  / A2 / ADC3_INP7 = APPS_1
+    apps2: 2        # ch2 -> PF9  / A3 / ADC3_INP2 = APPS_2
+
   # AMS relay GPIOs PB4..PB7 tapped to bench ADC3 (broker idx 2) ch0..3.
   relay_readback:
     adc: 2

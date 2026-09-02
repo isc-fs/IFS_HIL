@@ -791,11 +791,29 @@ def cmd_verify(args):
     # capability whose hardware does not answer is worse than an absent one --
     # it silently attracts runs this bench cannot serve.
     caps = desc.get("capabilities", [])
-    if "stim-pack-current" in caps and found["dac_bad_devid"]:
-        problems.append(
-            f"stim-pack-current is declared, but DAC(s) {found['dac_bad_devid']} "
-            "do not return a valid device id — this bench cannot drive pack "
-            "current right now")
+    # A bad DAC only invalidates what rides on THAT DAC. This used to fire on
+    # any bad DAC and always blame stim-pack-current -- so when DACs 0 and 1
+    # wedged it named pack current (idx 3, healthy) and never mentioned that
+    # idx 0, the ECU's brake and APPS driver, was dead. Wrong in both
+    # directions, and the reader concludes "an AMS thing, not my problem".
+    bad_dacs = set(found["dac_bad_devid"])
+    if bad_dacs:
+        routing = desc.get("routing", {})
+        users = {}
+        for rname, spec in routing.items():
+            if isinstance(spec, dict) and "dac" in spec:
+                users.setdefault(int(spec["dac"]), set()).add(rname)
+        for idx in sorted(bad_dacs):
+            who = ", ".join(sorted(users.get(idx, ()))) or "nothing in `routing` names it"
+            problems.append(
+                f"DAC {idx} does not return a valid device id (drives: {who})")
+        pack_dacs = {int(spec["dac"]) for rname, spec in routing.items()
+                     if rname in ("pack_current", "current_heartbeat")
+                     and isinstance(spec, dict) and "dac" in spec}
+        if "stim-pack-current" in caps and (pack_dacs & bad_dacs):
+            problems.append(
+                "stim-pack-current is declared, but the DAC it routes through "
+                f"({sorted(pack_dacs & bad_dacs)}) is not answering")
     if "radio-nrf24" in caps and not found["nrf24"]:
         problems.append("radio-nrf24 is declared, but no nRF24 responds")
 
