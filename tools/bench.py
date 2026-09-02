@@ -28,6 +28,8 @@ Subcommands:
 """
 
 import argparse
+import datetime
+import pathlib
 import json
 import os
 import re
@@ -567,6 +569,11 @@ def cmd_watchdog(args):
 
         print(f"{bench_id}: FAILS its descriptor — recovering")
         print(out.rstrip())
+        # Before the ladder: recovery is what destroys the evidence.
+        try:
+            capture_wedge_evidence(bench_id, out.strip()[:400])
+        except (Exception, SystemExit) as e:
+            print(f"  evidence capture failed (continuing to recover): {e}")
         for level in (1, 2):
             recover(level)
             ok, out = _verify_quiet(bench_id)
@@ -576,6 +583,75 @@ def cmd_watchdog(args):
         print(f"{bench_id}: STILL unhealthy after level 2 — needs a human")
         print(out.rstrip())
         return 1
+
+
+WEDGE_LOG = os.environ.get(
+    "HIL_WEDGE_LOG", str(pathlib.Path.home() / "hil-wedge-evidence.jsonl"))
+
+
+def capture_wedge_evidence(bench_id, reason, samples=6):
+    """Record what a wedged bench looks like BEFORE it is recovered.
+
+    Recovery is the problem here. A rail power-on-reset is precisely what makes
+    the DACs answer again, so every automatic recovery erases the state that
+    would explain why they stopped (IFS_HIL#124). Now that the watchdog runs
+    every 5 minutes, a wedge could come and go all night leaving nothing behind.
+
+    Samples the DEVIDs repeatedly on purpose: tools/bench.py's own note says the
+    floating-low and floating-high patterns have been seen ALTERNATING between
+    reads, and a single sample cannot show that. Appends JSONL so episodes
+    accumulate instead of overwriting each other.
+    """
+    ev = {
+        "when": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "bench": bench_id,
+        "reason": reason,
+        "dac_devid_samples": [],
+        "expected_devid": f"0x{DAC_DEVID_EXPECTED:04X}",
+    }
+    try:
+        client = _client()
+    except (Exception, SystemExit) as e:
+        # SystemExit, not just Exception: _client() calls sys.exit() when the
+        # broker socket is missing, and a wedged bench is exactly when the
+        # broker may also be sick. Catching only Exception let that propagate
+        # and killed the watchdog BEFORE it could recover -- diagnosis taking
+        # down the thing it was meant to inform.
+        ev["error"] = f"no broker: {e}"
+        client = None
+
+    if client is not None:
+        for _ in range(samples):
+            row = {}
+            for idx in DAC_CANDIDATES:
+                v = _try(client, "dac.read_device_id", idx=idx)
+                row[str(idx)] = None if v is None else f"0x{v:04X}"
+            ev["dac_devid_samples"].append(row)
+            time.sleep(0.15)
+        # The rail's own opinion of itself. `pwr_ok` low means the DACs are not
+        # being starved by something subtle -- they are simply unpowered, which
+        # would settle IFS_HIL#124 in one reading.
+        ev["psu"] = _try(client, "psu.status")
+
+    r = subprocess.run("ip -brief link show 2>/dev/null | grep -E '^can'",
+                       shell=True, capture_output=True, text=True)
+    ev["can_links"] = r.stdout.strip().splitlines()
+
+    try:
+        with open(WEDGE_LOG, "a") as f:
+            f.write(json.dumps(ev) + "\n")
+        print(f"  wedge evidence appended to {WEDGE_LOG}")
+    except Exception as e:
+        print(f"  could not write wedge evidence: {e}")
+
+    # Journal too, so it is visible without knowing the file exists.
+    uniq = {tuple(sorted(row.items())) for row in ev["dac_devid_samples"]}
+    print(f"  DEVID samples ({len(ev['dac_devid_samples'])} reads, "
+          f"{len(uniq)} distinct): {ev['dac_devid_samples'][:3]}")
+    if len(uniq) > 1:
+        print("  NOTE: DEVIDs differ between reads — the line is not stable, "
+              "which argues for an undriven MISO rather than a fixed wrong value")
+    return ev
 
 
 def cmd_doctor(args):
