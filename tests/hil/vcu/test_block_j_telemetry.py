@@ -12,6 +12,12 @@ the gated pit-diag stream.
 """
 from __future__ import annotations
 
+# ecu_config.hpp::MotorPolePairs -- EMRAX 228 MV, powertrain-confirmed. The
+# inverter reports ELECTRICAL rpm on 0x463; the ECU divides by this to publish
+# MECHANICAL rpm on 0x702 (pit_diag_inverter.def: "builder converts, erpm /
+# MotorPolePairs(10)"). Keep in step with the firmware.
+POLE_PAIRS = 10
+
 import time
 
 import pytest
@@ -30,16 +36,26 @@ def _last_decoded(observe_acu, can_id, decoder, timeout_s=1.5):
 
 
 class TestJ001RpmDecode:
-    @pytest.mark.parametrize("rpm", [0, 3500, 12000, -4200])
+    # Parametrised in MECHANICAL rpm -- the quantity anyone reading this cares
+    # about, and what 0x702 publishes. The injected 0x463 value is the electrical
+    # equivalent. This used to parametrise the raw 0x463 value and assert a 1:1
+    # match, so it failed by exactly 10x on every non-zero case.
+    #
+    # 12000 was dropped: as a mechanical speed it is over twice the EMRAX 228's
+    # ~5500 rpm ceiling (ecu_config.hpp::MotorRpmStaleAssumed), so it was never a
+    # physical case. 5000 exercises the top of the real range instead.
+    @pytest.mark.parametrize("mech_rpm", [0, 3500, 5000, -4200])
     def test_j001_inverter_rpm_mirrors_to_pitdiag(self, fresh_boot, inv_heartbeat,
-                                                  pit_diag, observe_acu, rpm):
-        """J-001: inject 0x463 EMachine_Speed_erpm -> 0x702.inv_rpm matches (signed)."""
-        inv_heartbeat["set_rpm"](rpm)
+                                                  pit_diag, observe_acu, mech_rpm):
+        """J-001: inject 0x463 EMachine_Speed_erpm -> 0x702.inv_rpm is that
+        speed divided by the pole-pair count, i.e. mechanical rpm (signed)."""
+        inv_heartbeat["set_rpm"](mech_rpm * POLE_PAIRS)
         time.sleep(0.4)   # let a fresh 0x702 (100 ms cadence) carry the new value
         dec = _last_decoded(observe_acu, M.ID_PIT_INVERTER, M.decode_pit_inverter)
         assert dec is not None, "no 0x702 pit-diag inverter frame (is pit-diag enabled?)"
-        assert dec["inv_rpm"] == rpm, \
-            f"0x702 inv_rpm {dec['inv_rpm']} != injected 0x463 rpm {rpm}"
+        assert dec["inv_rpm"] == mech_rpm, \
+            (f"0x702 inv_rpm {dec['inv_rpm']} != {mech_rpm} mechanical "
+             f"(injected {mech_rpm * POLE_PAIRS} eRPM / {POLE_PAIRS} pole pairs)")
 
 
 class TestJ002TempsDecode:
