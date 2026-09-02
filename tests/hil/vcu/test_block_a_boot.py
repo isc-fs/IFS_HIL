@@ -117,8 +117,27 @@ class TestA001CarrierPower:
 
 @pytest.fixture(scope="session")
 def ecu_firmware_bin():
-    p = Path(os.environ.get("ECU_FIRMWARE_BIN",
-                            os.path.expanduser("~/firmware-builds/ECU_fix.bin")))
+    """Path to the ECU app .bin that A-003 reflashes.
+
+    A-003 REFLASHES the carrier from this path, so it must be the image under
+    test. When the variable was unset it fell back to a hardcoded local file --
+    and on bench-01 the ECU fallback (~/firmware-builds/ECU_fix.bin, a
+    2026-06-21 diagnostic build) EXISTS. A dispatched run therefore flashed the
+    PR firmware, then A-003 quietly flashed the June binary over it at 7 %, and
+    the remaining 56 cases reported on that instead. A-003 passed while doing
+    it: it only asserts the flash succeeded and 0x100 came back.
+
+    Under CI the fallback is now a hard failure -- a dispatched run must be told
+    which image it is testing. Local runs keep the convenience path.
+    """
+    env = os.environ.get("ECU_FIRMWARE_BIN")
+    if not env and os.environ.get("GITHUB_ACTIONS"):
+        pytest.fail(
+            "ECU_FIRMWARE_BIN is unset in CI. A dispatched run must point the "
+            "reflash fixtures at the image under test, or A-003 flashes a stale "
+            "local binary over it and every later case reports on that. "
+            "hil-test.yml exports this right after flashing.")
+    p = Path(env or os.path.expanduser("~/firmware-builds/ECU_fix.bin"))
     if not p.is_file():
         pytest.skip(f"ECU firmware .bin not found at {p} (set ECU_FIRMWARE_BIN)")
     return p

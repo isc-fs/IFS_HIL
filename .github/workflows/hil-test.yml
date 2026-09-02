@@ -454,6 +454,23 @@ jobs:
               # carrier and nothing else.
               python3 -m tools.flash_dut --dut "$DUT" --bin "$FW_IMAGE" --bench "$HIL_BENCH" --expect-sha256 "$FW_SHA256" --out artifacts/flash.json
               echo "::endgroup::"
+
+              # Point the suite'"'"'s OWN reflash fixtures at the image we just
+              # flashed. tests/hil/<dut>/test_block_a_boot.py has an A-003
+              # "flash and jump" case that reflashes from
+              # ECU_FIRMWARE_BIN / AMS_FIRMWARE_BIN, and those fall back to a
+              # hardcoded path when unset. On bench-01 the ECU fallback
+              # (~/firmware-builds/ECU_fix.bin, a 2026-06-21 diagnostic build)
+              # EXISTS, so A-003 silently flashed it over the firmware under
+              # test at 7 % and the remaining 56 cases judged that binary
+              # instead of the PR. It passed while doing it. Absolute path:
+              # pytest may run from elsewhere, and the artifact path is relative.
+              FW_ABS="$(readlink -f "$FW_IMAGE")"
+              case "$DUT" in
+                ecu) export ECU_FIRMWARE_BIN="$FW_ABS" ;;
+                ams) export AMS_FIRMWARE_BIN="$FW_ABS" ;;
+              esac
+              echo "suite reflash fixtures pinned to $FW_ABS"
             elif [ -n "${WANTED_FW:-}" ]; then
               # Firmware WAS under test but no image reached the bench. Running
               # the suite now would judge whatever the carrier happens to hold
