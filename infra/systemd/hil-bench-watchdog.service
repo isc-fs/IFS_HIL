@@ -1,0 +1,32 @@
+[Unit]
+# Keep the bench fit with nobody watching.
+#
+# HIL runs are unattended: a bench that wedges at 02:00 stays wedged until
+# somebody notices, and bench-01's DAC80504s wedge often enough (five times in
+# one day, IFS_HIL#124) that "somebody notices" is not a plan. hil-test.yml's
+# preflight also recovers, but only when a run happens to start -- which is too
+# late for the developer whose PR triggered it, and never for a bench sitting
+# idle.
+#
+# Ordered after the broker because recovery drives the PSU through it.
+Description=HIL bench self-check and recovery
+After=hil-broker.service
+Wants=hil-broker.service
+
+[Service]
+Type=oneshot
+User=isc
+WorkingDirectory=/home/isc/IFS_HIL
+Environment=PYTHONUNBUFFERED=1
+# --verbose so the journal shows the healthy checks too: a bench that recovers
+# on every single cycle is a worsening fault, and that is only visible against
+# a baseline of quiet passes.
+ExecStart=/usr/bin/python3 -m tools.bench watchdog --verbose
+
+# Recovery needs sudo for systemctl/modprobe; the runner user has NOPASSWD.
+# Nothing here should ever hang: the lock is taken non-blocking and the whole
+# ladder is ~35 s, so anything past a minute is stuck.
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target

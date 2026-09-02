@@ -227,7 +227,7 @@ fi
 
 # ---- 7. systemd units ---------------------------------------------------
 step "7. systemd units (enabled, not started — they need the reboot)"
-UNITS="hil-psu-on hil-can-up hil-broker hil-dashboard"
+UNITS="hil-psu-on hil-can-up hil-broker hil-dashboard hil-bench-watchdog"
 NEED_RELOAD=0
 for u in $UNITS; do
     if [ -f "/etc/systemd/system/$u.service" ] \
@@ -244,7 +244,25 @@ for u in $UNITS; do
     fi
 done
 # hil-agent.service is intentionally not installed — see infra/systemd/README.md
+
+# The watchdog is driven by a TIMER, not by the service being enabled. Without
+# this the unit sits installed and never fires, which looks identical to a bench
+# that simply never wedges.
+if [ -f "/etc/systemd/system/hil-bench-watchdog.timer" ] \
+   && cmp -s "/etc/systemd/system/hil-bench-watchdog.timer" "$REPO_ROOT/infra/systemd/hil-bench-watchdog.timer"; then
+    c_ok "hil-bench-watchdog.timer installed and current"
+else
+    c_do "install hil-bench-watchdog.timer"
+    run "sudo cp '$REPO_ROOT/infra/systemd/hil-bench-watchdog.timer' /etc/systemd/system/"
+    NEED_RELOAD=1
+fi
 if [ "$NEED_RELOAD" = 1 ]; then run "sudo systemctl daemon-reload"; fi
+if [ "$(systemctl is-enabled hil-bench-watchdog.timer 2>/dev/null)" = "enabled" ]; then
+    c_ok "hil-bench-watchdog.timer enabled"
+else
+    c_do "enable hil-bench-watchdog.timer"
+    run "sudo systemctl enable hil-bench-watchdog.timer >/dev/null 2>&1"
+fi
 for u in $UNITS; do
     if [ "$(systemctl is-enabled "$u" 2>/dev/null)" = "enabled" ]; then
         c_ok "$u enabled"
