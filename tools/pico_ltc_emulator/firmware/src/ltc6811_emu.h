@@ -32,6 +32,9 @@ typedef struct {
     uint32_t n_cs_cycles;       // CS rising edges seen (= LTC transactions completed)
     uint8_t  last_rx[8];        // sliding window of last 8 raw RX bytes
     uint32_t rx_byte_count;     // monotonic byte counter (NOT reset by RESET_STATE)
+    uint32_t n_tx_stall_cmd;    // xacts whose 4-byte cmd pad ran dry before the
+                                // first data push (byte-2 parse missed its ~20 us
+                                // budget). Expected 0; non-zero = corrupt MISO.
 } ltc_stats_t;
 
 extern ltc_stats_t g_ltc_stats;

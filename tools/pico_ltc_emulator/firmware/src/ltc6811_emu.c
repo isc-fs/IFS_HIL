@@ -65,16 +65,14 @@ static int  dma_tx_chan;
 enum { RSP_RDCVA, RSP_RDCVB, RSP_RDCVC, RSP_RDCVD, RSP_RDAUXA, RSP_RDAUXB, RSP_COUNT };
 static uint8_t response_pool[RSP_COUNT][RESPONSE_LEN];
 static const uint8_t *current_response = response_pool[RSP_RDCVA];
-// Response buffer snapshotted at CS-rising (= pre-load time). chip 0's
-// 8 data bytes are BOTH pre-loaded and pumped from THIS pointer, so the
-// chip stays self-consistent (data + PEC from a single response) even
-// when the command — parsed mid-xact — swaps `current_response`. chip
-// 1..9 are pumped from the freshly parsed `current_response` and are
-// gated until the parse completes. Without this split, the pump leaked
-// the previous xact's response into chip 1's data bytes while chip 1's
-// PEC came from the new response → chip-1-only PEC failures on the
-// master (IFS_HIL#44 residual). See ltc6811_emu_service().
-static const uint8_t *preparse_response = response_pool[RSP_RDCVA];
+// chip 0 used to be pumped from a separate CS-rising snapshot
+// (`preparse_response`) so its data and PEC stayed self-consistent
+// while a mid-xact parse swapped `current_response` under it — the
+// IFS_HIL#44 chip-1 fix. That snapshot predates the command, so it
+// also made chain position 0 report the previous command's data
+// (IFS_HIL#116). The byte-2 parse decodes the opcode before ANY data
+// byte is emitted, so every chain position now reads from one
+// already-correct `current_response` and the snapshot is gone.
 static void rebuild_all_responses(void);
 
 // Per-module response-suppression mask. See header docstring for
@@ -193,6 +191,13 @@ static inline uint8_t pio_rx_get_raw(void) {
     // bits (shift_left, threshold 8 → ISR bits 0..7 hold the byte).
     return (uint8_t)(pio_sm_get(PIO_INST, sm_rx) & 0xFFu);
 }
+// FDEBUG_TXSTALL bit for the TX SM. Sticky: set when the SM stalls on
+// an empty TX FIFO, cleared by writing a 1 back. Used to tell whether
+// the 4-byte command-phase pad ever runs dry before the CPU's first
+// data push -- i.e. whether the ~20 us byte-2 parse budget is met.
+static inline uint32_t txstall_mask(void) {
+    return 1u << (PIO_FDEBUG_TXSTALL_LSB + sm_tx);
+}
 
 // ltc6811_emu_response_for() is defined further down, after the
 // response_pool[] static is in scope.
@@ -270,21 +275,21 @@ void ltc6811_emu_init(void) {
     sm_config_set_fifo_join(&c_rx, PIO_FIFO_JOIN_RX);
     pio_sm_init(PIO_INST, sm_rx, pio_offset_rx, &c_rx);
 
-    // Pre-load the FULL FIFO depth (8 entries) so the very first
-    // xact -- which is typically the AMS boot-discovery RDCFGA --
-    // has a complete cmd-phase + first-4-data-bytes ready without
-    // depending on CPU latency. If we only pre-loaded the 4 pad
-    // bytes and CPU push of the first data byte was late, the boot
-    // discovery's PEC would fail, ERROR would latch in BKP RAM, and
-    // the FSM would be stuck in Error for the rest of the session
-    // (until power-cycle) regardless of how well subsequent xacts
-    // worked. Build response_pool now so chip 0's first 4 data
-    // bytes are available to pre-load here.
+    // Pre-load the 4-byte command-phase pad only.
+    //
+    // The very first xact is typically the AMS boot-discovery RDCFGA,
+    // and a PEC failure there latches ERROR in BKP RAM for the rest of
+    // the session (power-cycle to clear) no matter how well later
+    // xacts go -- so this pre-load must not depend on CPU latency.
+    // Four pad bytes is exactly the length of the command phase, and
+    // the byte-2 parse in ltc6811_emu_service() then has ~20 us to
+    // push chain position 0's first data byte before the master clocks
+    // it. Earlier firmware also pre-loaded 4 data bytes here, which
+    // removed that dependency entirely but forced chip 0 to carry the
+    // PREVIOUS command's data (IFS_HIL#116).
     rebuild_all_responses();
     current_response   = response_pool[RSP_RDCVA];
-    preparse_response  = current_response;
-    for (int i = 0; i < 4; i++) pio_tx_put_raw(0xFFu);
-    for (int i = 0; i < 4; i++) pio_tx_put_raw(preparse_response[RESPONSE_PAD + i]);
+    for (int i = 0; i < RESPONSE_PAD; i++) pio_tx_put_raw(0xFFu);
 
     // Bring both SMs out of reset and let them run.
     pio_sm_set_enabled(PIO_INST, sm_tx, true);
@@ -506,6 +511,58 @@ static inline int tx_push(uint8_t b) {
 // 1-2 PIO cycles per SCK edge) so CPU service-loop latency only
 // affects how full the FIFOs stay -- not bit alignment. As long as
 // we keep TX FIFO non-empty during the data phase, MISO is correct.
+// Decode the 11-bit LTC opcode and point `current_response` at the
+// matching prebuilt buffer. Split out of the RX drain so the byte-2
+// early parse and the 4-byte fallback window share one decode.
+static void parse_ltc_cmd(uint16_t cmd, int *is_wrcomm) {
+    int is_known = 0;
+    switch (cmd) {
+        case 0x001:  // WRCFGA
+        case 0x002:  // RDCFGA
+        case 0x010:  // RDSTATA
+        case 0x012:  // RDSTATB
+        case 0x014:  // WRSCTRL
+        case 0x016:  // WRPWM
+        case 0x024:  // WRCFGB
+        case 0x026:  // RDCFGB
+        case 0x02C:  // RDSID
+        case 0x714:  // PLADC
+        case 0x721:  // WRCOMM
+            // NOTE: C fall-through means *is_wrcomm is set for every
+            // opcode in this group, not just WRCOMM (0x721). Preserved
+            // verbatim from the pre-#116 code so this refactor stays
+            // behaviour-neutral -- see the follow-up issue.
+            is_known    = 1;
+            *is_wrcomm  = 1;
+            break;
+        case 0x722:  // RDCOMM
+        case 0x723:  // STCOMM
+            is_known = 1; break;
+        case 0x004:  // RDCVA
+            is_known = 1; current_response = response_pool[RSP_RDCVA];  break;
+        case 0x006:  // RDCVB
+            is_known = 1; current_response = response_pool[RSP_RDCVB];  break;
+        case 0x008:  // RDCVC
+            is_known = 1; current_response = response_pool[RSP_RDCVC];  break;
+        case 0x00A:  // RDCVD
+            is_known = 1; current_response = response_pool[RSP_RDCVD];  break;
+        case 0x00C:  // RDAUXA
+            is_known = 1; current_response = response_pool[RSP_RDAUXA]; break;
+        case 0x00E:  // RDAUXB
+            is_known = 1; current_response = response_pool[RSP_RDAUXB]; break;
+        default:
+            if ((cmd & 0x7C0u) == 0x260u || (cmd & 0x7C0u) == 0x340u) is_known = 1;
+            if ((cmd & 0x7C0u) == 0x460u || (cmd & 0x7C0u) == 0x540u) is_known = 1;
+            break;
+    }
+    if (is_known) {
+        g_ltc_stats.last_ltc_cmd = cmd;
+        g_ltc_stats.n_valid_cmds++;
+    }
+    tx_snap_cmd_recorded = cmd;
+}
+
+
 void ltc6811_emu_service(void) {
     static uint8_t  rx_buf[4];
     static uint8_t  rx_idx              = 0;
@@ -518,7 +575,6 @@ void ltc6811_emu_service(void) {
     if (!response_init_done) {
         rebuild_all_responses();
         current_response   = response_pool[RSP_RDCVA];
-        preparse_response  = current_response;
         response_init_done = 1;
     }
 
@@ -568,40 +624,30 @@ void ltc6811_emu_service(void) {
         pio_sm_exec(PIO_INST, sm_rx,
                     pio_encode_jmp(pio_offset_rx + spi_slave_rx_offset_restart));
 
-        // Pre-load the FULL FIFO depth (8 entries = 8 bytes) at
-        // CS-rising so the cmd-phase + first 4 data bytes are
-        // guaranteed in flight before master clocks them, no
-        // dependency on CPU latency for the cmd→data boundary.
-        //   bytes 0..3  = 0xFF pad (master ignores during cmd phase)
-        //   bytes 4..7  = first 4 bytes of current_response data
-        //                 section (= chip 0's first 4 data bytes)
-        // For uniform-cell test setups all RDCV* groups have
-        // identical chip-0 bytes, so the pre-load is correct
-        // regardless of which RDCV cmd actually comes. For non-
-        // uniform cells, chip 0's first 4 bytes may be wrong if cmd
-        // != current_response -- handled later by cmd-parse swap.
+        // Pre-load ONLY the 4-byte command-phase pad at CS-rising.
         //
-        // Snapshot the response we're committing chip 0 to NOW. The
-        // command for THIS xact isn't known yet (master hasn't clocked
-        // it in), so chip 0's 8 bytes are necessarily built from the
-        // previous xact's response. We pump the rest of chip 0 from the
-        // same snapshot (see the data pump below) so chip 0 stays
-        // self-consistent — data + PEC from one response, PEC-valid on
-        // the master even when it's a poll stale. chip 1..9 wait for the
-        // real command and use `current_response`.
-        preparse_response = current_response;
+        // Older firmware also pre-loaded chain position 0's first four
+        // data bytes here, filling all 8 FIFO entries. That was safe
+        // for the FIFO but structurally wrong: at CS-rising the
+        // command for the NEXT xact has not been clocked in yet, so
+        // chip 0 was necessarily built from the PREVIOUS xact's
+        // response (IFS_HIL#116).
+        //
+        // The pad is exactly as long as the command phase, so the CPU
+        // now supplies every data byte, gated on the byte-2 parse in
+        // the RX drain below. Budget: opcode complete at ~20 us, chip
+        // 0's first data byte clocked at ~41 us, and during CS-low the
+        // main loop runs nothing but ltc6811_emu_service().
         for (int i = 0; i < RESPONSE_PAD; i++) pio_tx_put_raw(0xFFu);
-        // Pre-load of chip 0's first 4 data bytes -- these belong to
-        // chain position 0 (= module 0), so route through the same
-        // suppress filter as the main pump or a STOP_REPLY on module 0
-        // would still leak real data through the pre-load window.
-        for (int i = 0; i < 4; i++) {
-            pio_tx_put_raw(maybe_suppress_data(
-                preparse_response[RESPONSE_PAD + i], i));
-        }
+
+        // TXSTALL is sticky. Clear it here -- CS is HIGH and the TX SM
+        // was just restarted onto `wait 0 pin 1`, so it runs no `out`
+        // until the next CS-fall -- and the flag read during the data
+        // phase then reflects only the next xact's command phase.
+        PIO_INST->fdebug = txstall_mask();
 
         rx_idx               = 0;
-        tx_data_idx          = 4;   // start CPU push at byte 4 (we pre-loaded 0..3)
+        tx_data_idx          = 0;   // CPU now pushes every data byte
         cmd_parsed_this_xact = 0;
         is_wrcomm_xact       = 0;
         g_ltc_stats.n_cs_cycles++;
@@ -609,34 +655,33 @@ void ltc6811_emu_service(void) {
     cs_was_low = !cs_now;
 
     if (!cs_now) {
-        // Pump data bytes into the TX FIFO, choosing the source per
-        // chain position so a mid-xact command swap can't split a
-        // single chip across two responses (the IFS_HIL#44 chip-1
-        // residual):
-        //   - chip 0 (data idx 0..7): always `preparse_response` (the
-        //     pre-load-time snapshot). chip 0's first 4 bytes were
-        //     already pre-loaded from it; completing chip 0 from the
-        //     same buffer keeps data + PEC consistent → PEC-valid even
-        //     if it's one poll stale.
-        //   - chip 1..9 (data idx >= 8): `current_response`, but ONLY
-        //     once the command has been parsed. Before the parse the
-        //     real command is unknown, so we must NOT emit chip 1+ data
-        //     yet — break and let the FIFO ride on the pre-loaded chip-0
-        //     bytes (≈82 µs of headroom; the 4-byte command finishes
-        //     at ≈41 µs, so chip 1's first byte, clocked at ≈123 µs,
-        //     is always covered by the parsed response).
+        // Pump data bytes into the TX FIFO. Nothing may be emitted
+        // until the command is known -- chain position 0 included.
+        //
+        // Previously chip 0 (data idx 0..7) was exempted from this
+        // gate and served from `preparse_response`, a snapshot taken
+        // at CS-rising before the command existed. That made chain
+        // position 0 report the PREVIOUS command's data: with AMS's
+        // real mix (RDAUXA 2000 : each RDCV 375) module 0's cell
+        // voltages tracked the NTC curve (IFS_HIL#116). The byte-2
+        // parse above removes the need for the exemption, so chip 0
+        // and chips 1..9 now share one gate and one buffer -- data
+        // and PEC are self-consistent by construction.
         while (pio_tx_writable() &&
                tx_data_idx < (RESPONSE_LEN - RESPONSE_PAD)) {
-            const uint8_t *src;
-            if (tx_data_idx < 8) {
-                src = preparse_response;
-            } else if (cmd_parsed_this_xact) {
-                src = current_response;
-            } else {
-                break;  // chip 1+ gated until the command is known
+            if (!cmd_parsed_this_xact) {
+                break;  // all chain positions gated until cmd is known
+            }
+            if (tx_data_idx == 0 && (PIO_INST->fdebug & txstall_mask())) {
+                // The 4-byte pad ran dry before we got here, so MISO
+                // was undriven for part of the command phase and the
+                // frame is already out of alignment. Nothing to undo
+                // -- count it so the bench can see whether the ~20 us
+                // parse budget is ever actually missed.
+                g_ltc_stats.n_tx_stall_cmd++;
             }
             uint8_t b = maybe_suppress_data(
-                src[RESPONSE_PAD + tx_data_idx], tx_data_idx);
+                current_response[RESPONSE_PAD + tx_data_idx], tx_data_idx);
             if (!tx_push(b)) break;
             tx_data_idx++;
         }
@@ -688,6 +733,27 @@ void ltc6811_emu_service(void) {
             }
         }
         rx_buf[rx_idx++] = b;
+
+        // Early command decode (IFS_HIL#116).
+        //
+        // The 11-bit opcode is complete in bytes 0..1; bytes 2..3 are
+        // only its PEC. Decoding here instead of waiting for the full
+        // 4-byte window buys two byte-times -- ~20 us at the AMS's
+        // ~780 kHz SCK -- before the master clocks chain position 0's
+        // first data byte at ~41 us. That is the entire reason chip 0
+        // can now be served from THIS xact's response instead of the
+        // previous one.
+        //
+        // Latency is bounded by the RX FIFO, not by the CPU: these
+        // command bytes sit in the 8-deep RX FIFO until drained, so
+        // even a service call delayed to ~35 us reads the correct
+        // opcode and still beats the data phase.
+        if (rx_idx == 2 && !cmd_parsed_this_xact) {
+            parse_ltc_cmd((uint16_t)(((rx_buf[0] & 0x07u) << 8) | rx_buf[1]),
+                          &is_wrcomm_xact);
+            cmd_parsed_this_xact = 1;
+        }
+
         if (rx_idx < 4) continue;
         rx_idx = 0;
 
@@ -697,47 +763,11 @@ void ltc6811_emu_service(void) {
         g_ltc_stats.last_cmd = cmd;
 
         if (!cmd_parsed_this_xact) {
-            int is_known = 0;
-            switch (cmd) {
-                case 0x001:  // WRCFGA
-                case 0x002:  // RDCFGA
-                case 0x010:  // RDSTATA
-                case 0x012:  // RDSTATB
-                case 0x014:  // WRSCTRL
-                case 0x016:  // WRPWM
-                case 0x024:  // WRCFGB
-                case 0x026:  // RDCFGB
-                case 0x02C:  // RDSID
-                case 0x714:  // PLADC
-                case 0x721:  // WRCOMM
-                    is_known = 1;
-                    is_wrcomm_xact = 1;
-                    break;
-                case 0x722:  // RDCOMM
-                case 0x723:  // STCOMM
-                    is_known = 1; break;
-                case 0x004:  // RDCVA
-                    is_known = 1; current_response = response_pool[RSP_RDCVA];  break;
-                case 0x006:  // RDCVB
-                    is_known = 1; current_response = response_pool[RSP_RDCVB];  break;
-                case 0x008:  // RDCVC
-                    is_known = 1; current_response = response_pool[RSP_RDCVC];  break;
-                case 0x00A:  // RDCVD
-                    is_known = 1; current_response = response_pool[RSP_RDCVD];  break;
-                case 0x00C:  // RDAUXA
-                    is_known = 1; current_response = response_pool[RSP_RDAUXA]; break;
-                case 0x00E:  // RDAUXB
-                    is_known = 1; current_response = response_pool[RSP_RDAUXB]; break;
-                default:
-                    if ((cmd & 0x7C0u) == 0x260u || (cmd & 0x7C0u) == 0x340u) is_known = 1;
-                    if ((cmd & 0x7C0u) == 0x460u || (cmd & 0x7C0u) == 0x540u) is_known = 1;
-                    break;
-            }
-            if (is_known) {
-                g_ltc_stats.last_ltc_cmd = cmd;
-                g_ltc_stats.n_valid_cmds++;
-            }
-            tx_snap_cmd_recorded = cmd;
+            // Late path. Normally unreachable: the byte-2 parse above
+            // has already decoded this xact. Kept so a malformed or
+            // truncated command phase still resolves on the 4-byte
+            // window rather than leaving the xact undecoded.
+            parse_ltc_cmd(cmd, &is_wrcomm_xact);
             cmd_parsed_this_xact = 1;
         }
     }
