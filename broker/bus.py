@@ -13,11 +13,15 @@ or /dev/gpiochip0 on the bench once Phase 2 is complete.
 
 from __future__ import annotations
 
+import logging
+
 import threading
 import time
 from typing import Protocol
 
 from tools import hw_config as CFG
+
+log = logging.getLogger("hil-broker")
 
 
 class HardwareBackend(Protocol):
@@ -114,9 +118,16 @@ class HardwareManager:
         # mcp2515-triple dtoverlay. Don't grab them here.
         cs_pins = [
             CFG.CS_ADC1, CFG.CS_ADC2, CFG.CS_ADC3,
-            CFG.CS_DAC1, CFG.CS_DAC2, CFG.CS_DAC3, CFG.CS_DAC4,
             CFG.NRF24_CS,
         ]
+        # The DAC chip-selects are claimed here ONLY on a bench whose overlay
+        # has not yet moved them to cs-gpios. Where the kernel owns them,
+        # grabbing the same GPIOs from userspace fights the SPI core for the
+        # line -- the very coupling this change removes.
+        import os as _os
+        if not all(_os.path.exists(f"/dev/spidev{CFG.SPI_BUS}.{d}")
+                   for d in (4, 5, 6, 7)):
+            cs_pins += [CFG.CS_DAC1, CFG.CS_DAC2, CFG.CS_DAC3, CFG.CS_DAC4]
         for pin in cs_pins + [CFG.NRF24_CE]:
             GPIO.setup(pin, GPIO.OUT)
             GPIO.output(pin, GPIO.HIGH)
@@ -178,16 +189,56 @@ class HardwareManager:
     # Lazy DAC initialisation (requires PSU on)
     # ------------------------------------------------------------------
 
+    # Per-DAC spi_devices from mcp2515-triple.dts. Present only on a bench
+    # whose overlay carries the cs-gpios change.
+    _DAC_SPIDEV = (4, 5, 6, 7)
+
+    def _open_dacs(self) -> list:
+        """One spi_device per DAC when the overlay provides them.
+
+        With cs-gpios the SPI core asserts CS as part of the message, under the
+        controller lock. The legacy path shares spidev0.3 and toggles CS from
+        userspace, which races the kernel mcp251x driver on the same
+        controller: between the GPIO write and the transfer, an MCP2515 message
+        can clock the bus while a DAC is already selected. Measured under CAN
+        load as DEVID 0x082E -- 0x0417 shifted one bit -- and, less often, a
+        latch only a rail power-cycle clears (IFS_HIL#124).
+
+        Falls back rather than failing: a bench running the older overlay
+        should still come up, just with the race.
+        """
+        import os
+        paths = [f"/dev/spidev{CFG.SPI_BUS}.{d}" for d in self._DAC_SPIDEV]
+        missing = [p for p in paths if not os.path.exists(p)]
+        if missing:
+            log.warning(
+                "per-DAC spidev nodes missing (%s) — falling back to shared "
+                "spidev%d.%d with userspace CS. That path races the kernel "
+                "mcp251x driver (IFS_HIL#124); reboot with the updated "
+                "mcp2515-triple overlay to fix it.",
+                ", ".join(missing), CFG.SPI_BUS, CFG.SPI_DEVICE)
+            return [self._DAC80504(self._spi, CFG.CS_DAC1),
+                    self._DAC80504(self._spi, CFG.CS_DAC2),
+                    self._DAC80504(self._spi, CFG.CS_DAC3),
+                    self._DAC80504(self._spi, CFG.CS_DAC4)]
+
+        dacs = []
+        for dev in self._DAC_SPIDEV:
+            h = spidev.SpiDev()
+            h.open(CFG.SPI_BUS, dev)
+            h.max_speed_hz = CFG.SPI_MAX_HZ
+            # No mode set here on purpose: spi-cpha in the overlay makes this
+            # device mode 1, and the SPI core programs it per message.
+            dacs.append(self._DAC80504(h, None))
+        log.info("DACs on per-device spidev %s — CS owned by the kernel",
+                 ", ".join(paths))
+        return dacs
+
     def _ensure_dacs(self) -> list:
         if self._dacs is None:
             with self._spi_lock:
                 if self._dacs is None:
-                    self._dacs = [
-                        self._DAC80504(self._spi, CFG.CS_DAC1),
-                        self._DAC80504(self._spi, CFG.CS_DAC2),
-                        self._DAC80504(self._spi, CFG.CS_DAC3),
-                        self._DAC80504(self._spi, CFG.CS_DAC4),
-                    ]
+                    self._dacs = self._open_dacs()
         return self._dacs
 
     # ------------------------------------------------------------------
