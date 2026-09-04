@@ -118,9 +118,18 @@
              *         less often, a persistent latch only a rail power-cycle clears
              *         (IFS_HIL#124). With CS declared here the SPI core asserts it
              *         as part of the message, under the controller lock, and the
+                        *   8..10: MCP3208 ADCs on GPIO19/20/21 (J2 pads 35/38/40), and
+                        *   11:    the nRF24 on GPIO26 (J2 pad 37). Same reasoning as the
+                        *          DACs: they used the shared spidev0.3 with userspace CS,
+                        *          so they carried the identical race. Nothing had gone
+                        *          wrong on them yet, but the mechanism does not care which
+                        *          device is selected when a stray MCP2515 message clocks
+                        *          the bus. The nRF24's CE and IRQ stay plain GPIO -- only
+                        *          the chip-select belongs to the SPI core.
              *         window stops existing. */
             cs-gpios = <&gpio 27 1>, <&gpio 17 1>, <&gpio 18 1>, <&gpio 16 1>,
-                       <&gpio 22 1>, <&gpio 23 1>, <&gpio 24 1>, <&gpio 25 1>;
+                       <&gpio 22 1>, <&gpio 23 1>, <&gpio 24 1>, <&gpio 25 1>,
+                       <&gpio 19 1>, <&gpio 20 1>, <&gpio 21 1>, <&gpio 26 1>;
 
             can0: mcp2515@0 {
                 reg = <0>;
@@ -220,6 +229,39 @@
                 spi-cpha;
                 status = "okay";
             };
+
+            /* MCP3208 ADCs and the nRF24. Mode 0 (CPOL=0, CPHA=0) -- no
+             * spi-cpol/spi-cpha -- which is what the shared node was set to
+             * and what both parts expect (mcp3208.py:14, nrf24l01.py). The
+             * MCP3208 tolerates 2 MHz; 1 MHz here matches SPI_MAX_HZ. */
+            spidev@8 {
+                reg = <8>;                      /* GPIO19 — J2 pad 35, ADC1 */
+                compatible = "spidev";
+                spi-max-frequency = <1000000>;
+                status = "okay";
+            };
+
+            spidev@9 {
+                reg = <9>;                      /* GPIO20 — J2 pad 38, ADC2 */
+                compatible = "spidev";
+                spi-max-frequency = <1000000>;
+                status = "okay";
+            };
+
+            spidev@a {
+                reg = <10>;                      /* GPIO21 — J2 pad 40, ADC3 */
+                compatible = "spidev";
+                spi-max-frequency = <1000000>;
+                status = "okay";
+            };
+
+            spidev@b {
+                reg = <11>;                      /* GPIO26 — J2 pad 37, nRF24 */
+                compatible = "spidev";
+                spi-max-frequency = <1000000>;
+                status = "okay";
+            };
+
 
         };
     };
