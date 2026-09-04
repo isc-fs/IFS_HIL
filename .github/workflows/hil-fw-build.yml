@@ -66,6 +66,7 @@ jobs:
       artifact: ${{ steps.pack.outputs.artifact }}
       bin_name: ${{ steps.pack.outputs.bin_name }}
       sha256:   ${{ steps.pack.outputs.sha256 }}
+      version:  ${{ steps.pack.outputs.version }}
       uploaded: ${{ steps.upload.outcome == 'success' }}
     steps:
       - name: Checkout IFS_HIL (for the recipe)
@@ -144,17 +145,25 @@ jobs:
           cp "$ELF" out/
           ( cd out && sha256sum ./* > SHA256SUMS.txt )
           SUM=$(sha256sum "out/$BIN" | cut -d' ' -f1)
+          # The semver this image will self-report. Read here, where the
+          # firmware source is checked out at the exact SHA, so the bench
+          # never needs a copy of the firmware repo to gate a release.
+          # Absent (older firmware, or a repo with no VERSION file) is not
+          # fatal -- the release-gate case skips rather than failing.
+          FW_VERSION="$(tr -d ' \t\r\n' < VERSION 2>/dev/null || true)"
           {
             echo "dut=${{ inputs.dut }}"
             echo "repo=${{ inputs.firmware_repo }}"
             echo "sha=${{ inputs.firmware_sha }}"
             echo "bin=$BIN"
             echo "sha256=$SUM"
+            echo "version=$FW_VERSION"
           } > out/build-meta.txt
           {
             echo "artifact=fw-${{ inputs.dut }}-$(echo '${{ inputs.firmware_sha }}' | cut -c1-8)"
             echo "bin_name=$BIN"
             echo "sha256=$SUM"
+            echo "version=$FW_VERSION"
           } >> "$GITHUB_OUTPUT"
           echo "built $BIN  sha256 $SUM"
 

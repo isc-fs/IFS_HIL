@@ -375,6 +375,7 @@ jobs:
             echo "FW_IMAGE=fw/${{ needs.build.outputs.bin_name }}"
             echo "FW_SHA256=${{ needs.build.outputs.sha256 }}"
             echo "FW_SOURCE=cloud-artifact"
+            echo "FW_VERSION=${{ needs.build.outputs.version }}"
           } >> "$GITHUB_ENV"
 
       # ------------------------------------------------------------------
@@ -473,6 +474,7 @@ jobs:
             echo "FW_IMAGE=$SRC/out/$BIN"
             echo "FW_SHA256=$SUM"
             echo "FW_SOURCE=bench-rebuild"
+            echo "FW_VERSION=$(tr -d ' \t\r\n' < "$SRC/VERSION" 2>/dev/null || true)"
           } >> "$GITHUB_ENV"
 
       # flock, not just the concurrency group: it also covers anyone who SSHes
@@ -521,6 +523,28 @@ jobs:
                 ams) export AMS_FIRMWARE_BIN="$FW_ABS" ;;
               esac
               echo "suite reflash fixtures pinned to $FW_ABS"
+
+              # Tell the suite WHICH firmware it is judging. The release-gate
+              # cases (AMS A-013: 0x6C6 self-reported semver + git hash) compare
+              # the running image against the source it was built from, and
+              # without these they fall back to <repo>/firmware on the bench --
+              # a checkout nothing else uses, that no step keeps current, and
+              # that CI does not even need (the artifact-quota rebuild clones
+              # into RUNNER_TEMP). On bench-01 that stale tree read v1.6.0 while
+              # the carrier ran v3.0.0, so the gate was judging a three-month-old
+              # source. The build knows the answer; carry it instead.
+              if [ -n "${FW_VERSION:-}" ]; then
+                META="$RUNNER_TEMP/fw-meta"
+                rm -rf "$META" && mkdir -p "$META"
+                printf %s "$FW_VERSION" > "$META/VERSION"
+                case "$DUT" in
+                  ecu) export ECU_SOURCE_DIR="$META" ECU_GIT_HASH="${WANTED_FW:0:8}" ;;
+                  ams) export AMS_SOURCE_DIR="$META" AMS_GIT_HASH="${WANTED_FW:0:8}" ;;
+                esac
+                echo "release gate pinned to $FW_VERSION @ ${WANTED_FW:0:8}"
+              else
+                echo "::warning::the build reported no VERSION, so release-gate cases fall back to the bench source tree"
+              fi
             elif [ -n "${WANTED_FW:-}" ]; then
               # Firmware WAS under test but no image reached the bench. Running
               # the suite now would judge whatever the carrier happens to hold
