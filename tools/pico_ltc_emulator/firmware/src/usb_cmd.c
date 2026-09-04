@@ -12,7 +12,7 @@
 
 #define LINE_MAX 96
 
-#define FW_VERSION_STR "0.5.0"   // NTC AUX from the manufacturer R-T table (IFS_HIL#117)
+#define FW_VERSION_STR "0.6.0"   // per-command stats (IFS_HIL#116)
 
 usb_cmd_stats_t g_cmd_stats;
 
@@ -164,6 +164,28 @@ static void cmd_resume_all(void) {
     emit_line("OK");
 }
 
+static void cmd_stats_cmds(void) {
+    char line[160];
+    uint8_t n = ltc6811_emu_cmd_stats_count();
+    snprintf(line, sizeof(line), "OK n=%u lost=%lu", n,
+             (unsigned long)ltc6811_emu_cmd_stats_lost());
+    emit_line(line);
+    for (uint8_t i = 0; i < n; i++) {
+        uint16_t cmd = 0, last = 0, mn = 0, mx = 0;
+        uint32_t count = 0;
+        ltc6811_emu_cmd_stats_get(i, &cmd, &count, &last, &mn, &mx);
+        snprintf(line, sizeof(line),
+                 "CMD 0x%03X count=%lu len_last=%u len_min=%u len_max=%u",
+                 cmd, (unsigned long)count, last, mn, mx);
+        emit_line(line);
+    }
+}
+
+static void cmd_stats_cmds_reset(void) {
+    ltc6811_emu_cmd_stats_reset();
+    emit_line("OK");
+}
+
 static void cmd_dump_response(int argc, char *argv[]) {
     if (argc != 2) { emit_line("ERR usage: DUMP <cmd_hex>  (e.g. DUMP 0x004)"); return; }
     int ok = 1;
@@ -252,6 +274,8 @@ static void dispatch(char *line) {
     else if (eq(argv[0], "RESET_STATE"))    cmd_reset_state();
     else if (eq(argv[0], "STOP_REPLY"))     cmd_stop_reply(argc, argv);
     else if (eq(argv[0], "RESUME_ALL"))     cmd_resume_all();
+    else if (eq(argv[0], "STATS_CMDS"))     cmd_stats_cmds();
+    else if (eq(argv[0], "STATS_CMDS_RESET")) cmd_stats_cmds_reset();
     else if (eq(argv[0], "DUMP"))           cmd_dump_response(argc, argv);
     else if (eq(argv[0], "DUMP_TX"))        cmd_dump_tx();
     else if (eq(argv[0], "DUMP_RX"))        cmd_dump_rx();
