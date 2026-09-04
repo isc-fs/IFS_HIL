@@ -79,7 +79,7 @@ def test_profile_still_carries_the_bench_independent_half():
     facts or test expectations along with the wiring."""
     from tests.hil.ams.conftest import PROFILE_PATH
     profile = yaml.safe_load(PROFILE_PATH.read_text())
-    for key in ("bl_node_id", "app_flash_address", "stub_cell_mV",
+    for key in ("bl_node_id", "fw_declared_node_id", "app_flash_address", "stub_cell_mV",
                 "boot_grace_ms", "vcu_stale_ms", "tx_telemetry_period_ms",
                 "pack_current_mv_per_a", "pack_current_accuracy_tol_pct",
                 "acu_rx_dc_bus_id", "relay_readback_digital_threshold_v"):

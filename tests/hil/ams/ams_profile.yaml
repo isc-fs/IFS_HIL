@@ -30,12 +30,29 @@ mlc_boot_settle_s:        0.5        # delay after relay close before discover
 # What the bootloader reports as Product in `can-flasher discover`.
 # A STRONGER identity gate than bl_node_id: the BL node id is provisioned
 # into flash separately from the firmware constant, and on bench-01 the AMS
-# carrier answers 0x01 while ams_config.hpp declares AmsNodeId = 0x02. The
-# product string does not drift that way.
+# carrier answers 0x01 while ams_config.hpp declares AmsNodeId = 0x02 (see
+# bl_node_id / fw_declared_node_id below). The product string does not drift
+# that way.
 bl_product:               "IFS08-CE-AMS"
 bl_trigger_id:            0x002
 bl_trigger_payload:       "B007AD11"   # AMS bootloader.hpp BlBootReqPayload
-bl_node_id:               0x01       # kAmsNodeId in ams_config.hpp (option-1 per isc-fs/IFS08-CE-AMS#123)
+# What the BOOTLOADER on this carrier answers to, and therefore what
+# can-flasher addresses: tools/flash_dut.py, the Block D flash cases and
+# A-002/A-003 all key off this. It is NOT kAmsNodeId, whatever the comment
+# here used to claim -- the BL node id is provisioned into flash separately
+# from any firmware constant, and bench-01's AMS carrier was provisioned
+# 0x01 (the ECU's id in the ECU=0x01 / AMS=0x02 / uDV=0x03 scheme) while
+# ams_config.hpp declares AmsNodeId = 0x02. Changing this to 0x02 does not
+# fix that; it just stops the bench being able to flash the AMS.
+bl_node_id:               0x01
+
+# What the FIRMWARE declares itself to be: ams_config.hpp kAmsNodeId, which
+# firmware_info.cpp stamps into `.reserved[0]` and the app re-reads to fill
+# pit-diag 0x6C6[7]. A-009 reads that field out of the .bin, A-013 reads the
+# byte off the wire, and both used to compare it against bl_node_id -- two
+# genuinely different values, so both failed the moment the firmware moved
+# to 0x02 (v2.x onward). Bench-independent: it is a firmware constant.
+fw_declared_node_id:      0x02
 bl_discover_timeout_ms:   3000       # `--timeout-ms` on `can-flasher discover`
 bl_per_frame_timeout_ms:  30000      # `--timeout` (per ISO-TP transaction)
 bl_flash_timeout_s:       60         # overall subprocess timeout for `flash`

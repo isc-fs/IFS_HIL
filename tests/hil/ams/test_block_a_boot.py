@@ -401,10 +401,15 @@ class TestA009FirmwareInfoNodeId:
         )
         rec = data[rec_offset:rec_offset + 0x40]
         reserved0 = int.from_bytes(rec[0x38:0x3C], "little")
-        expected = int(ams_profile["bl_node_id"])
+        # reserved[0] is stamped from ams_config.hpp kAmsNodeId
+        # (firmware_info.cpp: `.reserved = { ams::config::AmsNodeId, 0 }`),
+        # NOT from the node id the bootloader was provisioned with. Comparing
+        # it against bl_node_id conflated the two and failed on every build
+        # after the firmware moved to 0x02.
+        expected = int(ams_profile["fw_declared_node_id"])
         assert reserved0 == expected, (
             f"firmware_info.reserved[0] = 0x{reserved0:08X}, "
-            f"expected 0x{expected:08X}."
+            f"expected 0x{expected:08X} (ams_config.hpp kAmsNodeId)."
         )
 
 
@@ -611,11 +616,13 @@ class TestA013FirmwareInfoMatchesSource:
         assert fw_id[1] == minor, f"0x6C6[1] semver minor = {fw_id[1]}, expected {minor}"
         assert fw_id[2] == patch, f"0x6C6[2] semver patch = {fw_id[2]}, expected {patch}"
 
-        # BL node ID.
-        expected_node_id = int(ams_profile["bl_node_id"])
+        # Node id the firmware DECLARES. 0x6C6[7] is filled from
+        # firmware_info.reserved[0] = kAmsNodeId, so this gates the firmware
+        # constant -- not the id the bootloader answers to (bl_node_id).
+        expected_node_id = int(ams_profile["fw_declared_node_id"])
         assert fw_id[7] == expected_node_id, (
-            f"0x6C6[7] bl_node_id = 0x{fw_id[7]:02X}, "
-            f"expected 0x{expected_node_id:02X}")
+            f"0x6C6[7] declared node id = 0x{fw_id[7]:02X}, "
+            f"expected 0x{expected_node_id:02X} (ams_config.hpp kAmsNodeId)")
 
         # Git-hash: STRICT when an expected SHA is available (AMS #323 lets
         # the build stamp the real hash via -DGIT_HASH). Source order:
