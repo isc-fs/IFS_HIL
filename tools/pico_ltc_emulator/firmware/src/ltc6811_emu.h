@@ -80,6 +80,18 @@ const uint8_t *ltc6811_emu_last_tx_snapshot(uint16_t *out_cmd, uint16_t *out_len
 // or a parse-side bug in the slave.
 const uint8_t *ltc6811_emu_last_rx_snapshot(uint16_t *out_len);
 
+// Per-command statistics. Counts instead of sampling: the snapshots above hold
+// only the LAST transaction, so polling them cannot say which commands the
+// master issues (IFS_HIL#116). `len` is the uncapped number of bytes clocked in
+// that transaction, which distinguishes a 10-device chain read (4 + 80) from a
+// 9-device one (4 + 72).
+uint8_t  ltc6811_emu_cmd_stats_count(void);
+uint32_t ltc6811_emu_cmd_stats_lost(void);
+void     ltc6811_emu_cmd_stats_get(uint8_t i, uint16_t *cmd, uint32_t *count,
+                                   uint16_t *last_len, uint16_t *min_len,
+                                   uint16_t *max_len);
+void     ltc6811_emu_cmd_stats_reset(void);
+
 // Per-module "stop replying" mask. Bit N (0..4) set = module N's two
 // LTC chain positions (2*N, 2*N+1) get 0xFF substituted for their
 // response bytes, which fails PEC15 at the master and causes the

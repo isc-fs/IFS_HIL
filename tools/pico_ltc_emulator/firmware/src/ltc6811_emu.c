@@ -363,6 +363,67 @@ static uint16_t tx_snap_published_cmd = 0xFFFFu;
 // LTC_RESPONSE_LEN bytes the master clocked into us on MOSI.
 static uint8_t  rx_snap[RESPONSE_LEN];
 static uint16_t rx_snap_idx          = 0;
+
+// Per-command statistics. The single-buffered tx/rx snapshots cannot say WHICH
+// commands the master issues: they hold only the last transaction, and a host
+// poll costs ~50 ms over USB CDC while the AMS reads in a burst -- so the
+// survivor is always whichever command came last, and RDCVA/B/C look as though
+// they are never sent (IFS_HIL#116). Counting instead of sampling removes the
+// aliasing entirely.
+//
+// `xact_rx_count` is the UNCAPPED number of bytes clocked in this transaction.
+// rx_snap_idx saturates at RESPONSE_LEN, and SPI is full duplex, so this is the
+// true count of bytes the master clocked -- the figure needed to tell a
+// 10-device chain read (4 + 80) from a 9-device one (4 + 72).
+#define CMD_STATS_MAX 24
+typedef struct {
+    uint16_t cmd;
+    uint32_t count;
+    uint16_t last_len;
+    uint16_t min_len;
+    uint16_t max_len;
+} cmd_stat_t;
+static cmd_stat_t g_cmd_stats[CMD_STATS_MAX];
+static uint8_t    g_cmd_stats_n   = 0;
+static uint32_t   g_cmd_stats_lost = 0;   // distinct commands past CMD_STATS_MAX
+static uint16_t   xact_rx_count   = 0;
+
+static void cmd_stats_record(uint16_t cmd, uint16_t len) {
+    for (uint8_t i = 0; i < g_cmd_stats_n; i++) {
+        if (g_cmd_stats[i].cmd == cmd) {
+            g_cmd_stats[i].count++;
+            g_cmd_stats[i].last_len = len;
+            if (len < g_cmd_stats[i].min_len) g_cmd_stats[i].min_len = len;
+            if (len > g_cmd_stats[i].max_len) g_cmd_stats[i].max_len = len;
+            return;
+        }
+    }
+    if (g_cmd_stats_n < CMD_STATS_MAX) {
+        g_cmd_stats[g_cmd_stats_n] = (cmd_stat_t){ cmd, 1u, len, len, len };
+        g_cmd_stats_n++;
+    } else {
+        g_cmd_stats_lost++;
+    }
+}
+
+uint8_t ltc6811_emu_cmd_stats_count(void) { return g_cmd_stats_n; }
+uint32_t ltc6811_emu_cmd_stats_lost(void) { return g_cmd_stats_lost; }
+
+void ltc6811_emu_cmd_stats_get(uint8_t i, uint16_t *cmd, uint32_t *count,
+                               uint16_t *last_len, uint16_t *min_len,
+                               uint16_t *max_len) {
+    if (i >= g_cmd_stats_n) return;
+    if (cmd)      *cmd      = g_cmd_stats[i].cmd;
+    if (count)    *count    = g_cmd_stats[i].count;
+    if (last_len) *last_len = g_cmd_stats[i].last_len;
+    if (min_len)  *min_len  = g_cmd_stats[i].min_len;
+    if (max_len)  *max_len  = g_cmd_stats[i].max_len;
+}
+
+void ltc6811_emu_cmd_stats_reset(void) {
+    g_cmd_stats_n = 0;
+    g_cmd_stats_lost = 0;
+}
 static uint8_t  rx_snap_published[RESPONSE_LEN];
 static uint16_t rx_snap_published_len = 0;
 
@@ -476,6 +537,13 @@ void ltc6811_emu_service(void) {
             }
         }
 
+        // Transaction boundary: attribute the clocked-byte count to the
+        // command that opened it, before anything is reset.
+        if (tx_snap_cmd_recorded != 0xFFFFu) {
+            cmd_stats_record(tx_snap_cmd_recorded, xact_rx_count);
+        }
+        xact_rx_count = 0;
+
         tx_snap_published_len = tx_snap_idx;
         tx_snap_published_cmd = tx_snap_cmd_recorded;
         for (uint16_t i = 0; i < tx_snap_idx; i++) tx_snap_published[i] = tx_snap[i];
@@ -580,6 +648,7 @@ void ltc6811_emu_service(void) {
         uint8_t b = pio_rx_get_raw();
         g_ltc_stats.last_rx[g_ltc_stats.rx_byte_count % 8u] = b;
         g_ltc_stats.rx_byte_count++;
+        xact_rx_count++;
         if (rx_snap_idx < RESPONSE_LEN) {
             rx_snap[rx_snap_idx++] = b;
         }
