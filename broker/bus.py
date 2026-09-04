@@ -116,18 +116,19 @@ class HardwareManager:
         # CS pins for MCP2515 CAN chips (GPIO27/17/18) and their INT lines
         # (GPIO4/5/6) are owned by the kernel mcp251x driver via the
         # mcp2515-triple dtoverlay. Don't grab them here.
-        cs_pins = [
-            CFG.CS_ADC1, CFG.CS_ADC2, CFG.CS_ADC3,
-            CFG.NRF24_CS,
-        ]
+        # Only the selects the kernel does NOT own. Grabbing a cs-gpios line
+        # from userspace fights the SPI core for it.
+        cs_pins: list[int] = []
         # The DAC chip-selects are claimed here ONLY on a bench whose overlay
         # has not yet moved them to cs-gpios. Where the kernel owns them,
         # grabbing the same GPIOs from userspace fights the SPI core for the
         # line -- the very coupling this change removes.
-        import os as _os
-        if not all(_os.path.exists(f"/dev/spidev{CFG.SPI_BUS}.{d}")
-                   for d in (4, 5, 6, 7)):
+        if not self._kernel_cs_available(self._DAC_SPIDEV):
             cs_pins += [CFG.CS_DAC1, CFG.CS_DAC2, CFG.CS_DAC3, CFG.CS_DAC4]
+        if not self._kernel_cs_available(self._ADC_SPIDEV):
+            cs_pins += [CFG.CS_ADC1, CFG.CS_ADC2, CFG.CS_ADC3]
+        if not self._kernel_cs_available((self._NRF_SPIDEV,)):
+            cs_pins += [CFG.NRF24_CS]
         for pin in cs_pins + [CFG.NRF24_CE]:
             GPIO.setup(pin, GPIO.OUT)
             GPIO.output(pin, GPIO.HIGH)
@@ -153,11 +154,21 @@ class HardwareManager:
         # Driver instances. DAC80504 writes init registers in __init__, so
         # construction requires PSU on. We defer DAC construction until first
         # use to let the caller bring up the PSU explicitly.
-        self._adcs = [
-            MCP3208(spi, CFG.CS_ADC1),
-            MCP3208(spi, CFG.CS_ADC2),
-            MCP3208(spi, CFG.CS_ADC3),
-        ]
+        # ADCs: their own spi_devices where the overlay provides them, so the
+        # SPI core asserts CS inside the message. Same race as the DACs
+        # (IFS_HIL#124); it had simply not bitten here yet.
+        if self._kernel_cs_available(self._ADC_SPIDEV):
+            self._adcs = [MCP3208(self._open_spidev(d), None)
+                          for d in self._ADC_SPIDEV]
+            log.info("ADCs on per-device spidev %s — CS owned by the kernel",
+                     ", ".join(self._spidev_paths(self._ADC_SPIDEV)))
+        else:
+            log.warning("per-ADC spidev nodes missing — shared spidev%d.%d with "
+                        "userspace CS; that path races the kernel mcp251x driver "
+                        "(IFS_HIL#124)", CFG.SPI_BUS, CFG.SPI_DEVICE)
+            self._adcs = [MCP3208(spi, CFG.CS_ADC1),
+                          MCP3208(spi, CFG.CS_ADC2),
+                          MCP3208(spi, CFG.CS_ADC3)]
 
         # CAN state tracking. Buses are created lazily on first use — the
         # kernel netdev must be up at a valid bitrate before python-can can
@@ -183,15 +194,47 @@ class HardwareManager:
             CFG.TCA9555_ADDR_2: TCA9555(self._i2c, CFG.TCA9555_ADDR_2),
         }
 
-        self._nrf = NRF24L01(spi, CFG.NRF24_CS, CFG.NRF24_CE)
+        # nRF24: CS to the kernel where the overlay provides spidev0.11; CE
+        # stays a plain GPIO either way (it gates the radio, not the bus).
+        # U23 is unpopulated on bench-01, so this path is UNVERIFIED on
+        # hardware -- it mirrors the DAC change, which is confirmed.
+        if self._kernel_cs_available((self._NRF_SPIDEV,)):
+            self._nrf = NRF24L01(self._open_spidev(self._NRF_SPIDEV), None,
+                                 CFG.NRF24_CE)
+            log.info("nRF24 on %s — CS owned by the kernel",
+                     self._spidev_paths((self._NRF_SPIDEV,))[0])
+        else:
+            self._nrf = NRF24L01(spi, CFG.NRF24_CS, CFG.NRF24_CE)
 
     # ------------------------------------------------------------------
     # Lazy DAC initialisation (requires PSU on)
     # ------------------------------------------------------------------
 
-    # Per-DAC spi_devices from mcp2515-triple.dts. Present only on a bench
-    # whose overlay carries the cs-gpios change.
+    # Per-peripheral spi_devices from mcp2515-triple.dts. Present only on a
+    # bench whose overlay carries the cs-gpios change.
     _DAC_SPIDEV = (4, 5, 6, 7)
+    _ADC_SPIDEV = (8, 9, 10)
+    _NRF_SPIDEV = 11
+
+    @staticmethod
+    def _spidev_paths(devs):
+        return [f"/dev/spidev{CFG.SPI_BUS}.{d}" for d in devs]
+
+    @classmethod
+    def _kernel_cs_available(cls, devs) -> bool:
+        """True when every listed spi_device exists, i.e. the kernel owns those
+        chip-selects and userspace must not touch the GPIOs."""
+        import os
+        return all(os.path.exists(p) for p in cls._spidev_paths(devs))
+
+    def _open_spidev(self, dev):
+        import spidev
+        h = spidev.SpiDev()
+        h.open(CFG.SPI_BUS, dev)
+        h.max_speed_hz = CFG.SPI_MAX_HZ
+        # Mode comes from the device tree per spi_device; setting it here would
+        # only re-introduce the juggling this change removes.
+        return h
 
     def _open_dacs(self) -> list:
         """One spi_device per DAC when the overlay provides them.
@@ -207,15 +250,9 @@ class HardwareManager:
         Falls back rather than failing: a bench running the older overlay
         should still come up, just with the race.
         """
-        # spidev is imported lazily throughout this module so the repo stays
-        # installable off-bench (the [bench] extra is Pi-only). Module-level
-        # use here would break that, and did.
-        import os
-        import spidev
-
-        paths = [f"/dev/spidev{CFG.SPI_BUS}.{d}" for d in self._DAC_SPIDEV]
-        missing = [p for p in paths if not os.path.exists(p)]
-        if missing:
+        paths = self._spidev_paths(self._DAC_SPIDEV)
+        if not self._kernel_cs_available(self._DAC_SPIDEV):
+            missing = paths
             log.warning(
                 "per-DAC spidev nodes missing (%s) — falling back to shared "
                 "spidev%d.%d with userspace CS. That path races the kernel "
@@ -227,14 +264,8 @@ class HardwareManager:
                     self._DAC80504(self._spi, CFG.CS_DAC3),
                     self._DAC80504(self._spi, CFG.CS_DAC4)]
 
-        dacs = []
-        for dev in self._DAC_SPIDEV:
-            h = spidev.SpiDev()
-            h.open(CFG.SPI_BUS, dev)
-            h.max_speed_hz = CFG.SPI_MAX_HZ
-            # No mode set here on purpose: spi-cpha in the overlay makes this
-            # device mode 1, and the SPI core programs it per message.
-            dacs.append(self._DAC80504(h, None))
+        dacs = [self._DAC80504(self._open_spidev(d), None)
+                for d in self._DAC_SPIDEV]
         log.info("DACs on per-device spidev %s — CS owned by the kernel",
                  ", ".join(paths))
         return dacs
