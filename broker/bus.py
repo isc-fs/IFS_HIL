@@ -207,7 +207,12 @@ class HardwareManager:
         Falls back rather than failing: a bench running the older overlay
         should still come up, just with the race.
         """
+        # spidev is imported lazily throughout this module so the repo stays
+        # installable off-bench (the [bench] extra is Pi-only). Module-level
+        # use here would break that, and did.
         import os
+        import spidev
+
         paths = [f"/dev/spidev{CFG.SPI_BUS}.{d}" for d in self._DAC_SPIDEV]
         missing = [p for p in paths if not os.path.exists(p)]
         if missing:
