@@ -56,6 +56,18 @@ DAC_CANDIDATES = [0, 1, 2, 3]
 # expected value instead.
 DAC_DEVID_EXPECTED = 0x0417
 
+# The DEVID read is occasionally MIS-CLOCKED under CAN load: 0x082E came back
+# from a healthy DAC1 while ~200 frames/s crossed the shared SPI bus, and
+# 0x082E is 0x0417 << 1 -- the same five bits, shifted one position. Reproduced
+# in 2 minutes of sustained traffic; 15 back-to-back flashes and 36 idle hours
+# produced none (IFS_HIL#124). It corrects itself on the very next transaction.
+#
+# Reading once therefore let a single bad transaction fail a whole run and,
+# with the watchdog, trigger a rail power-on-reset -- a sledgehammer for a
+# one-bit glitch that had already gone. Retry instead, and only call the DAC bad
+# when every attempt disagrees.
+DAC_DEVID_RETRIES = 3
+
 # `ip` reports the sample point to three decimals and the kernel quantises to
 # the achievable bit timing, so declared and live never compare exactly equal.
 SAMPLE_POINT_TOL = 0.005
@@ -204,7 +216,8 @@ def probe(deep=False):
     """
     client = _client()
     result = {"psu_ok": None, "broker": None, "ina": [], "tca": [],
-              "dac": [], "dac_devid": {}, "dac_bad_devid": [], "nrf24": False,
+              "dac": [], "dac_devid": {}, "dac_bad_devid": [],
+              "dac_devid_retries": {}, "nrf24": False,
               "can": {}, "slots_powered": None, "warnings": []}
 
     result["broker"] = _try(client, "broker.health")
@@ -231,9 +244,34 @@ def probe(deep=False):
         if dev_id is None:
             continue
         result["dac"].append(idx)
+        attempts, seen = 1, [dev_id]
+        while dev_id != DAC_DEVID_EXPECTED and attempts < DAC_DEVID_RETRIES:
+            time.sleep(0.05)
+            again = _try(client, "dac.read_device_id", idx=idx)
+            attempts += 1
+            if again is not None:
+                dev_id = again
+                seen.append(again)
         result["dac_devid"][str(idx)] = f"0x{dev_id:04X}"
+        if attempts > 1:
+            # Surfaced, not swallowed: a retry rate that climbs is the same
+            # fault getting worse, and silently absorbing it would hide that.
+            result["dac_devid_retries"][str(idx)] = {
+                "attempts": attempts,
+                "seen": [f"0x{v:04X}" for v in seen],
+                "recovered": dev_id == DAC_DEVID_EXPECTED,
+            }
         if dev_id != DAC_DEVID_EXPECTED:
             result["dac_bad_devid"].append(idx)
+
+    recovered = {k: v for k, v in result["dac_devid_retries"].items() if v["recovered"]}
+    if recovered:
+        detail = ", ".join(f"DAC{k} after {v['attempts']} ({'->'.join(v['seen'])})"
+                           for k, v in sorted(recovered.items()))
+        result["warnings"].append(
+            f"DEVID needed a retry: {detail}. A mis-clocked read under CAN load "
+            "(IFS_HIL#124); harmless on its own, but a rate that climbs is the "
+            "same fault getting worse.")
 
     if result["dac_bad_devid"]:
         got = ", ".join(f"DAC{i}={result['dac_devid'][str(i)]}"
