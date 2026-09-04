@@ -103,13 +103,24 @@
             status = "okay";
             pinctrl-names = "default";
             pinctrl-0 = <&spi0_data_only_pins>;
-            /* CS pins, active-low. Four entries:
+            /* CS pins, active-low. Eight entries:
              *   0..2: MCP2515 chips on GPIO27/17/18 (PCB)
-             *   3:    GPIO16, unused on the PCB — attached to a spidev
-             *         child below so /dev/spidev0.3 exists for the
-             *         register-level Python driver to reach the DACs,
-             *         ADCs, and nRF24 via no_cs=True + manual GPIO CS. */
-            cs-gpios = <&gpio 27 1>, <&gpio 17 1>, <&gpio 18 1>, <&gpio 16 1>;
+             *   3:    GPIO16, unused on the PCB — spidev0.3, still no_cs=True +
+             *         manual GPIO for the ADCs and the nRF24.
+             *   4..7: DAC80504 chip-selects GPIO22/23/24/25 (J2 pads 15/16/18/22).
+             *         Moved here from userspace GPIO. Asserting CS outside the SPI
+             *         message is a race against the kernel mcp251x driver sharing
+             *         this controller: between the broker's GPIO write and spidev's
+             *         transfer the kernel is free to clock an MCP2515 message while
+             *         the DAC is already selected, so the DAC shifts in edges meant
+             *         for someone else. Measured under CAN load: DEVID 0x082E, the
+             *         correct 0x0417 shifted left one bit -- one stray clock -- and,
+             *         less often, a persistent latch only a rail power-cycle clears
+             *         (IFS_HIL#124). With CS declared here the SPI core asserts it
+             *         as part of the message, under the controller lock, and the
+             *         window stops existing. */
+            cs-gpios = <&gpio 27 1>, <&gpio 17 1>, <&gpio 18 1>, <&gpio 16 1>,
+                       <&gpio 22 1>, <&gpio 23 1>, <&gpio 24 1>, <&gpio 25 1>;
 
             can0: mcp2515@0 {
                 reg = <0>;
@@ -169,6 +180,47 @@
                 spi-max-frequency = <1000000>;
                 status = "okay";
             };
+
+            /* The four DAC80504s, one spidev each, CS owned by the kernel.
+             *
+             * spi-cpha with no spi-cpol is SPI MODE 1 (CPOL=0, CPHA=1): the
+             * DAC80504 drives SDO on the rising edge of SCLK, so the master
+             * must sample on the falling edge. The broker used to flip the
+             * shared spidev between mode 0 and mode 1 around every DAC
+             * transaction; declaring it per device means the SPI core
+             * programs it per message and that juggling disappears too. */
+            spidev@4 {
+                reg = <4>;                       /* GPIO22 — J2 pad 15 */
+                compatible = "spidev";
+                spi-max-frequency = <1000000>;
+                spi-cpha;
+                status = "okay";
+            };
+
+            spidev@5 {
+                reg = <5>;                       /* GPIO23 — J2 pad 16 */
+                compatible = "spidev";
+                spi-max-frequency = <1000000>;
+                spi-cpha;
+                status = "okay";
+            };
+
+            spidev@6 {
+                reg = <6>;                       /* GPIO24 — J2 pad 18 */
+                compatible = "spidev";
+                spi-max-frequency = <1000000>;
+                spi-cpha;
+                status = "okay";
+            };
+
+            spidev@7 {
+                reg = <7>;                       /* GPIO25 — J2 pad 22 */
+                compatible = "spidev";
+                spi-max-frequency = <1000000>;
+                spi-cpha;
+                status = "okay";
+            };
+
         };
     };
 };
