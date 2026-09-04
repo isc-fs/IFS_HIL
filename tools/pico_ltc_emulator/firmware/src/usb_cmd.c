@@ -12,7 +12,7 @@
 
 #define LINE_MAX 96
 
-#define FW_VERSION_STR "0.6.0"   // per-command stats (IFS_HIL#116)
+#define FW_VERSION_STR "0.7.0"   // byte-2 cmd parse, chip 0 no longer stale (IFS_HIL#116)
 
 usb_cmd_stats_t g_cmd_stats;
 
@@ -62,7 +62,7 @@ static void cmd_status(void) {
     snprintf(buf, sizeof(buf),
              "OK n_cmds_rx=%lu n_spi_xact=%lu last_cmd=0x%03X "
              "n_valid_cmds=%lu last_ltc_cmd=0x%03X n_cs_cycles=%lu "
-             "rx_bytes=%lu stop_mask=0x%02X adg731_ch=%u "
+             "rx_bytes=%lu tx_stall_cmd=%lu stop_mask=0x%02X adg731_ch=%u "
              "last_rx=%02X %02X %02X %02X %02X %02X %02X %02X",
              (unsigned long)g_cmd_stats.n_cmds_rx,
              (unsigned long)g_ltc_stats.n_spi_xact,
@@ -71,6 +71,7 @@ static void cmd_status(void) {
              (unsigned)g_ltc_stats.last_ltc_cmd,
              (unsigned long)g_ltc_stats.n_cs_cycles,
              (unsigned long)g_ltc_stats.rx_byte_count,
+             (unsigned long)g_ltc_stats.n_tx_stall_cmd,
              (unsigned)ltc6811_emu_get_stop_mask(),
              (unsigned)ltc6811_emu_get_adg731_ch(),
              g_ltc_stats.last_rx[0], g_ltc_stats.last_rx[1],
