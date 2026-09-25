@@ -1,9 +1,10 @@
 # Operator guide
 
 Day-to-day recipes for running the bench. Assumes
-[`docs/getting-started.md`](getting-started.md) has been completed —
-patched kernel module, device-tree overlay, sudoers, and the three
-systemd units are all installed.
+[`docs/getting-started.md`](getting-started.md) has been completed (or
+[`scripts/bench_setup.sh`](../scripts/bench_setup.sh) has run) —
+patched kernel module, device-tree overlay, sudoers, and the systemd
+units are all installed.
 
 If something doesn't behave as expected here, jump to
 [`docs/troubleshooting.md`](troubleshooting.md).
@@ -17,27 +18,41 @@ Five commands that tell you everything is wired right:
 ```sh
 pi$ systemctl is-active hil-psu-on hil-can-up hil-broker   # active × 3
 pi$ ip -br link | grep can                                 # can0/can1/can2 UP
-pi$ ls /dev/spidev0.3 /dev/i2c-1                           # both exist
-pi$ pinctrl get 7 8 | head                                 # 7 = op lo, 8 = ip hi
+pi$ ls /dev/spidev0.{3..11} /dev/i2c-1                     # 9 spidev nodes + i2c
+pi$ pinctrl get 7,8                                        # 7 = op lo, 8 = ip hi
 pi$ curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/api/status
                                                            # 200
 ```
 
 If all five pass, skip ahead. If any fail, see
-[troubleshooting](troubleshooting.md).
+[troubleshooting](troubleshooting.md). (`pinctrl get 7 8`, with a space,
+fails with "Too many arguments" on current `pinctrl`.) Missing
+`spidev0.4`–`0.11` while `spidev0.3` exists means an old overlay: the
+DACs and ADCs are running on the userspace chip-select fallback —
+reinstall the overlay and reboot.
+
+For the whole host build in one go, `python3 -m tools.bench doctor`;
+for the hardware against the bench's descriptor,
+`python3 -m tools.bench verify --bench <id>`.
 
 ---
 
 ## Starting and stopping services
 
-The bench runs four systemd services in dependency order:
+The bench runs these systemd units in dependency order:
 
-| Service | Role | Type |
+| Unit | Role | Type |
 |---|---|---|
 | `hil-psu-on.service` | Assert `PS_ON#`, configure `PWR_OK` pin | oneshot |
 | `hil-can-up.service` | `ip link set canN up …` for all three chips | oneshot |
 | `hil-broker.service` | Broker daemon; single owner of SPI/I²C/GPIO | simple |
 | `hil-dashboard.service` | Flask observability UI on `:8080` | simple |
+| `hil-bench-watchdog.timer` | Every 5 min: verify, and recover if wedged — see [Self-healing](#self-healing-and-recovery) | timer |
+
+A bench that takes CI runs also runs the GitHub Actions runner service
+(`actions.runner.isc-fs-IFS_HIL.<bench>.service`) with a
+`Restart=always` drop-in — see
+[`infra/systemd/README.md`](../infra/systemd/README.md).
 
 ```sh
 pi$ # cold start (or after a reboot if something is off)
@@ -50,9 +65,10 @@ pi$ # full bounce — useful after editing broker code
 pi$ sudo systemctl restart hil-broker
 
 pi$ # view service logs
-pi$ journalctl -u hil-broker -f     # follow live
-pi$ journalctl -u hil-dashboard -f  # dashboard, live
-pi$ journalctl -u hil-can-up -b     # this boot only
+pi$ journalctl -u hil-broker -f          # follow live
+pi$ journalctl -u hil-dashboard -f       # dashboard, live
+pi$ journalctl -u hil-bench-watchdog -f  # watchdog, live
+pi$ journalctl -u hil-can-up -b          # this boot only
 ```
 
 ---
@@ -250,16 +266,72 @@ automatically rebrings the interface up after 200 ms. If it's
 still stuck:
 
 ```sh
-pi$ sudo ip link set can2 down
-pi$ sudo ip link set can2 up type can bitrate 500000 restart-ms 200
+pi$ sudo systemctl restart hil-can-up   # bitrate, sample point, txqueuelen
 ```
 
-If the chip itself has latched a bad state (rare), cycle the PSU:
+If the chip itself has latched a bad state (rare), cycle the PSU —
+and then restart `hil-can-up` too, because the PSU cycle resets the
+MCP2515s while the kernel still shows the links up:
 
 ```python
 >>> c.call('psu.power', on=False); import time; time.sleep(2)
 >>> c.call('psu.power', on=True)
 ```
+
+```sh
+pi$ sudo systemctl restart hil-can-up hil-broker
+```
+
+### A wedged `mcp251x`
+
+If `can2` traffic stops while `ip -d link show can2` still says
+`UP` / `ERROR-ACTIVE`, the MCP2515 driver has wedged — typically after
+`can2` was reconfigured while a carrier was under test, or after a PSU
+cycle. It looks exactly like the firmware stopped transmitting, so rule
+it out before suspecting the firmware. Reload the module and bring the
+links back:
+
+```sh
+pi$ sudo modprobe -r mcp251x && sudo modprobe mcp251x
+pi$ sudo systemctl restart hil-can-up hil-broker
+```
+
+To avoid provoking it, don't reconfigure `can2` (`ip link set can2 …`)
+while a carrier is under test.
+
+---
+
+## Self-healing and recovery
+
+`hil-bench-watchdog.timer` runs `python3 -m tools.bench watchdog`
+every 5 minutes. It verifies the bench and, only if something is
+wrong, climbs a ladder and stops at the first rung that works:
+
+| Level | Action | Takes |
+|---|---|---|
+| L1 | restart `hil-broker` | ~6 s |
+| L2 | PSU power-on reset + reload `mcp251x` + restart `hil-can-up` and `hil-broker` | ~27 s |
+
+It takes the bench lock (`/tmp/hil-bench.lock`) **non-blocking**: if a
+flash or a test run holds it, the watchdog skips that cycle rather than
+cycling the rails under a flash. Before recovering it appends the
+wedged state to `~/hil-wedge-evidence.jsonl`. It logs healthy checks
+too — a bench that needs recovering on every cycle is a worsening
+fault, visible only against the quiet passes. If the self-hosted runner
+isn't active it reports `RUNNER DOWN` and exits non-zero; it never
+restarts the runner itself.
+
+Run a rung by hand (it takes the lock itself):
+
+```sh
+pi$ python3 -m tools.bench recover --bench bench-01 --level 1
+pi$ python3 -m tools.bench recover --bench bench-01 --level 2
+```
+
+The case it was built for is the **DAC wedge**: a DAC80504 returns a
+wrong device id (expected `0x0417`) and stops following setpoints.
+Since the chip-selects moved into the kernel (#124) it should be rare;
+an L2 clears any residue.
 
 ---
 
@@ -271,25 +343,40 @@ report — see
 [`docs/development/testing.md`](development/testing.md#running-a-suite-from-a-firmware-pr),
 which also lists the named suites so a developer picks what runs.
 
-The bench ships a pytest suite at `tests/hil/` that exercises the
-hardware through the broker. With the bench running:
+`tests/hil/` holds two kinds of test:
+
+- **Bench self-tests** — the top-level `tests/hil/test_*.py` (CAN, SPI
+  DAC/ADC, I²C, relays, MLC power). They exercise the bench through
+  the broker and flash nothing.
+- **DUT suites** — `tests/hil/vcu/` (the ECU; the directory name is
+  historical) and `tests/hil/ams/`. They drive a carrier, and Block A
+  **reflashes** it.
 
 ```sh
 pi$ cd ~/IFS_HIL
-pi$ pytest tests/hil/ -v
-```
-
-Expected: ~93 passed, ~11 skipped (the skips are for unpopulated
-hardware like nRF24). Tests auto-skip cleanly if the broker socket
-is unreachable, so you won't see confusing failures when the bench
-is off.
-
-Run a single test module:
-
-```sh
+pi$ pytest tests/hil/ --ignore=tests/hil/vcu --ignore=tests/hil/ams -v   # self-tests
 pi$ pytest tests/hil/test_can.py -v
 pi$ pytest tests/hil/test_spi_dac.py -v -k test_channel_sweep
 ```
+
+To run a DUT suite by hand, expand a named suite from
+[`configs/suites.yaml`](../configs/suites.yaml) exactly as CI does,
+and take the bench lock so a dispatched run can't land mid-session:
+
+```sh
+pi$ export ECU_FIRMWARE_BIN=/path/to/ECU08.bin   # the image under test
+pi$ flock /tmp/hil-bench.lock \
+      pytest $(python3 -m tools.bench suite --dut ecu --suite smoke) -v
+```
+
+Set `ECU_FIRMWARE_BIN` / `AMS_FIRMWARE_BIN` first: A-003 reflashes the
+carrier from it. With `ECU_FIRMWARE_BIN` unset, a hand run falls back
+to `~/firmware-builds/ECU_fix.bin` — a stale 2026-06 diagnostic build
+that exists on bench-01 — and every later case then judges that image
+instead of yours.
+
+Tests auto-skip cleanly if the broker socket is unreachable, so you
+won't see confusing failures when the bench is off.
 
 The suite runs **concurrently with the dashboard** — the broker
 serialises SPI/I²C access across processes, so there's no
@@ -307,17 +394,37 @@ pi$ pytest tests/broker/ -v
 
 ## Flashing an ECU
 
+### The wrapper: `tools/flash_dut.py`
+
+This is what CI runs, and the easiest way to flash by hand:
+
+```sh
+pi$ python3 -m tools.flash_dut --dut ecu --bin /path/to/ECU08.bin   # or --dut ams
+pi$ python3 -m tools.flash_dut --dut ams --bin /path/to/AMS.bin --dry-run   # plan only
+```
+
+It reads the carrier slot and relay from the bench descriptor, and the
+node id, app address and boot trigger from the DUT profile; powers
+**only** the target carrier (every other DUT slot is de-energised);
+waits for the app to start talking, then sends its boot trigger; checks
+that exactly one bootloader answers and that its product string is the
+expected one (`IFS08-CE-ECU` / `IFS08-CE-AMS`); and refuses to start with
+a `can-flasher` older than 2.8.0. The rest of this section is the raw
+`can-flasher` path underneath it.
+
 ### Checklist before first flash
 
-- [ ] `can-flasher --version` prints `1.1.2` or later.
+- [ ] `can-flasher --version` prints `2.8.0` or later. Older builds have
+      no ISO-TP session recovery: they erase, then fail mid-image and
+      leave the carrier with no app.
 - [ ] `can-flasher adapters` lists `can0`, `can1`, `can2`.
 - [ ] Carrier you're targeting is powered (INA226 ~ 130 mA, not 0).
 - [ ] Target ECU's bootloader is burned. The HIL bench does **not**
       write the bootloader — that's a one-time SWD step, done
       elsewhere.
-- [ ] You know the target node ID. Factory-default is `0x01`; see
-      "Multi-board flashing" below if you have several ECUs on
-      the same bus.
+- [ ] You know the target node ID: ECU `0x01`, AMS `0x02`, uDV `0x03`.
+      The id lives in the carrier's bootloader NVM, so confirm it with
+      `discover`; see "Multi-board flashing" below.
 
 ### Single-board flash
 
@@ -332,8 +439,10 @@ pi$ can-flasher \
 ```
 
 - `--channel can2` — PCB CAN1, where the MLC carriers live.
-- `--node-id 0x1` — factory-default bootloader node ID. Change if
-  you provisioned a custom one (see next section).
+- `--node-id 0x1` — the ECU's bootloader node ID (the AMS is `0x2`).
+  It must be the id the carrier actually answers on; if `discover`
+  lists the node but `flash` fails with `CONNECT failed: timed out`,
+  this is why.
 - `--address 0x08020000` — default app-image start address for the
   STM32H733 + `isc-fs/stm32-can-bootloader` combo. Flat `.bin`
   files need this explicitly; `.elf` files carry their own.
@@ -354,17 +463,24 @@ Flashed /path/to/firmware.bin (crc=0x…, size=… B, …).
   jumped to app at 0x08020000.
 ```
 
+Even current `can-flasher` builds occasionally NACK `BAD_SESSION`
+part-way through an image. The bootloader stays reachable, so retry
+the flash before suspecting the firmware or the board.
+
 ### Multi-board flashing
 
-The default bootloader node ID is `0x01`. If two carriers are
-powered simultaneously, their bootloaders both respond to the
-discover broadcast and you see ISO-TP reassembler warnings plus
-two rows in the output with the same node ID.
+Node ids are provisioned per carrier — ECU `0x01`, AMS `0x02`, uDV
+`0x03` — but a carrier can drift from the scheme: bench-01's AMS
+answered `0x01` until it was re-provisioned on 2026-09-25. If two
+powered carriers answer on the same id, both respond to the discover
+broadcast and you see ISO-TP reassembler warnings plus two rows in the
+output with the same node ID.
 
 Two options:
 
-**Option A (simplest): power one carrier at a time.** Via the
-dashboard toggles or by flipping TCA9555 pins directly:
+**Option A (simplest): power one carrier at a time** — which is what
+`flash_dut` always does. Via the dashboard toggles or by flipping
+TCA9555 pins directly:
 
 ```python
 >>> c.call('tca.set_direction', addr=0x20, port=0, mask=0x00)
@@ -403,20 +519,20 @@ Node  Proto  FW Version        Git Hash  Product  WRP  Reset Cause
 
 Returning "no bootloaders replied" with a carrier clearly powered
 usually means the app is already running and the bootloader has
-jumped away. That's expected after a `flash --jump`. To send the
-app back to the bootloader without touching the board:
+jumped away. That's expected after a `flash --jump`. To send the app
+back to the bootloader without touching the board, send the DUT's boot
+trigger — `bl_trigger_id` / `bl_trigger_payload` in its profile:
 
 ```sh
-pi$ can-flasher \
-      --interface socketcan --channel can2 --bitrate 500000 \
-      --node-id 0x1 \
-      send-raw 0x001 03 06 01
-# app ACKs on 0x011, issues NVIC_SystemReset, BL holds on next boot.
+pi$ cansend can2 002#B007AD12    # ECU (tests/hil/vcu/vcu_profile.yaml)
+pi$ cansend can2 002#B007AD11    # AMS (tests/hil/ams/ams_profile.yaml)
 ```
 
-(The `03 06 01` payload is: ISO-TP PCI `0x03` = 3-byte single
-frame, `0x06` = `APP_CTRL` message, `0x01` = `ENTER_BOOTLOADER`
-opcode. See the demo firmware's README for the protocol.)
+The app reboots into its bootloader, which then answers `discover`.
+(The demo firmware uses a different trigger, `can-flasher … send-raw
+0x001 03 06 01`: ISO-TP PCI `0x03` = 3-byte single frame, `0x06` =
+`APP_CTRL` message, `0x01` = `ENTER_BOOTLOADER` opcode. See the demo
+firmware's README for that protocol.)
 
 ### Post-flash sanity checks
 
@@ -434,7 +550,8 @@ opcode. See the demo firmware's README for the protocol.)
 ```sh
 pi$ journalctl -u hil-broker -f              # broker, live
 pi$ journalctl -u hil-broker -b --no-pager   # broker, this boot
-pi$ tail -f /tmp/dashboard.log               # dashboard (if nohup'd)
+pi$ journalctl -u hil-dashboard -f           # dashboard, live
+pi$ journalctl -u hil-bench-watchdog -f      # watchdog: checks, recoveries, RUNNER DOWN
 pi$ sudo dmesg -w                            # kernel — watch for mcp251x
 pi$ sudo dmesg | grep mcp251x                # just mcp251x history
 pi$ sudo dmesg | grep -i undervoltage        # Pi power-quality events
@@ -465,6 +582,7 @@ back high, so the ATX rails go down cleanly before the Pi halts.
 
 ## Where to go next
 
+- **Taking the project over** → [`HANDOVER.md`](../HANDOVER.md).
 - **A command above misbehaves** → [`troubleshooting.md`](troubleshooting.md).
 - **Need the exact semantics of a broker RPC** →
   [`broker-api.md`](broker-api.md).
