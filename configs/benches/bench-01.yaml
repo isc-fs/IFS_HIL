@@ -58,8 +58,9 @@ can:
   acu:
     dev: can2
     bitrate: 500000
-    # 0.6875, NOT the 0.875 that hil-can-up sets. A mismatch bus-offs the AMS,
-    # which has cost several sessions. Preflight asserts the live value.
+    # 0.6875, NOT the kernel's 0.875 default at 500 kbit/s (hil-can-up now passes
+    # it explicitly). A mismatch bus-offs the AMS, which has cost several
+    # sessions. Preflight asserts the live value.
     sample_point: 0.6875
 
 slots:

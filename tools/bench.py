@@ -184,8 +184,9 @@ def _try(client, method, **params):
 
 def _probe_can():
     """CAN facts come from the kernel, not the broker. Records the sample point
-    because hil-can-up sets 0.875 while the AMS bus needs 0.6875, and the
-    mismatch presents as an unexplained bus-off rather than a config error."""
+    because the bus needs 0.6875 while the kernel defaults to 0.875 at 500 kbit/s
+    when none is given (hil-can-up now passes it explicitly), and the mismatch
+    presents as an unexplained bus-off rather than a config error."""
     found = {}
     for dev in ("can0", "can1", "can2"):
         try:
