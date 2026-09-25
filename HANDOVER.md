@@ -349,11 +349,15 @@ with Raúl before touching anything hardware-adjacent.
 - **Legacy udev rule**: `infra/udev/99-hil.rules` renames a USB-CAN adapter
   to `can0`, which would collide with the kernel `mcp251x` `can0`. No such
   adapter is on the bench; drop the rule.
-- **Unpushed work**: the ECU **Block K** telemetry-gate test
-  (`tests/hil/vcu/test_block_k_telemetry_gate.py`, commit `3759cd8`) exists
-  only on a **local** `feat/hil-96` branch on Raúl's machine and in the
-  bench's rsync copy — on no remote. It was held until the ECU telemetry
-  firmware landed. Push it or lose it.
+- **Held work**: the ECU **Block K** telemetry-gate test
+  (`tests/hil/vcu/test_block_k_telemetry_gate.py`, commit `3759cd8`) is on
+  `feat/hil-96` — pushed 2026-09-26, byte-identical to the bench's copy,
+  and it still merges cleanly into `dev`. It is held until the ECU
+  telemetry firmware lands on ECU `dev`, and it needs hardening before its
+  PR: its K-003/K-004 "failures" were the `can2` `mcp251x` wedge, not the
+  firmware (so it must not reconfigure `can2` mid-run, and should check
+  ERROR-ACTIVE), and K-001's ≤ 1.5 s boot check needs a bootloader-grace
+  allowance.
 - **Issues to close**: **#117** (Pico NTC pull-up) was fixed by PR #118 but
   is still open; **#94** (LOGFS pull) was reported working end-to-end on a
   quiet bus on 2026-09-25 — confirm and close.
@@ -406,7 +410,8 @@ In rough priority order:
    tokens.
 3. **Replace both tokens with a GitHub App** (the org already runs one).
 4. **Protect `dev`** on IFS_HIL (PR + green checks required).
-5. **Push `feat/hil-96`** (Block K) so it exists somewhere other than one Mac.
+5. **Harden Block K, then open the `feat/hil-96` PR** once the ECU
+   telemetry firmware is on ECU `dev` ([§7](#7-known-drift--cleanup-backlog)).
 6. **Do a second, independent bringup** (`bench_setup.sh --bench bench-02` on
    a spare Pi) to prove the docs, and file every gap you hit — starting with
    whether `config.txt` ends up carrying `dtparam=spi=on`
