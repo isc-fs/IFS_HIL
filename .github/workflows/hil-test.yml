@@ -323,7 +323,7 @@ jobs:
       # leaves an H7 unrecoverable (F-077).
       - name: Preflight — bench matches its descriptor
         id: preflight
-        continue-on-error: ${{{{ inputs.allow_degraded }}}}
+        continue-on-error: ${{ inputs.allow_degraded }}
         run: |
           for lvl in 0 1 2; do
             if [ "$lvl" != 0 ]; then
