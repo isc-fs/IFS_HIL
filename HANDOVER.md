@@ -170,9 +170,10 @@ In order, it: enables interfaces + groups → installs apt packages (incl.
 edits `config.txt` → builds + installs the patched `mcp251x` → installs the
 sudoers drop-in → enables the systemd units → **reboot gate** → runs
 `bench doctor` (host matches the documented build) → installs `can-flasher` →
-drafts the bench descriptor → registers the self-hosted runner, **enabled
-and with the `Restart=always` drop-in** so it survives both a power cut and
-the runner quitting.
+drafts the bench descriptor → registers the self-hosted runner. **Run it
+once more after the runner registers**: that pass adds the runner's
+`Restart=always` drop-in (and checks the unit is enabled), so the runner
+survives both a power cut and quitting on its own.
 
 ### What the script does NOT do (do these by hand)
 
@@ -185,6 +186,7 @@ the runner quitting.
 | **Stimulus hardware** | The **Pico LTC emulator** (cells / temps), the **NTC interposer** (temp-open faults) and the **pack-current fixture** are undocumented and outside the script. Without them a new bench can only honestly declare `dut-*` capabilities. Pico firmware: [`docs/pico_ltc_emulator.md`](docs/pico_ltc_emulator.md). |
 | **Tailscale + network** | bench-01 has a Tailscale address and a fixed LAN IP; no join / static-IP step exists anywhere. Set these up yourself. |
 | **Carrier bootloaders** | Each STM32 carrier needs `isc-fs/stm32-can-bootloader` burned via SWD — and its node id provisioned — out of band. The bench cannot burn a bootloader. |
+| **User `isc`, repo at `~/IFS_HIL`** | The systemd units and the sudoers drop-in hardcode both (`User=isc`, `WorkingDirectory=/home/isc/IFS_HIL`), and the script checks neither. Use them, or edit those files before installing. |
 
 **Refreshing an existing bench is not the same as a fresh install.**
 `bench_setup.sh` only checks that *a* `mcp2515-triple.dtbo` is present, and
@@ -243,7 +245,10 @@ targets. (It is, today, on both ECU and AMS.)
 `hil-build-trigger.yml` (`/hil-build <subdir>`) → `hil-build-only.yml`
 (Docker image, ARM GCC **12.3**) → `hil-flash.yml` (runs on `[self-hosted,
 hil-rpi]`, via the legacy `tools.flash`). Superseded by Chain A. No runner
-carries the `hil-rpi` label (bench-01's doesn't), so it can only queue.
+carries the `hil-rpi` label (bench-01's doesn't), so it can only queue. It
+is also all that `main` carries: the current workflows exist only on `dev`,
+so a hand dispatch needs `--ref dev`
+(`gh workflow run hil-test.yml --ref dev -f bench=… -f suite=…`).
 **Much of the older documentation described this chain** — that was the
 largest drift this refresh corrected. Slated for removal
 ([§7](#7-known-drift--cleanup-backlog)).
@@ -319,6 +324,17 @@ Block A's A-003 reflashes the carrier from it — and on a hand run with it
 unset, the ECU suite reflashes a stale June 2026 diagnostic build that
 happens to sit on bench-01.
 
+**Flashing by hand** needs the same lock —
+`flock /tmp/hil-bench.lock python3 -m tools.flash_dut …`. Neither
+`flash_dut` nor `can-flasher` takes it (CI wraps them), and if the
+watchdog finds the bench unhealthy during an unlocked flash, its level-2
+recovery cycles the PSU mid-write.
+
+**Stopping the bench**: stop `hil-bench-watchdog.timer` *first*. Left
+running, its next tick restarts `hil-broker`, whose `Wants=` brings
+`hil-can-up` and `hil-psu-on` — the PSU — back within five minutes, under
+whoever thought the bench was off.
+
 ---
 
 ## 7. Known drift / cleanup backlog
@@ -346,6 +362,15 @@ with Raúl before touching anything hardware-adjacent.
   `dtparam=spi=on` — always the case on a fresh Pi, since the overlay is
   installed later — although its own comment calls that parameter a second
   claimant for SPI0. Never exercised: bench-01 was built by hand.
+- **`bench_setup.sh` loose ends**: it installs the runner's
+  `Restart=always` drop-in only on the pass *after* registration (so one
+  run is not enough), and its closing message suggests
+  `gh workflow run hil-test.yml …` without `--ref dev`, which fails
+  because `main` carries no `hil-test.yml`.
+- **`flash_dut` takes no bench lock**, so a hand flash must be wrapped in
+  `flock` (CI does that). It can't simply take the lock itself: under CI's
+  `flock`, a second lock on the same file would deadlock. An environment
+  handshake from the caller would let it lock only when run bare.
 - **Legacy udev rule**: `infra/udev/99-hil.rules` renames a USB-CAN adapter
   to `can0`, which would collide with the kernel `mcp251x` `can0`. No such
   adapter is on the bench; drop the rule.

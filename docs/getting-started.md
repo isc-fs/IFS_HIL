@@ -60,8 +60,10 @@ Commands prefixed with `$` run on your workstation. Commands prefixed
 with `pi$` run on the Pi over SSH. Commands without a prefix can run
 anywhere that context is obvious from the surrounding prose.
 
-The default Pi user in this guide is `isc`. If yours differs, adjust
-the sudoers file and systemd units accordingly.
+The default Pi user in this guide is `isc`, with the repo at
+`~/IFS_HIL`. The systemd units and the sudoers drop-in hardcode both
+(`User=isc`, `WorkingDirectory=/home/isc/IFS_HIL`) and `bench_setup.sh`
+checks neither — use them, or edit those files before installing.
 
 ---
 
@@ -611,7 +613,8 @@ sudo systemctl enable "$U"                  # comes back after a power cut
 systemctl show -p Restart --value "$U"      # expect: always
 ```
 
-`bench_setup.sh` does all of this in its runner phase, `bench doctor`
+`bench_setup.sh` does this in its runner phase — on the pass *after* the
+one that registers the runner, so re-run it once more. `bench doctor`
 checks both the enablement and the effective restart policy, and the
 watchdog logs `RUNNER DOWN` if the runner is ever not active.
 

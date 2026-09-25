@@ -368,10 +368,12 @@ pi$ systemctl is-active hil-bench-watchdog.timer    # active
 
 ```sh
 # Cold start
-sudo systemctl start hil-psu-on hil-can-up hil-broker
+sudo systemctl start hil-psu-on hil-can-up hil-broker hil-bench-watchdog.timer
 
-# Clean stop
-sudo systemctl stop hil-broker hil-can-up hil-psu-on
+# Clean stop — the timer FIRST. Left running, the watchdog's next tick
+# restarts hil-broker, whose Wants= brings hil-can-up and hil-psu-on
+# (the PSU) back with it, within 5 min.
+sudo systemctl stop hil-bench-watchdog.timer hil-broker hil-can-up hil-psu-on
 
 # Restart broker (after editing broker code)
 sudo systemctl restart hil-broker
@@ -418,11 +420,18 @@ c.call('ina.current', addr=0x40) * 1000   # mA — expect ~130 mA
 ### Flash a carrier
 
 Prefer the wrapper — it is what CI runs, and it carries the safety
-checks the raw command does not:
+checks the raw command does not. By hand, run it under the bench lock:
 
 ```sh
-python3 -m tools.flash_dut --dut ecu --bin /path/to/ECU08.bin   # or --dut ams
+flock /tmp/hil-bench.lock \
+  python3 -m tools.flash_dut --dut ecu --bin /path/to/ECU08.bin   # or --dut ams
 ```
+
+**Why the lock:** neither `flash_dut` nor `can-flasher` takes it — CI
+wraps them in it. The watchdog skips a bench whose lock is held;
+otherwise it runs its checks, and if one fails mid-flash its level-2
+recovery cycles the PSU. Power lost mid-flash can leave an STM32H7
+unrecoverable. Wrap a raw `can-flasher` flash the same way.
 
 `flash_dut` resolves slot, relay, node id, app address and boot trigger
 from the bench descriptor + DUT profile; **de-energises every other DUT
@@ -504,7 +513,7 @@ ip -s -d link show can2            # stats + berr-counter (TEC/REC)
 ### Safe shutdown
 
 ```sh
-sudo systemctl stop hil-broker hil-can-up
+sudo systemctl stop hil-bench-watchdog.timer hil-broker hil-can-up
 sudo systemctl stop hil-psu-on     # ExecStop sets GPIO7 high → PSU off
 sudo poweroff
 ```
@@ -545,7 +554,7 @@ sudo dmesg | tail -60 > /tmp/dmesg.txt
 journalctl -u hil-psu-on -u hil-can-up -u hil-broker -b --no-pager > /tmp/services.txt
 journalctl -u hil-bench-watchdog -b --no-pager > /tmp/watchdog.txt
 cp ~/hil-wedge-evidence.jsonl /tmp/ 2>/dev/null   # bus state captured before each recovery
-ip -s -d link show can0 can1 can2 > /tmp/can.txt
+for i in 0 1 2; do ip -s -d link show can$i; done > /tmp/can.txt   # one device per `show`
 pinctrl get 4-12 > /tmp/gpio.txt
 vcgencmd get_throttled > /tmp/throttle.txt
 ```
@@ -719,6 +728,12 @@ module, systemd units). Off-bench on a Mac/Linux laptop you can:
   like firmware TX death. If you must, reload the module afterwards.
 - **Don't read a green PR check as "the HIL run passed".** Confirm the
   run has jobs and that a verdict comment arrived (see **CI flow**).
+- **Don't stop the `hil-*` services and leave `hil-bench-watchdog.timer`
+  running.** Its next tick restarts the broker and, through `Wants=`,
+  the PSU — the bench powers back up within five minutes.
+- **Don't flash by hand without the bench lock**
+  (`flock /tmp/hil-bench.lock …`). The watchdog stands down only for a
+  held lock, and its level-2 recovery cycles the PSU.
 - **Don't `psu.power(False)` as a debugging hammer.** Undervoltage,
   BUS-OFF, and stuck mcp251x have cheaper remediations.
 - **Don't extend `tools/mcp2515.py` or `tools/flash.py`.** Legacy.
@@ -747,7 +762,8 @@ module, systemd units). Off-bench on a Mac/Linux laptop you can:
 | User says… | You do… |
 |---|---|
 | "is the bench healthy?" | Run the 5-line preflight (see above); on a CI bench also the runner + watchdog checks. `python3 -m tools.bench doctor` + `verify --bench <id>` for the full picture. Report which pass/fail. |
-| "flash this firmware" | `python3 -m tools.flash_dut --dut <ecu\|ams> --bin <path>` — isolation, identity gate and version floor included. Raw `can-flasher` only when you need it: target carrier powered alone, INA ~130 mA, `--channel can2`, the node id `discover` prints. |
+| "flash this firmware" | `flock /tmp/hil-bench.lock python3 -m tools.flash_dut --dut <ecu\|ams> --bin <path>` — isolation, identity gate and version floor included; the lock keeps the watchdog from cycling the PSU mid-flash. Raw `can-flasher` only when you need it (same lock): target carrier powered alone, INA ~130 mA, `--channel can2`, the node id `discover` prints. |
+| "stop the bench" / "power it down" | `sudo systemctl stop hil-bench-watchdog.timer hil-broker hil-can-up hil-psu-on` — the timer first, or the watchdog brings everything, PSU included, back within five minutes. |
 | "discover doesn't find anything" | Walk: (1) `--channel can2`? (2) carrier powered (INA ~130 mA)? (3) app already running → send its boot trigger (`cansend can2 002#B007AD12` ECU / `…AD11` AMS) |
 | "ENOBUFS during flash" | `ip -o link show can2 \| grep qlen` → if 10, `systemctl restart hil-can-up`. Retry flash. |
 | "flash hangs / disconnects" | Check `journalctl -u hil-broker -f` + `dmesg -w` + flasher stderr. Often `restart-ms` recovery — retry is safe (verify-after + skip-write). A `BAD_SESSION` mid-image is a known `can-flasher` stall: retry. |

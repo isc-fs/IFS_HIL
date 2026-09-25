@@ -56,10 +56,12 @@ A bench that takes CI runs also runs the GitHub Actions runner service
 
 ```sh
 pi$ # cold start (or after a reboot if something is off)
-pi$ sudo systemctl start hil-psu-on hil-can-up hil-broker hil-dashboard
+pi$ sudo systemctl start hil-psu-on hil-can-up hil-broker hil-dashboard hil-bench-watchdog.timer
 
-pi$ # stop everything cleanly
-pi$ sudo systemctl stop hil-dashboard hil-broker hil-can-up hil-psu-on
+pi$ # stop everything cleanly — the watchdog timer FIRST: left running,
+pi$ # its next tick restarts hil-broker, whose Wants= brings the CAN
+pi$ # units and the PSU back with it, within 5 minutes
+pi$ sudo systemctl stop hil-bench-watchdog.timer hil-dashboard hil-broker hil-can-up hil-psu-on
 
 pi$ # full bounce — useful after editing broker code
 pi$ sudo systemctl restart hil-broker
@@ -399,9 +401,16 @@ pi$ pytest tests/broker/ -v
 This is what CI runs, and the easiest way to flash by hand:
 
 ```sh
-pi$ python3 -m tools.flash_dut --dut ecu --bin /path/to/ECU08.bin   # or --dut ams
+pi$ flock /tmp/hil-bench.lock \
+      python3 -m tools.flash_dut --dut ecu --bin /path/to/ECU08.bin   # or --dut ams
 pi$ python3 -m tools.flash_dut --dut ams --bin /path/to/AMS.bin --dry-run   # plan only
 ```
+
+**Flash under the bench lock**, as CI does — and wrap a raw
+`can-flasher` flash the same way. Neither takes the lock itself. The
+watchdog skips a bench whose lock is held; otherwise it runs its
+checks, and if one fails mid-flash its level-2 recovery cycles the PSU.
+Power lost mid-flash can leave an STM32H7 unrecoverable.
 
 It reads the carrier slot and relay from the bench descriptor, and the
 node id, app address and boot trigger from the DUT profile; powers
@@ -570,7 +579,7 @@ because `PS_ON#` (GPIO7) floats on Pi shutdown. If you want to
 power the bench down explicitly first:
 
 ```sh
-pi$ sudo systemctl stop hil-broker hil-can-up
+pi$ sudo systemctl stop hil-bench-watchdog.timer hil-broker hil-can-up
 pi$ sudo systemctl stop hil-psu-on      # de-asserts PS_ON# via ExecStop
 pi$ sudo poweroff                       # clean Pi shutdown
 ```
