@@ -41,6 +41,13 @@ on:
       sha256:
         description: "sha256 of that .bin, for the bench to re-check"
         value: ${{ jobs.build.outputs.sha256 }}
+      version:
+        description: >-
+          Semver from the firmware source's VERSION file at this SHA. The
+          bench has no firmware checkout, so this is how the release-gate
+          cases learn what the image should self-report. Empty when the
+          repo has no VERSION file.
+        value: ${{ jobs.build.outputs.version }}
       uploaded:
         description: >-
           "true" if the artifact actually reached storage. The compile can
