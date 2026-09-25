@@ -115,12 +115,54 @@ Runs `--verbose`, so the journal records healthy checks too. That baseline
 is the point: a bench recovering on *every* cycle is a worsening fault, and
 that is only visible against a run of quiet passes.
 
+**It also watches the self-hosted runner, and only watches it.** A runner
+that is not `active` makes the watchdog print `RUNNER DOWN` and exit 1,
+even when the hardware is fine. It never restarts the runner — that is
+systemd's job, via the drop-in below — and a runner fault never triggers a
+rail cycle. Before this, bench-01's runner died on 2026-09-18 and the
+watchdog printed `healthy` every five minutes for a week while every
+dispatched run queued against it (IFS_HIL#140).
+
 ```sh
 sudo cp hil-bench-watchdog.service hil-bench-watchdog.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now hil-bench-watchdog.timer
 journalctl -u hil-bench-watchdog -f
 ```
+
+## `actions.runner.restart.conf` — drop-in for the runner
+
+Not a unit: a drop-in for the GitHub Actions runner's own unit, which the
+runner's `svc.sh install` generates with a name carrying the org, repo and
+runner name (`actions.runner.isc-fs-IFS_HIL.bench-01.service`). It adds
+`Restart=always`, `RestartSec=60`, and removes systemd's start limit.
+
+The stock unit has **no `Restart=`**, so a runner that *exits* is never
+brought back, however it is enabled. That is not hypothetical. On
+2026-09-18 bench-01's runner got a transient *"The runner registration has
+been deleted from the server"* from GitHub, logged *"no retry needed"*, and
+exited cleanly. The registration was in fact intact, and a plain restart a
+week later brought it straight back — but nothing restarted it for that
+week.
+
+Enabled answers "does it come back after a power cut?". `Restart=` answers
+"does it come back after it quits?". A bench needs both; `bench doctor` §14
+checks both, reading the **effective** policy from `systemctl show` rather
+than trusting that the file exists.
+
+`scripts/bench_setup.sh` installs it in the runner phase. By hand:
+
+```sh
+U=$(systemctl list-unit-files 'actions.runner.*.service' --no-legend | awk '{print $1}')
+sudo mkdir -p /etc/systemd/system/$U.d
+sudo cp actions.runner.restart.conf /etc/systemd/system/$U.d/restart.conf
+sudo systemctl daemon-reload
+systemctl show -p Restart --value $U        # expect: always
+```
+
+If the registration really has been deleted, this loops once a minute,
+harmlessly, and the watchdog reports `RUNNER DOWN` until someone
+re-registers the runner.
 
 ## `hil-agent.service` — NOT installed
 

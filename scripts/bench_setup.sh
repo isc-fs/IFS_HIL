@@ -398,6 +398,16 @@ if [ -f "$HOME/actions-runner/.runner" ]; then
             c_do "enable $RUNNER_UNIT so it returns after a power cut"
             run "sudo systemctl enable '$RUNNER_UNIT'"
         fi
+        # The stock unit has no Restart=, so a runner that exits is never
+        # brought back -- see infra/systemd/actions.runner.restart.conf.
+        DROPIN_DIR="/etc/systemd/system/$RUNNER_UNIT.d"
+        DROPIN_SRC="$REPO_ROOT/infra/systemd/actions.runner.restart.conf"
+        if cmp -s "$DROPIN_DIR/restart.conf" "$DROPIN_SRC" 2>/dev/null; then
+            c_ok "runner restart policy installed"
+        else
+            c_do "install the runner restart policy (Restart=always)"
+            run "sudo mkdir -p '$DROPIN_DIR' && sudo cp '$DROPIN_SRC' '$DROPIN_DIR/restart.conf' && sudo systemctl daemon-reload"
+        fi
         if [ "$(systemctl is-active "$RUNNER_UNIT" 2>/dev/null)" = active ]; then
             c_ok "runner service active"
         else
