@@ -348,6 +348,25 @@ def _sh(cmd):
         return 1, str(exc)
 
 
+def runner_units():
+    """The self-hosted runner's systemd unit(s). The name carries the org, repo
+    and runner name (actions.runner.<org>-<repo>.<bench>.service), so it is
+    discovered rather than hardcoded -- a hardcoded bench-01 name would make
+    every check below silently pass on every other bench."""
+    _, out = _sh("systemctl list-unit-files 'actions.runner.*.service' "
+                 "--no-legend 2>/dev/null | awk '{print $1}'")
+    return [u for u in out.split() if u]
+
+
+def runner_state(unit):
+    """(enabled, active, restart) exactly as systemd reports them. `restart` is
+    the EFFECTIVE policy, drop-ins included, not what a file on disk says."""
+    _, en = _sh(f"systemctl is-enabled {unit} 2>/dev/null")
+    _, ac = _sh(f"systemctl is-active {unit} 2>/dev/null")
+    _, rs = _sh(f"systemctl show -p Restart --value {unit} 2>/dev/null")
+    return en, ac, rs
+
+
 def doctor_checks():
     """Yield (section, name, ok, detail) for every documented setup step."""
     rc, out = _sh("dpkg -s " + " ".join(APT_PACKAGES) + " >/dev/null 2>&1")
@@ -432,6 +451,47 @@ def doctor_checks():
     rc, ver = _sh("can-flasher --version 2>/dev/null")
     yield ("10", "can-flasher", rc == 0, ver or "not on PATH")
 
+    # The self-hosted runner. Its unit name carries the org, repo and runner
+    # name (actions.runner.<org>-<repo>.<bench>.service), so discover it rather
+    # than hardcoding one bench's.
+    #
+    # Checked ONLY when a runner is already configured. `bench doctor` runs in
+    # the bootstrap's host phase, which is BEFORE the runner phase, so failing
+    # on a bench that has not reached that step yet would block provisioning on
+    # a step that is not due.
+    #
+    # When one IS configured, `enabled` matters as much as `active`: a unit that
+    # is active but disabled works until the next power cut and then silently
+    # does not come back. The bench itself stays healthy, so nothing else here
+    # complains, while every dispatched run queues against an offline runner
+    # until it times out — which is exactly what happened to bench-01.
+    #
+    # And enabled is not enough either. The stock unit has no Restart=, so a
+    # runner that EXITS -- as bench-01's did on a transient "registration
+    # deleted" from GitHub -- stays down however it is enabled.
+    units = runner_units()
+    rc_cfg, _ = _sh("test -f \"$HOME/actions-runner/.runner\"")
+    if units:
+        for unit in units:
+            en, ac, rs = runner_state(unit)
+            name = unit.replace(".service", "")
+            yield ("14", name,
+                   en == "enabled" and ac == "active",
+                   f"enabled={en or '-'} active={ac or '-'}"
+                   + ("" if en == "enabled" else
+                      "  — will NOT return after a power cut: "
+                      f"sudo systemctl enable {unit}"))
+            yield ("14", "runner restart policy", rs == "always",
+                   f"Restart={rs or '-'}"
+                   + ("" if rs == "always" else
+                      "  — a runner that exits is never brought back; "
+                      "re-run scripts/bench_setup.sh to install the drop-in"))
+    elif rc_cfg == 0:
+        yield ("14", "runner service", False,
+               "runner is configured but has no systemd unit — "
+               "cd ~/actions-runner && sudo ./svc.sh install $(id -un) && "
+               "sudo ./svc.sh start")
+
 
 SUITES_FILE = REPO_ROOT / "configs" / "suites.yaml"
 
@@ -477,9 +537,15 @@ def resolve_suite(dut, spec):
 BENCH_LOCK = "/tmp/hil-bench.lock"
 
 
-def _sh(cmd, quiet=False):
-    """Run a shell command, returning True on success. Recovery is best-effort
-    at every rung: a step that cannot run must not stop the ladder."""
+def _step(cmd, quiet=False):
+    """Run one recovery step, returning True on success. Recovery is best-effort
+    at every rung: a step that cannot run must not stop the ladder.
+
+    Named `_step`, not `_sh`: this module already has an `_sh` returning
+    (rc, output) for doctor_checks(). A second `def _sh` here silently
+    replaced it at import (90282ae), and `bench doctor` then crashed on its
+    first check -- TypeError, cannot unpack a bool -- from 2026-09-02 until
+    this was renamed."""
     r = subprocess.run(cmd, shell=True, capture_output=True, text=True)
     if not quiet:
         print(f"    $ {cmd}" + ("" if r.returncode == 0 else f"   -> rc={r.returncode}"))
@@ -517,16 +583,16 @@ def recover(level):
     """
     if level <= 1:
         print("  recovery 1: restarting the broker")
-        _sh("sudo systemctl restart hil-broker")
+        _step("sudo systemctl restart hil-broker")
         time.sleep(6)
         return
 
     print("  recovery 2: PSU power-on-reset, then CAN + broker")
     _psu_cycle()
-    _sh("sudo modprobe -r mcp251x"); time.sleep(2)
-    _sh("sudo modprobe mcp251x");    time.sleep(3)
-    _sh("sudo systemctl restart hil-can-up"); time.sleep(3)
-    _sh("sudo systemctl restart hil-broker"); time.sleep(6)
+    _step("sudo modprobe -r mcp251x"); time.sleep(2)
+    _step("sudo modprobe mcp251x");    time.sleep(3)
+    _step("sudo systemctl restart hil-can-up"); time.sleep(3)
+    _step("sudo systemctl restart hil-broker"); time.sleep(6)
 
 
 def cmd_recover(args):
@@ -584,11 +650,26 @@ def cmd_watchdog(args):
         else:
             sys.exit("several benches are described; pass --bench or set $HIL_BENCH")
 
+    # The runner is checked here but never recovered here. Restarting it is
+    # systemd's job (the Restart=always drop-in), and a runner fault must never
+    # trigger a rail cycle. This only makes it VISIBLE: when bench-01's runner
+    # died on 2026-09-18, this watchdog printed "healthy" every five minutes for
+    # a week while every dispatched run queued against it (IFS_HIL#140). The
+    # hardware verdict below is unchanged; a down runner only turns an
+    # otherwise-clean exit into 1.
+    down = [(u, runner_state(u)[1]) for u in runner_units()]
+    down = [(u, st) for u, st in down if st != "active"]
+    for unit, st in down:
+        print(f"{bench_id}: RUNNER DOWN — {unit} is {st or 'unknown'}; every "
+              "dispatched run queues until it returns. If this persists past a "
+              "minute, systemd is not restarting it: see bench doctor §14.")
+    clean = 1 if down else 0
+
     ok, _ = _verify_quiet(bench_id)
     if ok:
         if args.verbose:
-            print(f"{bench_id}: healthy")
-        return 0
+            print(f"{bench_id}: hardware healthy")
+        return clean
 
     with open(BENCH_LOCK, "w") as lk:
         try:
@@ -596,14 +677,14 @@ def cmd_watchdog(args):
         except OSError:
             # Someone is flashing or testing. Their preflight owns recovery.
             print(f"{bench_id}: unhealthy, but the bench is busy — leaving it alone")
-            return 0
+            return clean
 
         # Re-check under the lock: the run that just finished may have fixed it,
         # and a needless rail cycle disturbs every carrier on the bench.
         ok, out = _verify_quiet(bench_id)
         if ok:
             print(f"{bench_id}: recovered on its own before we intervened")
-            return 0
+            return clean
 
         print(f"{bench_id}: FAILS its descriptor — recovering")
         print(out.rstrip())
@@ -617,7 +698,7 @@ def cmd_watchdog(args):
             ok, out = _verify_quiet(bench_id)
             if ok:
                 print(f"{bench_id}: healthy again after recovery level {level}")
-                return 0
+                return clean
         print(f"{bench_id}: STILL unhealthy after level 2 — needs a human")
         print(out.rstrip())
         return 1
