@@ -263,7 +263,15 @@ else
     c_do "enable hil-bench-watchdog.timer"
     run "sudo systemctl enable hil-bench-watchdog.timer >/dev/null 2>&1"
 fi
-for u in $UNITS; do
+# Enabled at boot: everything in $UNITS EXCEPT hil-bench-watchdog. That service
+# is timer-activated; the .timer is enabled above and fires it OnBootSec=1min,
+# then every 5 minutes. Enabling the .service itself adds an extra run at boot
+# that skips that settling delay. Its After=hil-broker.service does not cover
+# the gap: the broker is Type=simple, "started" the moment the process exists,
+# before its socket or the DACs are ready -- and a watchdog that sees an unready
+# bench escalates to a rail power-cycle.
+ENABLE_UNITS="${UNITS/ hil-bench-watchdog/}"
+for u in $ENABLE_UNITS; do
     if [ "$(systemctl is-enabled "$u" 2>/dev/null)" = "enabled" ]; then
         c_ok "$u enabled"
     else
@@ -296,8 +304,12 @@ fi
 # ---- host build ---------------------------------------------------------
 step "Host build check"
 if [ "$DRY" = 1 ]; then
-    c_skip "would run: python3 -m tools.bench doctor"
-elif ( cd "$REPO_ROOT" && python3 -m tools.bench doctor >/tmp/hil-doctor.out 2>&1 ); then
+    c_skip "would run: python3 -m tools.bench doctor --host-only"
+# --host-only: §14 (the runner) is repaired by the runner phase further down.
+# Gating on it here stopped the script before it got there, on any bench whose
+# runner was configured but lacked the Restart= drop-in -- while doctor's own
+# advice for that failure was "re-run bench_setup.sh".
+elif ( cd "$REPO_ROOT" && python3 -m tools.bench doctor --host-only >/tmp/hil-doctor.out 2>&1 ); then
     c_ok "matches the documented build"
     mark_done host
 else
@@ -413,6 +425,16 @@ if [ -f "$HOME/actions-runner/.runner" ]; then
         else
             c_do "start $RUNNER_UNIT"
             run "sudo systemctl start '$RUNNER_UNIT'"
+        fi
+        # The effective policy, drop-ins included -- not whether a file exists.
+        if [ "$DRY" != 1 ]; then
+            RS="$(systemctl show -p Restart --value "$RUNNER_UNIT" 2>/dev/null)"
+            if [ "$RS" = always ]; then
+                c_ok "runner restart policy in effect (Restart=always)"
+            else
+                c_stop "runner restart policy is Restart=${RS:-?}, not always — the drop-in did not take."
+                exit 1
+            fi
         fi
     fi
     mark_done runner
