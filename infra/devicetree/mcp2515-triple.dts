@@ -5,9 +5,15 @@
  * GPIO chip-select and interrupt line, matching the PCB wiring in
  * tools/hw_config.py:
  *
- *   can0  CS=GPIO27  INT=GPIO4   (U17, labelled CAN1)
- *   can1  CS=GPIO17  INT=GPIO5   (U19, labelled CAN2)
- *   can2  CS=GPIO18  INT=GPIO6   (U21, labelled CAN3)
+ *   spi0.0  CS=GPIO27  INT=GPIO4   (U17, labelled CAN1)  -> kernel can2
+ *   spi0.1  CS=GPIO17  INT=GPIO5   (U19, labelled CAN2)  -> kernel can1
+ *   spi0.2  CS=GPIO18  INT=GPIO6   (U21, labelled CAN3)  -> kernel can0
+ *
+ * The netdev names come out INVERTED relative to the PCB labels (mcp251x
+ * probes the children in reverse reg order), so the MLC carriers, on PCB
+ * CAN1, are kernel can2. It also declares the other nine SPI0 chip-selects
+ * (DACs, ADCs, nRF24) -- see the comment above the cs-gpios list below and
+ * docs/hardware-reference.md.
  *
  * Replaces `dtoverlay=spi0-0cs` in /boot/firmware/config.txt. Once
  * loaded, the chips are owned by the kernel `mcp251x` driver — the
