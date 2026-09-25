@@ -16,8 +16,10 @@ answer.
 ## Transport
 
 - **Socket**: Unix stream socket at
-  `/run/hil-broker/broker.sock` (default; overridable via the
-  `HIL_BROKER_SOCKET` environment variable).
+  `/run/hil-broker/broker.sock` (default). The daemon binds another
+  path with `--socket <path>` (`--fake` selects the in-memory
+  backend); clients that go through `tools.hil_client` follow the
+  `HIL_BROKER_SOCKET` environment variable.
 - **Framing**: newline-delimited JSON. One request per line, one
   response per line.
 - **Request**:
@@ -52,7 +54,15 @@ with BrokerClient(path) as c:
 ```
 
 One socket per `BrokerClient` instance. Not thread-safe — create
-one per thread.
+one per thread. `call()` returns the `result`, or raises
+`RuntimeError("[<code>] <message>")` on an error response.
+
+Tests and the dashboard use the proxies in
+[`tools/hil_client.py`](../tools/hil_client.py) instead
+(`DAC80504(idx=0)`, `INA226(addr=0x40)`, …): the same method names
+as the chip drivers, one cached client per thread, `HIL_BROKER_SOCKET`
+honoured, and a fresh connection on the next call after a broker
+restart.
 
 ### Error codes
 
@@ -125,6 +135,11 @@ Read all 8 channels of one ADC back-to-back.
 
 ## DAC methods
 
+The broker builds the DAC drivers on the first `dac.*` call, not at
+start-up, and only once: construction writes each chip's init
+registers (external reference, asynchronous update, ×2 output gain),
+which needs the PSU on — SPI is dead without `PWR_OK`.
+
 ### `dac.set_voltage`
 
 Drive one channel of one DAC80504 to the requested voltage.
@@ -160,7 +175,9 @@ Reads the chip DEVID register. Mostly a health check.
 |---|---|---|
 | `idx` | int | 0, 1, 2, 3 |
 
-**Returns** `int` — `0x0417` on a healthy DAC80504.
+**Returns** `int` — `0x0417` on a healthy DAC80504. Anything else
+(e.g. `0x082E`, one bit shifted) is a wedged DAC; `bench verify` and
+the watchdog use this read to spot one.
 
 ### `dac.reset`
 
@@ -171,6 +188,14 @@ Issue a software reset to one DAC.
 | `idx` | int | 0, 1, 2, 3 |
 
 **Returns** `null`.
+
+**Note**: the reset returns every register to its power-on default,
+including the init the broker wrote when it built the driver — and
+the broker does not write it again. Until `hil-broker` restarts,
+`dac.set_voltage` no longer drives the output the way it should. A
+PSU power cycle has the same effect, which is why the recovery ladder
+restarts the broker after one. `tests/hil/test_spi_dac.py` resets
+every DAC.
 
 ### `dac.zero_all`
 
@@ -199,6 +224,19 @@ the legacy register-level driver callers:
 | `0x00` | link UP, `loopback off` | Normal CAN operation |
 | `0x40` | link UP, `loopback on` | Chip internal loopback |
 
+**These reconfigure the live interface.** `can.set_mode`,
+`can.reset`, `can.init` and `can.loopback_test` all take the link
+down; `set_mode` and `loopback_test` bring it back with only a
+bitrate (`ip link set canN up type can bitrate <b> [loopback on]`),
+so the kernel recomputes the bit timing at its default sample point
+(0.875) instead of the 0.6875 that `hil-can-up.service` sets. On
+`can2` (`idx` 2), the carrier bus, the bench drops off the bus and
+comes back — if at all — at a sample point the DUTs bus-off against.
+Don't call them on `can2` while a carrier is under test; afterwards,
+`sudo systemctl restart hil-can-up`. The read-only methods
+(`get_mode`, `status`, `read_error_counters`, `int_level`) only run
+`ip -j link show`.
+
 ### `can.set_mode`
 
 Transition the interface to the requested mode. Closes the current
@@ -211,12 +249,15 @@ records the new mode.
 | `idx` | int | 0, 1, 2 |
 | `mode` | int | `0x80` / `0x00` / `0x40` |
 
-**Returns** `bool` — `true` on success.
+**Returns** `bool` — `true` on success. Any other `mode` value is
+treated as `0x00` (link UP, normal).
 
 ### `can.get_mode`
 
 Reflects kernel state: DOWN → `0x80`, otherwise whatever
-`can.set_mode` last recorded.
+`can.set_mode` last recorded. The record starts at `0x80` when the
+broker starts, so a link `hil-can-up` brought UP still reads `0x80`
+until something calls `can.set_mode`. Also `0x80` if `ip` fails.
 
 | Param | Type | Description |
 |---|---|---|
@@ -240,7 +281,7 @@ Convenience: returns mode + both error counters in one call.
 ### `can.read_error_counters`
 
 Parses `ip -s -d -j link show canN` and extracts the kernel's
-`berr-counter` `{tx, rx}` pair.
+`berr-counter` `{tx, rx}` pair (`[0, 0]` if `ip` fails).
 
 | Param | Type | Description |
 |---|---|---|
@@ -279,7 +320,7 @@ lets the caller decide.
 ### `can.loopback_test`
 
 Put the chip in LOOPBACK, send one frame, read one frame back,
-compare. Used by the HIL test suite.
+compare. Used by the HIL test suite. Leaves the link UP in loopback.
 
 | Param | Type | Description |
 |---|---|---|
@@ -295,8 +336,9 @@ Historically read the MCP2515 INT GPIO pin; under the kernel
 driver those pins are unreadable from userspace. The broker
 repurposes this method as a link-health proxy:
 
-- returns `1` if the interface is UP (healthy)
-- returns `0` if the interface is DOWN or unreachable
+- returns `0` if the interface is DOWN
+- returns `1` otherwise — including when `ip` cannot read the
+  interface at all, so a missing `canN` reads as healthy
 
 | Param | Type | Description |
 |---|---|---|
@@ -320,7 +362,7 @@ the four INA226s on the bus. Valid addresses:
 
 ### `ina.read`
 
-Full snapshot — one SPI transaction per field.
+Full snapshot — one I²C register read per field.
 
 | Param | Type | Description |
 |---|---|---|
@@ -333,7 +375,8 @@ Full snapshot — one SPI transaction per field.
 ```
 
 Because the sensing is low-side, `bus_voltage_V` is always near 0;
-only `current_A` (and `shunt_voltage_V` × 100 for mA) is meaningful.
+only `current_A` (and `shunt_voltage_V` × 100 for A, across the
+10 mΩ shunt) is meaningful.
 
 ### `ina.is_present`
 
@@ -370,7 +413,8 @@ Each TCA9555 has two 8-bit ports (`0`, `1`), 8 pins each.
 
 ### `tca.read`
 
-Return a full snapshot of the chip (all four registers per port).
+Return a snapshot of the chip: the input, output and config
+registers of both ports.
 
 **Returns** `dict`:
 ```json
@@ -451,7 +495,7 @@ Probe the (unpopulated) nRF24L01+. Returns `bool` — typically
 
 ---
 
-## I²C methods
+## I2C methods
 
 ### `i2c.scan`
 
@@ -498,25 +542,39 @@ Read the current state of both signals.
 
 ### `broker.health`
 
-Returns uptime, total RPC op count, and the last error message if
-any.
+Returns uptime, a count of hardware operations, and a
+`last_error` slot.
 
 **Returns** `dict`:
 ```json
 {"uptime_s": 1234.56, "op_count": 987, "last_error": null}
 ```
 
-The real backend also reports `backend: "real"`-style metadata;
-the fake backend reports `"backend": "fake"`. Useful for
-distinguishing on-bench from off-bench in tests.
+`last_error` is always `null` today — nothing sets it. A failing
+driver call comes back as an `internal_error` response and is logged
+to `journalctl -u hil-broker`.
+
+Only the fake backend adds `"backend": "fake"`; the real one has no
+`backend` key. Useful for distinguishing on-bench from off-bench in
+tests.
 
 ---
 
 ## Notes on threading
 
 - The broker serialises SPI transactions behind one lock, I²C
-  behind another, and CAN link-state changes behind a third.
+  behind another, CAN link-state changes behind a third, and the PSU
+  GPIOs behind a fourth.
 - Multiple RPCs on **different** buses can run concurrently.
 - `can.loopback_test` holds the CAN lock for the duration of the
-  test (~200 ms with default timeouts). During that window, other
-  CAN RPCs block. Non-CAN RPCs are unaffected.
+  test (~200 ms with default timeouts). During that window the other
+  link-changing CAN RPCs (`set_mode`, `reset`, `init`) block; the
+  read-only ones take no lock. Non-CAN RPCs are unaffected.
+- Against the kernel's own SPI traffic (the three MCP2515s), what
+  matters is the chip-select. With the current overlay each DAC, ADC
+  and the nRF24 has its own spidev node (`/dev/spidev0.4`–`0.7`,
+  `0.8`–`0.10`, `0.11`) and the kernel asserts CS inside each
+  transfer, under the SPI controller lock. With an older overlay the
+  broker falls back to the shared `/dev/spidev0.3`, drives CS from
+  userspace and logs a "spidev nodes missing" warning — that path
+  races `mcp251x` (the #124 DAC wedge).

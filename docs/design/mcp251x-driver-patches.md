@@ -159,14 +159,19 @@ pi$ ./build.sh
 5. Preserves the stock module as `mcp251x.ko.xz.orig` on first run.
 6. Runs `depmod -a`.
 
-Verify the new module carries our markers:
+Verify the patched module is the one installed — it must differ from the
+stock copy the build preserved:
 
 ```sh
-pi$ sudo xz -dc /lib/modules/$(uname -r)/kernel/drivers/net/can/spi/mcp251x.ko.xz \
-       | strings | grep -i backplane_hil
-# Expected: several "Patched:" markers, "didn't wake from sleep",
-#           "MCP2515 successfully initialized" strings, etc.
+pi$ M=/lib/modules/$(uname -r)/kernel/drivers/net/can/spi/mcp251x.ko.xz
+pi$ sudo md5sum "$M" "$M.orig"
+# Expected: two DIFFERENT hashes. The same hash (or no .orig) means the
+# stock module is still in place.
 ```
+
+(An earlier version of this page grepped the binary for `backplane_hil`
+markers. That can never pass: the markers are C comments, stripped at
+compile time.)
 
 Reboot (or `modprobe -r mcp251x && modprobe mcp251x`) to pick up
 the new module.

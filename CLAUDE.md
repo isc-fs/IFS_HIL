@@ -10,6 +10,11 @@ Author: Raul Moran (ISC Racing Team). Repo:
 [`isc-fs/IFS_HIL`](https://github.com/isc-fs/IFS_HIL), working
 branch `dev`.
 
+**New to the project, or taking it over?** Read
+[`HANDOVER.md`](HANDOVER.md) first — current state, standing up a new
+bench, how CI works, and what is fragile. This file is the day-to-day
+cheat-sheet that follows it.
+
 ---
 
 ## How to use this file
@@ -98,7 +103,9 @@ A bench Pi does **not** carry a git checkout. `~/IFS_HIL/` on the bench
 is a non-git working copy maintained by rsync from a developer machine
 that does have the git checkout. This avoids storing GitHub credentials
 on the bench host and lets you test uncommitted changes against real
-hardware before pushing.
+hardware before pushing. (The self-hosted CI runner keeps its *own*
+checkout under `~/actions-runner/_work/IFS_HIL/IFS_HIL`, fetched fresh
+for every run — never edit or sync into that one.)
 
 ### Bench hosts
 
@@ -117,7 +124,9 @@ export HIL_BENCH_HOST=isc@100.96.95.78    # off-network via Tailscale (slower)
 ```
 
 **Always sync via the script. Do not `git clone` or `git pull` on
-the Pi.**
+the Pi** — the one exception is a brand-new bench's first install,
+which clones this (public) repo so `scripts/bench_setup.sh` can run
+([`docs/getting-started.md`](docs/getting-started.md) §3).
 
 ```sh
 # from the repo root on your Mac
@@ -152,10 +161,12 @@ comm -13 \
   <(ssh "$HIL_BENCH_HOST" 'ls ~/IFS_HIL/tests/hil/ams/*.py | xargs -n1 basename | sort')
 ```
 
-After sync, if you changed broker or dashboard code:
+After sync, if you changed broker or dashboard code, restart them
+under the bench lock — **starting `hil-dashboard` de-energises every
+carrier** (it zeroes the relay port), so never mid-flash or mid-suite:
 
 ```sh
-ssh "$HIL_BENCH_HOST" 'sudo systemctl restart hil-broker hil-dashboard'
+ssh "$HIL_BENCH_HOST" 'flock /tmp/hil-bench.lock sudo systemctl restart hil-broker hil-dashboard'
 ```
 
 For one-time SSH key setup — **per developer**, so access is attributable
@@ -172,12 +183,14 @@ ssh-copy-id "$HIL_BENCH_HOST"
 A Raspberry Pi 4 plugs into the **BACKPLANE_HIL** PCB. The backplane
 hosts 4 MLC carrier slots (STM32H733ZG daughterboards), 3 CAN
 channels, 4 INA226 current monitors (one per slot), 4 DAC80504s, 3
-MCP3208s, 3 TCA9555 I/O expanders, and an ATX PSU interface. Firmware
-PRs trigger CI to build a `.bin`, flash it over CAN via the
-`can-flasher` Rust binary, and post 🟢/🔴 back to the PR. A Python
-daemon — **`hil-broker`** — is the *only* process that opens
-`/dev/spidev0.3`, `/dev/i2c-1`, and `/dev/gpio*`; the dashboard and
-pytest both go through it via Unix-socket JSON-RPC.
+MCP3208s, 3 TCA9555 I/O expanders, and an ATX PSU interface. Labelling
+a firmware PR `hil-test` makes CI build a `.bin` in the cloud, pick a
+bench by capability, flash the carrier over CAN with the `can-flasher`
+Rust binary, run a pytest suite, and post the verdict back to the PR.
+A Python daemon — **`hil-broker`** — is the *only* process that opens
+the userspace SPI nodes (`/dev/spidev0.3`–`0.11`), `/dev/i2c-1`, and
+`/dev/gpio*`; the dashboard and pytest both go through it via
+Unix-socket JSON-RPC.
 
 ---
 
@@ -185,13 +198,18 @@ pytest both go through it via Unix-socket JSON-RPC.
 
 | Question | File |
 |---|---|
+| Taking over? Current state, risks, first tasks | [`HANDOVER.md`](HANDOVER.md) |
 | What's the bench architecture? | [`docs/architecture.md`](docs/architecture.md) |
 | What pin / address / netdev does X live on? | [`docs/hardware-reference.md`](docs/hardware-reference.md) |
 | What does broker RPC `Y` do? | [`docs/broker-api.md`](docs/broker-api.md) |
 | Day-to-day operator recipes | [`docs/operator-guide.md`](docs/operator-guide.md) |
+| Fresh-Pi bringup (automated) | [`scripts/bench_setup.sh`](scripts/bench_setup.sh) |
 | Fresh-Pi bringup (short path) | [`docs/quickstart.md`](docs/quickstart.md) |
 | Fresh-Pi bringup (with reasoning) | [`docs/getting-started.md`](docs/getting-started.md) |
 | Something broke | [`docs/troubleshooting.md`](docs/troubleshooting.md) |
+| Running a suite from a firmware PR | [`docs/development/testing.md`](docs/development/testing.md#running-a-suite-from-a-firmware-pr) |
+| systemd units + the runner restart drop-in | [`infra/systemd/README.md`](infra/systemd/README.md) |
+| Bench descriptors / capability routing | [`configs/benches/`](configs/benches/) · `python3 -m tools.bench --help` |
 | HTTP API for the dashboard | [`docs/dashboard.md`](docs/dashboard.md) |
 | Why mcp251x is patched (5 patches) | [`docs/design/mcp251x-driver-patches.md`](docs/design/mcp251x-driver-patches.md) |
 | How we got here (PR-by-PR) | [`docs/design/phase-history.md`](docs/design/phase-history.md) |
@@ -208,7 +226,7 @@ If `tools/hw_config.py` and a doc disagree, **trust `hw_config.py`**.
 
 ```mermaid
 flowchart TD
-    CI["External CI (firmware PR)<br/>builds .bin in Docker<br/>uploads artifact"]
+    CI["CI — hil-test.yml<br/>cloud-builds .bin at the PR's SHA<br/>uploads artifact"]
 
     subgraph Pi["Raspberry Pi 4"]
         direction TB
@@ -219,7 +237,7 @@ flowchart TD
 
         BROKER["hil-broker (Python)<br/>locks: SPI · I²C · GPIO · CAN"]
 
-        SPI["/dev/spidev0.3"]
+        SPI["/dev/spidev0.3–0.11<br/>(CS owned by the kernel)"]
         I2C["/dev/i2c-1"]
         GPIO["/dev/gpio*"]
         CANK["kernel canN<br/>(mcp251x, patched)"]
@@ -259,15 +277,22 @@ flowchart TD
 
 Break these and things go weird in non-obvious ways.
 
-1. **The broker is the only opener of `/dev/spidev0.3`, `/dev/i2c-1`,
-   and `/dev/gpiochip0`.** Scripts and tests use
-   `tools.hil_client.*` proxies or `broker.server.BrokerClient`.
-   Direct `/dev/*` access from anywhere else risks bus corruption
-   under load.
+1. **The broker is the only opener of the userspace SPI nodes
+   (`/dev/spidev0.3`–`0.11`), `/dev/i2c-1`, and `/dev/gpiochip0`.**
+   Scripts and tests use `tools.hil_client.*` proxies or
+   `broker.server.BrokerClient`. Direct `/dev/*` access from anywhere
+   else risks bus corruption under load.
 
-2. **Kernel `mcp251x` owns `/dev/spidev0.{0,1,2}`.** Do not open
-   them. They don't exist while the overlay is loaded; trying to
-   "fix" that breaks CAN.
+2. **The kernel owns every SPI chip-select.** `mcp251x` holds
+   `spi0.0`–`0.2` (the three MCP2515s): no spidev nodes exist for them,
+   and trying to "fix" that breaks CAN. The other chip-selects — DAC ×4
+   on `spidev0.4`–`0.7`, ADC ×3 on `0.8`–`0.10`, nRF24 on `0.11` — are
+   `cs-gpios` in the overlay, so the SPI core asserts CS *inside* each
+   transfer, under the controller lock. **Never drive a CS GPIO from
+   userspace**: that reopens the window in which `mcp251x` clocks a CAN
+   message into a selected DAC (the #124 wedge). `spidev0.3` is the
+   legacy shared node the broker falls back to — with a warning — only
+   when the per-device nodes are missing, i.e. an old overlay.
 
 3. **CAN netdev names are inverted vs PCB silk.** This is the #1
    source of "discover returns empty" mistakes:
@@ -305,7 +330,7 @@ Break these and things go weird in non-obvious ways.
 ```sh
 pi$ systemctl is-active hil-psu-on hil-can-up hil-broker   # → active × 3
 pi$ ip -br link | grep can                                 # can0/can1/can2 UP
-pi$ ls /dev/spidev0.3 /dev/i2c-1                           # both exist
+pi$ ls /dev/spidev0.{3..11} /dev/i2c-1                     # 9 spidev + i2c
 pi$ pinctrl get 7,8                                        # 7=op lo, 8=ip hi
                                                            # comma, not space:
                                                            # `get 7 8` errors
@@ -327,6 +352,16 @@ pi$ python3 -m tools.bench verify --bench <id>        # hardware matches its des
 what the bench declares. A new bench needs both to pass before it is worth
 registering a runner on it.
 
+A bench that takes CI runs needs two more things up, and neither failure
+shows in the hardware checks — both have already gone unnoticed for days:
+
+```sh
+pi$ U=$(systemctl list-unit-files 'actions.runner.*.service' --no-legend | awk '{print $1}')
+pi$ systemctl is-active "$U"                        # active
+pi$ systemctl show -p Restart --value "$U"          # always (the drop-in)
+pi$ systemctl is-active hil-bench-watchdog.timer    # active
+```
+
 ---
 
 ## Operational recipes (concrete commands)
@@ -335,10 +370,12 @@ registering a runner on it.
 
 ```sh
 # Cold start
-sudo systemctl start hil-psu-on hil-can-up hil-broker
+sudo systemctl start hil-psu-on hil-can-up hil-broker hil-bench-watchdog.timer
 
-# Clean stop
-sudo systemctl stop hil-broker hil-can-up hil-psu-on
+# Clean stop — the timer FIRST. Left running, the watchdog's next tick
+# restarts hil-broker, whose Wants= brings hil-can-up and hil-psu-on
+# (the PSU) back with it, within 5 min.
+sudo systemctl stop hil-bench-watchdog.timer hil-broker hil-can-up hil-psu-on
 
 # Restart broker (after editing broker code)
 sudo systemctl restart hil-broker
@@ -346,12 +383,15 @@ sudo systemctl restart hil-broker
 # Logs
 journalctl -u hil-broker -f
 journalctl -u hil-can-up -b
+journalctl -u hil-bench-watchdog -f   # self-heal ladder + RUNNER DOWN reports
 ```
 
-Dashboard runs as `hil-dashboard.service` (broker client, port 8080):
+Dashboard runs as `hil-dashboard.service` (broker client, port 8080).
+Its start-up writes TCA `0x20` port 0 = `0x00`, **de-energising every
+carrier** — so restart it only under the bench lock:
 ```sh
 systemctl status hil-dashboard
-sudo systemctl restart hil-dashboard
+flock /tmp/hil-bench.lock sudo systemctl restart hil-dashboard
 journalctl -u hil-dashboard -f
 ```
 For ad-hoc runs (different port, debugging), stop the service first
@@ -381,9 +421,32 @@ c.call('ina.current', addr=0x40) * 1000   # mA — expect ~130 mA
 | Negative | Shunt polarity inverted (shouldn't happen on working board) |
 | `bus_voltage_V ≈ 0` | **Normal** (low-side sensing); use `current_A` only |
 
-### Flash an ECU
+### Flash a carrier
 
-Single ECU, factory-default node ID:
+Prefer the wrapper — it is what CI runs, and it carries the safety
+checks the raw command does not. By hand, run it under the bench lock:
+
+```sh
+flock /tmp/hil-bench.lock \
+  python3 -m tools.flash_dut --dut ecu --bin /path/to/ECU08.bin   # or --dut ams
+```
+
+**Why the lock:** neither `flash_dut` nor `can-flasher` takes it — CI
+wraps them in it. The watchdog skips a bench whose lock is held;
+otherwise it runs its checks, and if one fails mid-flash its level-2
+recovery cycles the PSU. Power lost mid-flash can leave an STM32H7
+unrecoverable. Wrap a raw `can-flasher` flash the same way.
+
+`flash_dut` resolves slot, relay, node id, app address and boot trigger
+from the bench descriptor + DUT profile; **de-energises every other DUT
+slot**, so exactly one bootloader can answer; waits for the app to talk
+before sending the boot trigger; gates on the bootloader's **product
+string** (`IFS08-CE-ECU` / `IFS08-CE-AMS`) rather than the node id; and
+refuses to start with a `can-flasher` older than **2.8.0** (older builds
+erase, then fail mid-image and leave the carrier with no app).
+`--dry-run` prints the plan without energising anything.
+
+The raw command underneath, for when you need it:
 ```sh
 can-flasher \
     --interface socketcan --channel can2 --bitrate 500000 \
@@ -392,28 +455,57 @@ can-flasher \
     --address 0x08020000 --verify-after --jump
 ```
 
+Node ids: ECU = `0x01`, AMS = `0x02`, uDV = `0x03` (bench-01's AMS was
+re-provisioned to `0x02` on 2026-09-25). An id lives in each carrier's
+bootloader NVM and can drift, so with the raw command power **only** the
+target carrier, and use the id `discover` actually prints.
+
 `--address 0x08020000` = app-image start for STM32H733 +
 `isc-fs/stm32-can-bootloader`. **The bench bus is 500 kbps** (classic CAN,
 68.75 % SP — both the AMS app and the v1.6.2 multi-FDCAN BL reverted from the
 1 Mbps experiment #338/#341 per AMS #351). After `--jump`, `discover` is
-silent — that's success, not failure. Drop app back to BL without touching the
-board:
+silent — that's success, not failure. Drop a running app back to its
+bootloader without touching the board by sending the DUT's boot trigger
+(`bl_trigger_payload` in its profile):
 ```sh
-can-flasher … --node-id 0x1 send-raw 0x001 03 06 01
+cansend can2 002#B007AD12    # ECU
+cansend can2 002#B007AD11    # AMS
 ```
-
-Multiple carriers on the bus → either power one at a time, or
-provision distinct node IDs once: `can-flasher … config --set
-node-id 0xN`.
+(`can-flasher … send-raw 0x001 03 06 01` is the *demo* firmware's
+variant, not the ECU's or the AMS's.)
 
 ### Run tests
 
+`tests/hil/` holds two different things. The top-level `test_*.py` are
+**bench self-tests** (CAN, SPI DAC/ADC, I²C, relays, MLC power) — they
+flash nothing, but they leave the bench changed: `test_can.py` ends with
+every `canN` link down (last brought up without the 0.6875 sample
+point) and `test_spi_dac.py` soft-resets the DACs, undoing the broker's
+init. Run them under the lock with no carrier under test, then restart
+`hil-can-up` and `hil-broker`. `tests/hil/vcu/` (the ECU; the directory name is
+historical) and `tests/hil/ams/` are **DUT suites** that drive a carrier
+and can **reflash** it.
+
 ```sh
-pytest tests/hil/ -v                                # ~93 pass / ~11 skip
-pytest tests/hil/test_can.py -v
-pytest tests/hil/test_spi_dac.py -k test_channel_sweep
-pytest tests/broker/ -v                             # off-bench (fake backend)
+flock /tmp/hil-bench.lock sh -c 'pytest tests/hil/ --ignore=tests/hil/vcu --ignore=tests/hil/ams -v;
+  sudo systemctl restart hil-can-up hil-broker'     # bench self-tests, then put the bench back
+pytest tests/broker/ -v                                              # off-bench (fake backend)
+
+# a named DUT suite from configs/suites.yaml — the same expansion CI uses
+flock /tmp/hil-bench.lock \
+  pytest $(python3 -m tools.bench suite --dut ecu --suite smoke) -v
 ```
+
+- **Take the bench lock** (`flock /tmp/hil-bench.lock …`) for anything
+  that drives a carrier. CI holds the same lock for flash + pytest; the
+  lock is the only thing stopping a dispatched run from landing in the
+  middle of your session.
+- **Point the reflash fixture at your image.** Block A's A-003
+  reflashes the carrier from `ECU_FIRMWARE_BIN` / `AMS_FIRMWARE_BIN`. CI
+  sets both. On a hand run with `ECU_FIRMWARE_BIN` unset, A-003 falls
+  back to `~/firmware-builds/ECU_fix.bin` — a stale 2026-06 diagnostic
+  build that exists on bench-01 — and every later case then reports on
+  *that*. Export the variable, or deselect A-003.
 
 Tests run **concurrently with the dashboard** — broker serialises
 across processes. Auto-skip if broker socket is missing, so off-bench
@@ -430,7 +522,7 @@ ip -s -d link show can2            # stats + berr-counter (TEC/REC)
 ### Safe shutdown
 
 ```sh
-sudo systemctl stop hil-broker hil-can-up
+sudo systemctl stop hil-bench-watchdog.timer hil-broker hil-can-up
 sudo systemctl stop hil-psu-on     # ExecStop sets GPIO7 high → PSU off
 sudo poweroff
 ```
@@ -444,24 +536,34 @@ if you skip the explicit stop.)
 
 | Symptom | Most likely cause | First action |
 |---|---|---|
-| `can-flasher discover` empty | Wrong channel, or app already running | Confirm `--channel can2`; `send-raw 0x001 03 06 01` to BL-fy |
+| `can-flasher discover` empty | Wrong channel, carrier unpowered, or app running | Confirm `--channel can2` and INA ~130 mA; send the DUT's boot trigger (`cansend can2 002#B007AD12` ECU / `…AD11` AMS) |
+| `discover` lists the node but `flash` fails `CONNECT … timed out` | `--node-id` doesn't match the carrier's bootloader | Use the id `discover` printed; the DUT profile's `bl_node_id` must match the carrier (ECU `0x01`, AMS `0x02`) |
 | `ENOBUFS (os error 105)` mid-flash | `txqueuelen` not 1000 | `sudo systemctl restart hil-can-up` |
-| `RTNETLINK Connection timed out` on `ip link set canN up` | PSU not on / chip asleep | `pinctrl get 7 8` (need `op lo` / `ip hi`) |
-| `mcp251x … error -110` at boot | Stock module, or missing `gpio=7=op,dl` | Verify patched module markers; check config.txt |
+| `BAD_SESSION` mid-flash, carrier left with no app | `can-flasher` transfer stall — happens even ≥ 2.8.0 | Retry: the bootloader stays reachable, and `flash_dut` proceeds on an appless carrier |
+| `flash_dut` refuses before energising anything | `can-flasher` older than 2.8.0 | Upgrade ([`docs/getting-started.md`](docs/getting-started.md) §10) |
+| `RTNETLINK Connection timed out` on `ip link set canN up` | PSU not on / chip asleep | `pinctrl get 7,8` (need `op lo` / `ip hi`) |
+| `mcp251x … error -110` at boot | Stock module, or missing `gpio=7=op,dl` | Verify the patched module (md5 check below); check config.txt |
+| `can2` traffic stops but `ip link` still says UP / ERROR-ACTIVE | `mcp251x` wedged (often after reconfiguring `can2` or a PSU cycle) — looks exactly like firmware TX death | `sudo modprobe -r mcp251x && sudo modprobe mcp251x`, then restart `hil-can-up` + `hil-broker` |
+| A DAC returns a wrong device id (expect `0x0417`); pedal / pack-current stimulus dead | DAC80504 wedged | `python3 -m tools.bench recover --bench <id> --level 2` — the watchdog runs the same ladder every 5 min |
 | Sticky BUS-OFF | `restart-ms 0`, or no peer/bitrate mismatch | `ip -d link show can2`; `systemctl start hil-can-up` |
 | Dashboard all red | Broker socket missing | `systemctl status hil-broker` + `journalctl -u hil-broker -b -n 50` |
+| Watchdog logs `RUNNER DOWN`, or dispatched runs queue and time out | Self-hosted runner exited | `systemctl status 'actions.runner.*'`; confirm the `Restart=always` drop-in ([`infra/systemd/README.md`](infra/systemd/README.md)); re-register only if GitHub really deleted it |
+| Firmware PR looks green but no HIL verdict ever arrived | Workflow *startup failure* (invalid expression): zero jobs, no check-run | `gh api repos/isc-fs/IFS_HIL/actions/runs/<id>/jobs --jq .total_count` must be > 0 |
 | `undervoltage detected!` in dmesg | Pi 5 V input weak (ATX 5VSBY < 3 A) | Move Pi to dedicated 5 V / 3 A supply |
 | Pytest all skipped | `HIL_BROKER_SOCKET` pointing nowhere | `unset HIL_BROKER_SOCKET`, or set to actual path |
 | MLC ≤ 1 mA after relay close | Fuse blown or relay didn't switch | Check F5–F14, listen for relay click, `tca.read_port(0x20, 0)` |
 | `Cannot initialize MCP2515. Wrong wiring?` | Patched module not active | `M=/lib/modules/$(uname -r)/kernel/drivers/net/can/spi/mcp251x.ko.xz; sudo md5sum "$M" "$M.orig"` — hashes must DIFFER. (Grepping the binary for `backplane_hil` can never work: those markers are C comments, stripped at compile time.) |
-| `/dev/spidev0.3` missing | Overlay didn't load | `grep dtoverlay /boot/firmware/config.txt`; `dmesg \| grep overlay` |
-| `Address already in use` on 8080 | Stray `nohup` dashboard fighting the service | `pkill -f dashboard/app.py && sudo systemctl restart hil-dashboard` |
+| `/dev/spidev0.4`–`0.11` missing; broker warns "spidev nodes missing" | Old overlay (pre-kernel-CS) installed — DACs/ADCs fall back to userspace CS, the #124 race | Recompile + reinstall `infra/devicetree/mcp2515-triple.dts`, then reboot |
+| `/dev/spidev0.3` missing | Overlay didn't load at all | `grep dtoverlay /boot/firmware/config.txt`; `dmesg \| grep overlay` |
+| `Address already in use` on 8080 | Stray `nohup` dashboard fighting the service | `pkill -f dashboard/app.py && flock /tmp/hil-bench.lock sudo systemctl restart hil-dashboard` (its start-up de-energises every carrier) |
 
 Diagnostic capture for help requests:
 ```sh
 sudo dmesg | tail -60 > /tmp/dmesg.txt
 journalctl -u hil-psu-on -u hil-can-up -u hil-broker -b --no-pager > /tmp/services.txt
-ip -s -d link show can0 can1 can2 > /tmp/can.txt
+journalctl -u hil-bench-watchdog -b --no-pager > /tmp/watchdog.txt
+cp ~/hil-wedge-evidence.jsonl /tmp/ 2>/dev/null   # bus state captured before each recovery
+for i in 0 1 2; do ip -s -d link show can$i; done > /tmp/can.txt   # one device per `show`
 pinctrl get 4-12 > /tmp/gpio.txt
 vcgencmd get_throttled > /tmp/throttle.txt
 ```
@@ -470,20 +572,58 @@ vcgencmd get_throttled > /tmp/throttle.txt
 
 ## CI flow (firmware-PR loop)
 
-1. Firmware-repo collaborator comments `/hil-build <subdir>` on PR.
-2. [`hil-build-trigger.yml`](.github/workflows/hil-build-trigger.yml)
-   checks permission, dispatches
-   [`hil-build-only.yml`](.github/workflows/hil-build-only.yml) in
-   IFS_HIL with the SHA.
-3. Ubuntu runner builds firmware in the `ifs08hil` Docker image
-   (Debian-bookworm + arm-gnu-toolchain 12.3.rel1) →
-   `.bin`/`.hex`/`SHA256SUMS.txt` → posts ✅/❌ on the firmware PR.
-4. On success, [`hil-flash.yml`](.github/workflows/hil-flash.yml)
-   runs on the `[self-hosted, hil-rpi]` runner (the bench Pi),
-   downloads the artifact, flashes, posts 🟢/🔴.
+Two chains live in `.github/workflows/`. **Only Chain A is current.**
 
-Bench-side responsibility: keep the broker/can/psu services up and
-the GH self-hosted runner installed. The flasher bypasses the broker
+**Chain A — capability-routed.**
+1. On a firmware PR (`isc-fs/IFS08-CE-ECU`, `isc-fs/IFS08-CE-AMS`),
+   someone with write access adds the `hil-test` label or comments
+   `/hil-test [--bench <id>] [suite-or-path]`. The trigger is the
+   firmware repo's own `hil-test.yml`, which dispatches
+   [`hil-test.yml`](.github/workflows/hil-test.yml) here.
+2. **`resolve`** (ubuntu) — `tools.bench resolve` maps capabilities to
+   a bench and its runner labels, fails fast if no runner carrying them
+   is online, and expands the suite from `configs/suites.yaml` (none =
+   `smoke`).
+3. **`build`** (ubuntu, [`hil-fw-build.yml`](.github/workflows/hil-fw-build.yml))
+   — checks the firmware out at the exact SHA and builds it from the
+   recipe reviewed *here* (`configs/firmware/<dut>.yaml`: toolchain
+   14.2.Rel1, flash-layout gate). If the artifact upload fails
+   (free-plan quota), the bench rebuilds the same commit instead.
+4. **`test`** (the bench: `[self-hosted, hil-bench, <bench-id>, <caps…>]`)
+   — preflight recover ladder → `tools/flash_dut.py` → pytest, with
+   flash + pytest under one `flock /tmp/hil-bench.lock` → verdict
+   comment on the PR, including a failing-case table.
+
+**Label vs comment.** A label runs the trigger from the PR's own tree; a
+comment (`issue_comment`) always runs the firmware repo's
+**default-branch** copy, so the trigger must be on `main` there for
+`/hil-test` to fire at all.
+
+**Chain B — legacy, dead.** `/hil-build <subdir>` →
+`hil-build-trigger.yml` → `hil-build-only.yml` (Docker, GCC 12.3) →
+`hil-flash.yml` on `[self-hosted, hil-rpi]` via legacy `tools.flash`.
+No runner carries `hil-rpi`, so it can only queue. Don't extend it;
+removal is pending.
+
+**Credentials — two personal tokens, both single points of failure:**
+- `HIL` — an **org** secret shared to the firmware repos (ECU, AMS,
+  `IFS08-DV-uDV`). Their trigger uses it to dispatch into IFS_HIL
+  (fine-grained PAT, `Actions: read and write` on IFS_HIL).
+- `HIL_CROSS_REPO_PAT` — IFS_HIL repo secret, used for the build's
+  firmware checkout and for the cross-repo verdict comment.
+
+If either expires, HIL runs stop. See
+[`HANDOVER.md` §5](HANDOVER.md#5-ci--the-fleet-model).
+
+**⚠️ A green PR is not proof that a run happened.** An invalid `${{ }}`
+expression turns a workflow into a *startup failure* — zero jobs, no
+check-run — so `gh pr checks` reads green (this hid a dead chain for 23
+days). Check that the run has jobs:
+`gh api repos/isc-fs/IFS_HIL/actions/runs/<id>/jobs --jq .total_count`
+→ > 0. A dead runner fails just as quietly: runs queue, then time out.
+
+Bench-side responsibility: keep the `hil-*` services, the watchdog
+timer and the self-hosted runner up. The flasher bypasses the broker
 (SocketCAN direct).
 
 ---
@@ -505,19 +645,59 @@ whim. Confirm with Raul before touching them.
   lists U22 *and* U23 (`NRF24L01_Breakout` ×2). Either an unpopulated
   spare or a docs lag.
 
-- **CI still flashes through legacy `tools/flash.py`.** The `can0` half of
-  this is fixed — [`configs/ecu_*.yaml`](configs/),
-  [`configs/hil_agent.yaml`](configs/hil_agent.yaml) and
-  [`.github/workflows/hil-flash.yml`](.github/workflows/hil-flash.yml)
-  now all target `can2`, where the carriers actually live. What remains:
-  the workflow runs `python -m tools.flash`, which is legacy — runtime
-  flashing is the Rust `can-flasher`. Migration is TODO(#56). Until it
-  lands, treat the CI flash path as unexercised against a real carrier.
+- **Chain B is dead code.** `hil-build-trigger.yml`,
+  `hil-build-only.yml`, `hil-flash.yml`, `docker/`, `configs/ecu_*.yaml`,
+  `configs/hil_agent.yaml` and `infra/systemd/hil-agent.service` belong
+  to the pre-fleet chain (see **CI flow**). Nothing current routes
+  through them; removal is pending. CI flashing today is
+  `tools/flash_dut.py` → `can-flasher`, and it is exercised on hardware.
 
 - **`tools/mcp2515.py` and `tools/flash.py` are legacy.** Runtime CAN
   is kernel mcp251x; runtime flasher is the Rust `can-flasher`
   binary. The Python equivalents are kept for historical reference
   only — don't extend them, don't route new code through them.
+
+- **An old overlay passes the build checks.** `bench doctor` looks only
+  for `/dev/spidev0.3` (`tools/bench.py:424`), and `bench_setup.sh`
+  only checks that *a* `mcp2515-triple.dtbo` is installed, not that it
+  is the current 12-chip-select one. A bench still on the pre-#130
+  overlay passes both while the broker falls back to userspace CS — the
+  #124 race. The preflight's `ls /dev/spidev0.{3..11}` catches it, and
+  the broker logs a "spidev nodes missing" warning instead of "CS owned
+  by the kernel".
+
+- **Credentials are personal tokens** (`HIL`, `HIL_CROSS_REPO_PAT` —
+  see **CI flow**). And because the build *presents*
+  `HIL_CROSS_REPO_PAT` when checking out the (public) firmware repos, an
+  expired token breaks the build itself, not just the verdict comment.
+
+- **One stale reference, left on purpose.** A comment in
+  `infra/systemd/hil-broker.service` points at
+  `docs/broker_migration_plan.md` (it's
+  `docs/design/broker-migration.md`). It stays because
+  `bench_setup.sh` compares installed units byte-for-byte: touching the
+  file makes every bench re-install the unit on its next run. Fix it
+  together with a real change to that unit.
+
+- **`bench_setup.sh` may add `dtparam=spi=on` on a fresh image.** Its
+  step 1 runs `raspi-config do_spi` whenever `config.txt` has neither
+  the overlay nor `dtparam=spi=on` — always true on a fresh Pi, since
+  the overlay is only installed in step 4 — although its own comment
+  calls that parameter a second claimant for SPI0. bench-01 was built
+  by hand and never took this path. Unverified: check `config.txt`
+  after the first scripted bringup.
+
+- **Code hazards the docs now warn about** (each a small code fix):
+  starting `hil-dashboard` zeroes the relay port, cutting every carrier
+  (`dashboard/app.py` `_init_relays`); the broker's link-changing CAN
+  RPCs re-up links without the 0.6875 sample point (`broker/bus.py`
+  `_ip_up`); `dac.reset` loses the broker's DAC init until it restarts;
+  the dashboard labels kernel `can0` "CAN1 (U17)" (inverted); and
+  `host-tests.yml` skips PRs that touch only `broker/` or `dashboard/`.
+
+- **Legacy udev rule.** `infra/udev/99-hil.rules` renames a gs_usb CAN
+  adapter to `can0`, which would collide with the kernel `mcp251x`
+  `can0`. No such adapter is fitted.
 
 - **+3V3_pi is "under-decoupled"** per the PCB design review
   (IC1 + nRF24 rail). Cosmetic for now; flagged for the next respin.
@@ -557,6 +737,22 @@ module, systemd units). Off-bench on a Mac/Linux laptop you can:
 
 - **Don't change the CAN netdev ↔ PCB mapping in software.** It's a
   kernel probe-order property, not a misconfiguration.
+- **Don't drive an SPI chip-select from userspace.** All of them are
+  kernel-owned (`cs-gpios`); toggling one as a GPIO reopens the #124
+  DAC-wedge race.
+- **Don't reconfigure `can2` (`ip link set can2 …`) while a carrier is
+  under test.** It can wedge the `mcp251x`, which then looks exactly
+  like firmware TX death. If you must, reload the module afterwards.
+- **Don't read a green PR check as "the HIL run passed".** Confirm the
+  run has jobs and that a verdict comment arrived (see **CI flow**).
+- **Don't stop the `hil-*` services and leave `hil-bench-watchdog.timer`
+  running.** Its next tick restarts the broker and, through `Wants=`,
+  the PSU — the bench powers back up within five minutes.
+- **Don't flash by hand without the bench lock**
+  (`flock /tmp/hil-bench.lock …`). The watchdog stands down only for a
+  held lock, and its level-2 recovery cycles the PSU.
+- **Don't restart `hil-dashboard` while a carrier is being flashed or
+  tested.** Its start-up de-energises every carrier.
 - **Don't `psu.power(False)` as a debugging hammer.** Undervoltage,
   BUS-OFF, and stuck mcp251x have cheaper remediations.
 - **Don't extend `tools/mcp2515.py` or `tools/flash.py`.** Legacy.
@@ -584,21 +780,25 @@ module, systemd units). Off-bench on a Mac/Linux laptop you can:
 
 | User says… | You do… |
 |---|---|
-| "is the bench healthy?" | Run the 5-line preflight (see above). Report which pass/fail. |
-| "flash this firmware" | Confirm carrier, INA reads ~130 mA, channel is `can2`, run `can-flasher … flash … --verify-after --jump` |
-| "discover doesn't find anything" | Walk: (1) `--channel can2`? (2) carrier powered (INA ~130 mA)? (3) app already running → `send-raw 0x001 03 06 01` |
+| "is the bench healthy?" | Run the 5-line preflight (see above); on a CI bench also the runner + watchdog checks. `python3 -m tools.bench doctor` + `verify --bench <id>` for the full picture. Report which pass/fail. |
+| "flash this firmware" | `flock /tmp/hil-bench.lock python3 -m tools.flash_dut --dut <ecu\|ams> --bin <path>` — isolation, identity gate and version floor included; the lock keeps the watchdog from cycling the PSU mid-flash. Raw `can-flasher` only when you need it (same lock): target carrier powered alone, INA ~130 mA, `--channel can2`, the node id `discover` prints. |
+| "stop the bench" / "power it down" | `sudo systemctl stop hil-bench-watchdog.timer hil-broker hil-can-up hil-psu-on` — the timer first, or the watchdog brings everything, PSU included, back within five minutes. |
+| "discover doesn't find anything" | Walk: (1) `--channel can2`? (2) carrier powered (INA ~130 mA)? (3) app already running → send its boot trigger (`cansend can2 002#B007AD12` ECU / `…AD11` AMS) |
 | "ENOBUFS during flash" | `ip -o link show can2 \| grep qlen` → if 10, `systemctl restart hil-can-up`. Retry flash. |
-| "flash hangs / disconnects" | Check `journalctl -u hil-broker -f` + `dmesg -w` + flasher stderr. Often `restart-ms` recovery — retry is safe (verify-after + skip-write). |
-| "run the tests" | `cd ~/IFS_HIL && pytest tests/hil/ -v`. Off-bench: add `--fake` broker + `HIL_BROKER_SOCKET`. |
-| "add a new ECU" | Drop a `configs/ecu_<name>.yaml`, ensure CI workflow knows it, ensure carrier slot is assigned. Don't auto-assign — ask Raul. |
+| "flash hangs / disconnects" | Check `journalctl -u hil-broker -f` + `dmesg -w` + flasher stderr. Often `restart-ms` recovery — retry is safe (verify-after + skip-write). A `BAD_SESSION` mid-image is a known `can-flasher` stall: retry. |
+| "run the tests" | Bench self-tests, under the lock and followed by `sudo systemctl restart hil-can-up hil-broker` (they leave CAN and the DACs changed): `pytest tests/hil/ --ignore=tests/hil/vcu --ignore=tests/hil/ams -v`. A DUT suite: `flock /tmp/hil-bench.lock pytest $(python3 -m tools.bench suite --dut <ecu\|ams> --suite smoke)`, with `ECU_FIRMWARE_BIN` / `AMS_FIRMWARE_BIN` pointing at the image under test (A-003 reflashes from it). Off-bench: `--fake` broker + `HIL_BROKER_SOCKET`. |
+| "test this PR on the bench" / "deploy a new firmware via CI" | Label the firmware PR `hil-test` (or comment `/hil-test [suite]`). Then confirm the IFS_HIL run actually has jobs and that a verdict comment arrives. |
+| "set up a new bench" / "deploy to a new Pi" | `scripts/bench_setup.sh --bench bench-NN` on the Pi — resumable, stops for a reboot in the middle. Manual gaps (descriptor FIXMEs, credentials, stimulus hardware, Tailscale): [`HANDOVER.md`](HANDOVER.md) §4. |
+| "the bench is wedged" / "a DAC is dead" | Let the watchdog act, or `python3 -m tools.bench recover --bench <id> --level 1` (broker restart), then `--level 2` (PSU power-on reset + `mcp251x` reload). Evidence is appended to `~/hil-wedge-evidence.jsonl` before each recovery. |
+| "is the runner up?" / "runs are stuck in Queued" | `systemctl status 'actions.runner.*'` + `journalctl -u hil-bench-watchdog` (it logs `RUNNER DOWN`). Check the `Restart=always` drop-in is installed. |
+| "add a new ECU" | Needs a build recipe `configs/firmware/<dut>.yaml`, a DUT profile under `tests/hil/<dut>/`, an entry in `tools/flash_dut.py` `PROFILE_FOR_DUT`, suites in `configs/suites.yaml`, the `dut-<x>` capability + slot in the bench descriptor, and the trigger workflow (+ access to the `HIL` org secret) in the firmware repo. Don't auto-assign a slot — ask Raul. |
 | "add a broker RPC method" | Add the backend method to `broker/bus.py` (real) + `broker/fake_bus.py` (fake) → register in `broker/rpc.py` `build_method_table` → add proxy to `tools/hil_client.py` if useful → add `tests/broker/test_*.py` → document in `docs/broker-api.md`. |
-| "change a pin/address" | Edit `tools/hw_config.py` **only**. Hardware reference doc auto-becomes-stale; PR the doc update in the same commit. |
+| "change a pin/address" | Edit `tools/hw_config.py`; for an SPI chip-select also the `cs-gpios` list in `infra/devicetree/mcp2515-triple.dts` (the kernel drives CS) + reboot. Hardware reference doc auto-becomes-stale; PR the doc update in the same commit. |
 | "the dashboard is red" | `systemctl status hil-broker`, `journalctl -u hil-broker -b -n 50`. If broker is down, find why before restarting. |
 | "I'm getting undervoltage warnings" | `vcgencmd get_throttled`. If non-zero, the fix is hardware (better 5 V supply on Pi VBUS) — do not patch in software. |
-| "deploy a new firmware via CI" | Push to firmware repo, open PR, comment `/hil-build <subdir>`. CI handles the rest. |
-| "sync to Pi" / "deploy to bench" / "push code to bench" | Confirm `$HIL_BENCH_HOST` names the intended bench (see **Bench hosts**), then `scripts/sync_to_pi.sh` from repo root on the Mac. Restart services if broker/dashboard code changed: `ssh "$HIL_BENCH_HOST" 'sudo systemctl restart hil-broker hil-dashboard'`. Never `git clone` / `git pull` on the Pi. |
+| "sync to Pi" / "deploy to bench" / "push code to bench" | Confirm `$HIL_BENCH_HOST` names the intended bench (see **Bench hosts**), then `scripts/sync_to_pi.sh` from repo root on the Mac. Restart services if broker/dashboard code changed, under the lock (the dashboard's start-up de-energises every carrier): `ssh "$HIL_BENCH_HOST" 'flock /tmp/hil-bench.lock sudo systemctl restart hil-broker hil-dashboard'`. Never `git clone` / `git pull` on the Pi. |
 | "regenerate fab files" | KiCad work in `docs/BACKPLANE_HIL/`. Outputs in `docs/BACKPLANE_HIL/production/`. PCB is working — confirm scope before regenerating. |
-| "review my PR" | Look for: (1) any direct `/dev/*` opens outside broker (NACK); (2) hw_config.py vs docs drift; (3) breaks the 6 invariants? (4) test coverage in `tests/broker/` for new RPCs; (5) sane systemd dependency order. |
+| "review my PR" | Look for: (1) any direct `/dev/*` opens outside broker (NACK); (2) hw_config.py vs docs drift; (3) breaks the 6 invariants? (4) test coverage in `tests/broker/` for new RPCs; (5) sane systemd dependency order; (6) a test that reconfigures `can2` or toggles a chip-select. |
 | "commit this" / *(after any coherent change)* | If on `dev`, branch off first (`feat/`, `fix/`, `docs/`, etc.). Stage only the relevant files (no `-A`), use conventional-commit style, commit without asking. **Never commit to `main`, `jb`, or directly on `dev`.** |
 | *(after committing on `feat/*` or `fix/*`)* | Push automatically (`git push -u origin <branch>`). No need to ask. |
 | *(after committing on `docs/*`, `chore/*`, `test/*`)* | Push when opening a PR or when the next step is clearly remote. Otherwise leave it local. |

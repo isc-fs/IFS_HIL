@@ -45,9 +45,11 @@ ecu:
     - tests/hil/vcu/test_block_h_pitdiag.py
 
 ams:
-  # NOT green today: A-005/A-006/A-014 fail on IFS_HIL#116 (3 of 95 cells read
-  # the NTC AUX voltage). Kept honest rather than trimmed to look green -- the
-  # failures are real and tracked.
+  # A-005/A-006/A-014 used to fail here on IFS_HIL#116 (3 of 95 cells read the
+  # NTC AUX voltage); PR#134 fixed it (emulator fw 0.7.0). Last observed on
+  # bench-01 (2026-09-04, by hand): A-008 (0x4A2 cadence) marginal, flipping run
+  # to run, and A-012 failing only inside a full Block A (ordering). Not yet
+  # seen green through the CI chain -- kept honest rather than trimmed.
   smoke:
     - tests/hil/ams/test_block_a_boot.py
   full:

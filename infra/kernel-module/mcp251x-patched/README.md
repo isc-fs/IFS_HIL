@@ -91,12 +91,21 @@ candump -n 1 can0
 
 The patch targets `rpi-6.12.y`. When the running kernel changes,
 re-run `build.sh`. If `patch` fails to apply because upstream has
-changed the surrounding lines, rebase the hunks manually — the four
+changed the surrounding lines, rebase the hunks manually — the five
 patched regions are small and comments in the source make them easy
 to locate.
 
-Also regenerate the patch after any local edits:
+Also regenerate the patch after any local edits — against a fresh
+upstream copy (`build.sh` keeps none), with the `a/` / `b/` names its
+`patch -p1` expects:
 
 ```sh
-diff -u _build/.mcp251x.c.orig _build/mcp251x.c > 0001-backplane-hil-spi-quirks.patch
+curl -fsSL -o /tmp/mcp251x.c.orig \
+    "https://raw.githubusercontent.com/raspberrypi/linux/rpi-6.12.y/drivers/net/can/spi/mcp251x.c"
+diff -u --label a/mcp251x.c --label b/mcp251x.c \
+    /tmp/mcp251x.c.orig _build/mcp251x.c > 0001-backplane-hil-spi-quirks.patch
 ```
+
+This drops the patch's three `#` header lines; restore them by hand. See
+[`docs/development/kernel-module.md`](../../../docs/development/kernel-module.md)
+for the full edit–build–verify loop.

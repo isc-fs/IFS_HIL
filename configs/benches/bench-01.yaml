@@ -3,10 +3,10 @@
 # Authored by the bench owner, validated against configs/benches/schema.json in
 # CI, and consumed by tools/bench.py (labels / verify) and the test fixtures.
 #
-# STATUS: the `expect` block below is DECLARED, not yet machine-verified -- the
-# bench was unreachable (LAN and Tailscale) when this descriptor was written.
-# Run `python -m tools.bench verify --bench bench-01` on the bench and correct
-# anything that disagrees before trusting it for routing.
+# STATUS: verified. `python -m tools.bench verify --bench bench-01` passes
+# against this descriptor, and CI's preflight runs it before every flash (last
+# pass: run 36193122166, 2026-09-25). If you rewire the bench, re-run verify and
+# correct whichever is wrong -- the wiring or this file.
 
 schema_version: 1
 id: bench-01
@@ -58,8 +58,9 @@ can:
   acu:
     dev: can2
     bitrate: 500000
-    # 0.6875, NOT the 0.875 that hil-can-up sets. A mismatch bus-offs the AMS,
-    # which has cost several sessions. Preflight asserts the live value.
+    # 0.6875, NOT the kernel's 0.875 default at 500 kbit/s (hil-can-up now passes
+    # it explicitly). A mismatch bus-offs the AMS, which has cost several
+    # sessions. Preflight asserts the live value.
     sample_point: 0.6875
 
 slots:
@@ -70,7 +71,7 @@ slots:
     ina: 0x41
   "3":
     dut: none
-    notes: configs/ecu_udv.yaml targets this slot, but no carrier is seated today.
+    notes: the legacy configs/ecu_microdv.yaml targets this slot (MLC3), but no carrier is seated today.
   "4":
     dut: ecu
     ina: 0x45
