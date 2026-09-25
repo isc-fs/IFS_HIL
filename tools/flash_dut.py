@@ -20,11 +20,17 @@ Everything bench-specific is resolved, never hardcoded: the carrier slot and its
 relay come from configs/benches/<id>.yaml, and the node id, app address and boot
 trigger come from the DUT profile.
 
-THE SAFETY PROPERTY THAT MATTERS: the AMS and the ECU bootloaders BOTH answer on
-node 0x01, and are told apart only by their boot-trigger payload. If two carriers
-are powered, `discover` can answer from the wrong board and the wrong firmware
-gets written. So every other DUT-bearing slot is de-energised first, and the
-discovery result is asserted to be exactly one node.
+THE SAFETY PROPERTY THAT MATTERS: only the carrier being flashed is powered.
+Every other DUT-bearing slot is de-energised first, and the discovery result is
+asserted to be exactly one node.
+
+This is deliberately NOT keyed on node ids. A bootloader's node id lives in that
+carrier's own NVM, provisioned separately from any firmware, and it drifts:
+bench-01's AMS answered 0x01 -- the ECU's id -- until it was re-provisioned to
+0x02 on 2026-09-25. While both answered 0x01, a second powered carrier meant
+`discover` could reply from the wrong board and the wrong firmware got written.
+Distinct ids today are a provisioning fact, not a guarantee, so isolation does
+not skip a carrier whose profile happens to declare a different id.
 """
 
 import argparse
@@ -174,8 +180,11 @@ def carrier_power(desc):
 
 
 def other_dut_slots(desc, target_slot):
-    """Every OTHER slot that seats a DUT. These must be dark before we flash:
-    both bootloaders answer on node 0x01."""
+    """Every OTHER slot that seats a DUT. These must be dark before we flash.
+
+    Slot-based on purpose: it never sees a node id, so it cannot be talked out
+    of isolating a carrier by a profile that claims the ids differ. See the
+    module docstring for why that matters."""
     out = []
     for s, spec in (desc.get("slots") or {}).items():
         if int(s) != target_slot and spec.get("dut") not in (None, "none"):
@@ -229,7 +238,7 @@ def flash(dut, bin_path, bench_id=None, dry=False, expect_sha=None,
             client.call("tca.set_direction", addr=tca, port=port, mask=0x00)
 
         for s, other in others:
-            print(f"          de-energising MLC{s} ({other}) — its BL also answers node 0x01")
+            print(f"          de-energising MLC{s} ({other}) — only the carrier being flashed stays powered")
             if not dry:
                 client.call("tca.write_pin", addr=tca, port=port, pin=s - 1, value=False)
         if others and not dry:
@@ -282,9 +291,9 @@ def flash(dut, bin_path, bench_id=None, dry=False, expect_sha=None,
             row = found[0]
             print(f"          one node: {row}")
             # Identity gate. Stronger than the node id, which is provisioned into
-            # flash separately from the firmware constant and does drift: on
-            # bench-01 the AMS bootloader answers 0x01 while ams_config.hpp
-            # declares AmsNodeId = 0x02. The product string is what the board
+            # the carrier's BL NVM separately from any firmware and does drift:
+            # bench-01's AMS answered 0x01 until 2026-09-25 while ams_config.hpp
+            # declared AmsNodeId = 0x02. The product string is what the board
             # says it IS, so it catches a mis-slotted or mis-provisioned carrier
             # that a node-id check would wave through.
             want_product = profile.get("bl_product")

@@ -30,9 +30,14 @@ def test_refuses_a_dut_the_bench_does_not_declare():
 
 
 def test_every_other_dut_slot_is_de_energised():
-    """THE safety property. Both bootloaders answer node 0x01, so a second
-    powered carrier means `discover` can reply from the wrong board and the
-    wrong firmware gets written."""
+    """THE safety property: only the carrier being flashed is powered.
+
+    Note what this now proves. Since 2026-09-25 the AMS answers 0x02 and the
+    ECU 0x01, so their ids no longer collide -- and the ECU must STILL be
+    dropped. Do not "fix" this test if the ids differ: node ids live in each
+    carrier's NVM and drift (the AMS was 0x01 until that date), and while two
+    powered carriers shared one, `discover` could reply from the wrong board
+    and the wrong firmware got written."""
     desc, _, slot = resolve("ams", "bench-01")
     others = other_dut_slots(desc, slot)
     assert (4, "ecu") in others, "the ECU carrier must be dropped before flashing the AMS"
@@ -48,8 +53,9 @@ def test_empty_slots_are_not_touched():
 
 
 def test_the_two_duts_have_different_boot_triggers():
-    """They share bl_node_id 0x01 and are told apart ONLY by this payload.
-    flash_helper.py hardcodes the AMS one, which is why it lives in the profile."""
+    """The boot trigger is what tells the two DUTs apart on a shared bus,
+    whatever their node ids happen to be provisioned as. flash_helper.py
+    hardcodes the AMS one, which is why it lives in the profile."""
     payloads = {}
     for dut in ("ams", "ecu"):
         _, profile, _ = resolve(dut, "bench-01")
@@ -82,7 +88,8 @@ def test_every_known_dut_has_a_profile_file():
 def test_each_dut_declares_the_product_its_bootloader_reports():
     """The identity gate. bl_node_id is provisioned into flash separately from
     the firmware constant and demonstrably drifts — bench-01's AMS carrier
-    answers 0x01 while ams_config.hpp declares AmsNodeId = 0x02. The product
+    answered 0x01 until 2026-09-25 while ams_config.hpp declared
+    AmsNodeId = 0x02. The product
     string is what the board says it IS, so it catches a mis-slotted or
     mis-provisioned carrier that a node-id check would wave through."""
     products = {}

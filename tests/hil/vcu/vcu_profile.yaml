@@ -22,21 +22,23 @@ bus_inv_sample_point:     0.875      # FDCAN1/INV — 87.5% (presc3 seg1=13 seg2
 bus_acu_sample_point:     0.688      # FDCAN2/ACU — 68.75% (presc3 seg1=10 seg2=5)
 
 # -- Bootloader ------------------------------------------------------
-# Boot trigger that drops a running app back into the bootloader. The two
-# DUTs share bl_node_id 0x01 and are told apart by THIS payload, so it must
-# come from the profile -- tools/firmware_test/flash_helper.py:195 hardcodes
-# the AMS value and would never drop an ECU into its BL.
+# Boot trigger that drops a running app back into the bootloader. It is what
+# tells the two DUTs apart on a shared bus, so it must come from the profile --
+# tools/firmware_test/flash_helper.py:195 hardcodes the AMS value and would
+# never drop an ECU into its BL.
 # What the bootloader reports as Product in `can-flasher discover`.
-# A STRONGER identity gate than bl_node_id: the BL node id is provisioned
-# into flash separately from the firmware constant, and on bench-01 the AMS
-# carrier answers 0x01 while ams_config.hpp declares AmsNodeId = 0x02. The
-# product string does not drift that way.
+# A STRONGER identity gate than bl_node_id: the BL node id lives in each
+# carrier's bootloader NVM, provisioned separately from any firmware, and it
+# drifts -- bench-01's AMS answered 0x01 until 2026-09-25. The product string
+# is what the board says it IS, and does not.
 bl_product:               "IFS08-CE-ECU"
 bl_trigger_id:            0x002
 bl_trigger_payload:       "B007AD12"   # ECU bootloader.hpp BlBootTriggerPayload
 bl_node_id:               0x01       # ECU/VCU node-id (Raul 2026-06-13: ECU=0x01, AMS=0x02, uDV=0x03).
-                                     # NOTE: the AMS chip is still physically 0x01 until re-burned ->
-                                     # power MLC2 (AMS) OFF when flashing the VCU, else both answer 0x01.
+                                     # The AMS carrier was re-provisioned 0x01 -> 0x02 on 2026-09-25
+                                     # (IFS_HIL#140), so the two no longer collide. MLC2 is still powered
+                                     # OFF when flashing the VCU: flash_dut isolates every other DUT
+                                     # regardless of ids, because ids are per-carrier NVM and drift.
 bl_discover_timeout_ms:   3000
 bl_per_frame_timeout_ms:  30000
 bl_flash_timeout_s:       60

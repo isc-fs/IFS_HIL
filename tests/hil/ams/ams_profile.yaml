@@ -23,35 +23,40 @@ mlc_boot_settle_s:        0.5        # delay after relay close before discover
                                      # short enough to catch BL before auto-jump
 
 # -- Bootloader -------------------------------------------------------
-# Boot trigger that drops a running app back into the bootloader. The two
-# DUTs share bl_node_id 0x01 and are told apart by THIS payload, so it must
-# come from the profile -- tools/firmware_test/flash_helper.py:195 hardcodes
-# the AMS value and would never drop an ECU into its BL.
+# Boot trigger that drops a running app back into the bootloader. It is what
+# tells the two DUTs apart on a shared bus, so it must come from the profile --
+# tools/firmware_test/flash_helper.py:195 hardcodes the AMS value and would
+# never drop an ECU into its BL.
 # What the bootloader reports as Product in `can-flasher discover`.
-# A STRONGER identity gate than bl_node_id: the BL node id is provisioned
-# into flash separately from the firmware constant, and on bench-01 the AMS
-# carrier answers 0x01 while ams_config.hpp declares AmsNodeId = 0x02 (see
-# bl_node_id / fw_declared_node_id below). The product string does not drift
-# that way.
+# A STRONGER identity gate than bl_node_id: the BL node id lives in each
+# carrier's bootloader NVM, provisioned separately from any firmware, and it
+# drifts -- bench-01's AMS answered 0x01 until 2026-09-25 (see bl_node_id
+# below). The product string is what the board says it IS, and does not.
 bl_product:               "IFS08-CE-AMS"
 bl_trigger_id:            0x002
 bl_trigger_payload:       "B007AD11"   # AMS bootloader.hpp BlBootReqPayload
 # What the BOOTLOADER on this carrier answers to, and therefore what
 # can-flasher addresses: tools/flash_dut.py, the Block D flash cases and
-# A-002/A-003 all key off this. It is NOT kAmsNodeId, whatever the comment
-# here used to claim -- the BL node id is provisioned into flash separately
-# from any firmware constant, and bench-01's AMS carrier was provisioned
-# 0x01 (the ECU's id in the ECU=0x01 / AMS=0x02 / uDV=0x03 scheme) while
-# ams_config.hpp declares AmsNodeId = 0x02. Changing this to 0x02 does not
-# fix that; it just stops the bench being able to flash the AMS.
-bl_node_id:               0x01
+# A-002/A-003 all key off this.
+#
+# It is a property of the carrier, not the firmware: the BL reads it from a
+# record in its own NVM. bench-01's AMS carrier was provisioned 0x01 -- the
+# ECU's id in the ECU=0x01 / AMS=0x02 / uDV=0x03 scheme -- until 2026-09-25,
+# when it was re-provisioned over SWD by appending one BL NVM record (key
+# 0x0001 = 0x02, seq 5, at 0x080E0080; no erase, existing records intact).
+# It now answers 0x02, the same as fw_declared_node_id below (IFS_HIL#140).
+bl_node_id:               0x02
 
 # What the FIRMWARE declares itself to be: ams_config.hpp kAmsNodeId, which
 # firmware_info.cpp stamps into `.reserved[0]` and the app re-reads to fill
 # pit-diag 0x6C6[7]. A-009 reads that field out of the .bin, A-013 reads the
-# byte off the wire, and both used to compare it against bl_node_id -- two
-# genuinely different values, so both failed the moment the firmware moved
-# to 0x02 (v2.x onward). Bench-independent: it is a firmware constant.
+# byte off the wire. Bench-independent: it is a firmware constant.
+#
+# Equal to bl_node_id on bench-01 today, and still a separate key on purpose:
+# one is compiled in, the other is provisioned per carrier, and they have
+# already disagreed once (0x02 vs 0x01, until 2026-09-25). A carrier that is
+# re-seated or re-provisioned can make them disagree again, and the two
+# assertions should then fail for their own reasons.
 fw_declared_node_id:      0x02
 bl_discover_timeout_ms:   3000       # `--timeout-ms` on `can-flasher discover`
 bl_per_frame_timeout_ms:  30000      # `--timeout` (per ISO-TP transaction)
