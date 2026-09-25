@@ -82,9 +82,13 @@ The dashboard is a systemd service and starts automatically at boot
 
 ```sh
 pi$ systemctl status hil-dashboard       # check it's running
-pi$ sudo systemctl restart hil-dashboard # after editing dashboard code
+pi$ flock /tmp/hil-bench.lock sudo systemctl restart hil-dashboard   # after editing dashboard code
 pi$ journalctl -u hil-dashboard -f       # follow logs
 ```
+
+**Starting the dashboard de-energises every carrier** — its start-up
+writes TCA `0x20` port 0 = `0x00` — so restart it only under the bench
+lock, never while a carrier is being flashed or tested.
 
 Browse to `http://<pi-ip>:8080/`. You get, at a glance:
 
@@ -103,7 +107,7 @@ install may still be running:
 
 ```sh
 pi$ pkill -f dashboard/app.py
-pi$ sudo systemctl restart hil-dashboard
+pi$ flock /tmp/hil-bench.lock sudo systemctl restart hil-dashboard
 ```
 
 See [`docs/dashboard.md`](dashboard.md) for the HTTP API reference.
@@ -257,6 +261,11 @@ Mode encoding for backwards compatibility:
 - `0x00` → link UP, not loopback (= NORMAL)
 - `0x40` → link UP with `loopback on`
 
+These take the link down and bring it back with only a bitrate — so at
+the kernel's default sample point (0.875), not the bench's 0.6875. On
+`can2`, the carrier bus, that bus-offs the DUTs: don't use them with a
+carrier under test, and `sudo systemctl restart hil-can-up` afterwards.
+
 ### Recover from bus-off
 
 Bus-off on a real CAN bus typically means no peer was ACKing
@@ -349,15 +358,20 @@ which also lists the named suites so a developer picks what runs.
 
 - **Bench self-tests** — the top-level `tests/hil/test_*.py` (CAN, SPI
   DAC/ADC, I²C, relays, MLC power). They exercise the bench through
-  the broker and flash nothing.
+  the broker and flash nothing — but they leave it changed:
+  `test_can.py` ends with every `canN` link down (last brought up
+  without the 0.6875 sample point), and `test_spi_dac.py` soft-resets
+  the DACs, undoing the broker's init. Run them under the bench lock,
+  with no carrier under test, and put the bench back afterwards.
 - **DUT suites** — `tests/hil/vcu/` (the ECU; the directory name is
   historical) and `tests/hil/ams/`. They drive a carrier, and Block A
   **reflashes** it.
 
 ```sh
 pi$ cd ~/IFS_HIL
-pi$ pytest tests/hil/ --ignore=tests/hil/vcu --ignore=tests/hil/ams -v   # self-tests
-pi$ pytest tests/hil/test_can.py -v
+pi$ flock /tmp/hil-bench.lock sh -c 'pytest tests/hil/ --ignore=tests/hil/vcu --ignore=tests/hil/ams -v;
+      sudo systemctl restart hil-can-up hil-broker'    # self-tests, then put the bench back
+pi$ pytest tests/hil/test_can.py -v                    # one module (restore afterwards too)
 pi$ pytest tests/hil/test_spi_dac.py -v -k test_channel_sweep
 ```
 

@@ -64,7 +64,7 @@ hosts*) and sync with the script:
 ```sh
 $ export HIL_BENCH_HOST=isc@<bench-ip>
 $ scripts/sync_to_pi.sh              # rsync, no --delete
-$ ssh "$HIL_BENCH_HOST" 'sudo systemctl restart hil-broker &&
+$ ssh "$HIL_BENCH_HOST" 'flock /tmp/hil-bench.lock sudo systemctl restart hil-broker &&
     cd ~/IFS_HIL && python3 -m pytest tests/broker/ -q'
 ```
 

@@ -335,6 +335,12 @@ running, its next tick restarts `hil-broker`, whose `Wants=` brings
 `hil-can-up` and `hil-psu-on` — the PSU — back within five minutes, under
 whoever thought the bench was off.
 
+**Restarting the dashboard cuts carrier power** — its start-up zeroes
+the relay port — so restart it only under the bench lock. And the
+**bench self-tests** (the top-level `tests/hil/test_*.py`) leave the CAN
+links down and the DACs reset: run them under the lock, then
+`sudo systemctl restart hil-can-up hil-broker`.
+
 ---
 
 ## 7. Known drift / cleanup backlog
@@ -371,6 +377,15 @@ with Raúl before touching anything hardware-adjacent.
   `flock` (CI does that). It can't simply take the lock itself: under CI's
   `flock`, a second lock on the same file would deadlock. An environment
   handshake from the caller would let it lock only when run bare.
+- **Code hazards the docs now warn about** — each a small code fix:
+  starting `hil-dashboard` zeroes the relay port and cuts power to every
+  carrier (`dashboard/app.py` `_init_relays`); the broker's
+  link-changing CAN RPCs re-up links without the 0.6875 sample point
+  (`broker/bus.py` `_ip_up`), so the dashboard's mode dropdown and
+  `test_can.py` leave `can2` at 0.875; `dac.reset` loses the broker's
+  DAC init until the broker restarts; the dashboard labels kernel `can0`
+  "CAN1 (U17)" (inverted); and `host-tests.yml` doesn't run on PRs that
+  touch only `broker/` or `dashboard/`.
 - **Legacy udev rule**: `infra/udev/99-hil.rules` renames a USB-CAN adapter
   to `can0`, which would collide with the kernel `mcp251x` `can0`. No such
   adapter is on the bench; drop the rule.
@@ -441,8 +456,10 @@ In rough priority order:
    a spare Pi) to prove the docs, and file every gap you hit — starting with
    whether `config.txt` ends up carrying `dtparam=spi=on`
    ([§7](#7-known-drift--cleanup-backlog)).
-7. **Remove the dead Chain B and legacy files**, harden `doctor` against an
-   old overlay, and close #117 / #94.
+7. **Clear the [§7](#7-known-drift--cleanup-backlog) backlog**: remove the
+   dead Chain B and legacy files, fix the code hazards and the
+   `bench_setup.sh` loose ends, harden `doctor` against an old overlay,
+   and close #117 / #94.
 8. **Document the stimulus hardware** so a new bench can declare
    `stim-*` / `fault-*` capabilities.
 
