@@ -495,7 +495,7 @@ Probe the (unpopulated) nRF24L01+. Returns `bool` — typically
 
 ---
 
-## I²C methods
+## I2C methods
 
 ### `i2c.scan`
 
