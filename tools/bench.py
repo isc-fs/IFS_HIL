@@ -367,7 +367,7 @@ def runner_state(unit):
     return en, ac, rs
 
 
-def doctor_checks():
+def doctor_checks(include_runner=True):
     """Yield (section, name, ok, detail) for every documented setup step."""
     rc, out = _sh("dpkg -s " + " ".join(APT_PACKAGES) + " >/dev/null 2>&1")
     yield ("2", "apt packages", rc == 0,
@@ -469,6 +469,8 @@ def doctor_checks():
     # And enabled is not enough either. The stock unit has no Restart=, so a
     # runner that EXITS -- as bench-01's did on a transient "registration
     # deleted" from GitHub -- stays down however it is enabled.
+    if not include_runner:
+        return
     units = runner_units()
     rc_cfg, _ = _sh("test -f \"$HOME/actions-runner/.runner\"")
     if units:
@@ -780,7 +782,7 @@ def cmd_doctor(args):
 
     failures = 0
     section = None
-    for sec, name, ok, detail in doctor_checks():
+    for sec, name, ok, detail in doctor_checks(include_runner=not args.host_only):
         if sec != section:
             print(f"\n§{sec}  {'-' * 52}")
             section = sec
@@ -788,6 +790,8 @@ def cmd_doctor(args):
         failures += 0 if ok else 1
 
     print()
+    if args.host_only:
+        print("(§14, the self-hosted runner, not checked: --host-only)")
     if failures:
         print(f"{failures} check(s) failed — see the matching section of "
               "docs/getting-started.md")
@@ -1174,9 +1178,16 @@ def main():
     p.add_argument("--bench", required=True)
     p.set_defaults(func=cmd_verify)
 
-    sub.add_parser("doctor",
-                   help="check this host against the documented bench build"
-                   ).set_defaults(func=cmd_doctor)
+    p = sub.add_parser("doctor",
+                       help="check this host against the documented bench build")
+    # bench_setup.sh runs doctor in its host phase, BEFORE its runner phase.
+    # The runner section is repaired by that later phase, so gating the host
+    # phase on it would stop the script before it could fix it -- on any bench
+    # whose runner is configured but lacks the restart drop-in.
+    p.add_argument("--host-only", action="store_true",
+                   help="skip §14 (the self-hosted runner); bench_setup.sh "
+                        "repairs that in a later phase")
+    p.set_defaults(func=cmd_doctor)
 
     args = ap.parse_args()
     return args.func(args)
