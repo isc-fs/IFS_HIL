@@ -383,11 +383,27 @@ step "Self-hosted runner"
 LABELS="$( cd "$REPO_ROOT" && python3 -m tools.bench labels --bench "$BENCH_ID" 2>/dev/null || true )"
 if [ -f "$HOME/actions-runner/.runner" ]; then
     c_ok "runner already configured"
-    if systemctl list-units --type=service --all 2>/dev/null | grep -q actions.runner; then
-        c_ok "runner service present"
-    else
+    # `list-units --all` matches a unit that exists but is DISABLED, so the old
+    # check passed on a bench whose runner would never come back after a power
+    # cut. Ask about enablement directly, and name the unit rather than grepping
+    # for a substring.
+    RUNNER_UNIT="$(systemctl list-unit-files 'actions.runner.*.service' --no-legend 2>/dev/null | awk '{print $1}' | head -1)"
+    if [ -z "$RUNNER_UNIT" ]; then
         c_do "install and start the runner service"
         run "cd '$HOME/actions-runner' && sudo ./svc.sh install \"$(id -un)\" && sudo ./svc.sh start"
+    else
+        if [ "$(systemctl is-enabled "$RUNNER_UNIT" 2>/dev/null)" = enabled ]; then
+            c_ok "runner service enabled ($RUNNER_UNIT)"
+        else
+            c_do "enable $RUNNER_UNIT so it returns after a power cut"
+            run "sudo systemctl enable '$RUNNER_UNIT'"
+        fi
+        if [ "$(systemctl is-active "$RUNNER_UNIT" 2>/dev/null)" = active ]; then
+            c_ok "runner service active"
+        else
+            c_do "start $RUNNER_UNIT"
+            run "sudo systemctl start '$RUNNER_UNIT'"
+        fi
     fi
     mark_done runner
 elif [ -z "$RUNNER_TOKEN" ] && ! ( command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1 ); then

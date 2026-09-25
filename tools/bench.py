@@ -432,6 +432,40 @@ def doctor_checks():
     rc, ver = _sh("can-flasher --version 2>/dev/null")
     yield ("10", "can-flasher", rc == 0, ver or "not on PATH")
 
+    # The self-hosted runner. Its unit name carries the org, repo and runner
+    # name (actions.runner.<org>-<repo>.<bench>.service), so discover it rather
+    # than hardcoding one bench's.
+    #
+    # Checked ONLY when a runner is already configured. `bench doctor` runs in
+    # the bootstrap's host phase, which is BEFORE the runner phase, so failing
+    # on a bench that has not reached that step yet would block provisioning on
+    # a step that is not due.
+    #
+    # When one IS configured, `enabled` matters as much as `active`: a unit that
+    # is active but disabled works until the next power cut and then silently
+    # does not come back. The bench itself stays healthy, so nothing else here
+    # complains, while every dispatched run queues against an offline runner
+    # until it times out — which is exactly what happened to bench-01.
+    _, runner_units = _sh("systemctl list-unit-files 'actions.runner.*.service' "
+                          "--no-legend 2>/dev/null | awk '{print $1}'")
+    runner_units = [u for u in runner_units.split() if u]
+    rc_cfg, _ = _sh("test -f \"$HOME/actions-runner/.runner\"")
+    if runner_units:
+        for unit in runner_units:
+            _, en = _sh(f"systemctl is-enabled {unit} 2>/dev/null")
+            _, ac = _sh(f"systemctl is-active {unit} 2>/dev/null")
+            yield ("14", unit.replace(".service", ""),
+                   en == "enabled" and ac == "active",
+                   f"enabled={en or '-'} active={ac or '-'}"
+                   + ("" if en == "enabled" else
+                      "  — will NOT return after a power cut: "
+                      f"sudo systemctl enable {unit}"))
+    elif rc_cfg == 0:
+        yield ("14", "runner service", False,
+               "runner is configured but has no systemd unit — "
+               "cd ~/actions-runner && sudo ./svc.sh install $(id -un) && "
+               "sudo ./svc.sh start")
+
 
 SUITES_FILE = REPO_ROOT / "configs" / "suites.yaml"
 
