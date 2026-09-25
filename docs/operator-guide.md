@@ -265,6 +265,12 @@ If the chip itself has latched a bad state (rare), cycle the PSU:
 
 ## Running the HIL test suite
 
+This is the by-hand path, on the bench. To test a firmware PR instead,
+label it `hil-test` or comment `/hil-test` and let CI build, flash and
+report — see
+[`docs/development/testing.md`](development/testing.md#running-a-suite-from-a-firmware-pr),
+which also lists the named suites so a developer picks what runs.
+
 The bench ships a pytest suite at `tests/hil/` that exercises the
 hardware through the broker. With the bench running:
 

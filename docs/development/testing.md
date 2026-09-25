@@ -135,15 +135,84 @@ Test files are grouped by subsystem:
 
 ---
 
-## CI state (today)
+## Running a suite from a firmware PR
 
-- Unit-test CI against the fake backend is **not yet wired**. A
-  GitHub Actions job running `pytest tests/broker/` on every PR
-  is a known follow-up — straightforward, just not done yet.
-- HIL on-bench CI requires the Pi as a self-hosted runner. The
-  scaffolding lives in `.github/workflows/` (`hil-build-trigger`,
-  `hil-build-only`, `hil-flash`), but wiring `pytest tests/hil/`
-  in after a flash is Phase 5+ territory.
+You do not need a bench login to test firmware. From a PR in
+`IFS08-CE-AMS` or `IFS08-CE-ECU`, either entry point dispatches a run:
+it builds that PR's commit on a cloud runner, flashes the right carrier,
+runs the suite, and posts the result back as a PR comment naming the
+failing cases.
+
+| Entry point | How | Which copy of the workflow runs |
+|---|---|---|
+| **Label** | add the `hil-test` label to the PR | the PR's **own** tree — so a change to the workflow can be tested in the PR that makes it |
+| **Comment** | comment `/hil-test` on the PR | always the **default branch's** copy |
+
+The comment path's behaviour is a GitHub constraint on `issue_comment`,
+not a bug: such workflows always run from the default branch, so
+`hil-test.yml` has to reach `main` on the firmware repo before `/hil-test`
+fires at all. The label path has no such constraint.
+
+### Picking what runs
+
+A bare trigger runs `smoke`. Everything else is opt-in by name, and a
+pytest path is passed straight through:
+
+```sh
+/hil-test                                      # smoke (the default)
+/hil-test dv                                   # a named suite
+/hil-test full                                 # everything for that DUT
+/hil-test tests/hil/vcu/test_block_c_fsm.py    # a path, unchanged
+```
+
+The names come from [`configs/suites.yaml`](../../configs/suites.yaml),
+which is the source of truth — this table will drift, that file will not:
+
+| DUT | Suite | Covers |
+|---|---|---|
+| `ecu` | `smoke` | boot, BL discover, flash+jump, bus independence, 0x100 heartbeat, AMS gate, 0x704 health |
+| | `full` | all of `tests/hil/vcu/` |
+| | `dv` | driverless block (needs the AMS powered) |
+| | `fsm` | state machine |
+| | `inverter` | inverter + fault recovery (bench-01 has none) |
+| | `telemetry` | telemetry + pit-diag |
+| `ams` | `smoke` | Block A boot |
+| | `full` | all of `tests/hil/ams/` |
+| | `balancing` | cell balancing |
+| | `safety` | safety predicates |
+| | `relays` | relay driver |
+
+`smoke` is the default because it is the one suite that must pass
+unattended on a healthy bench. Adding a case to it is a promise to that
+effect; a case needing hardware the bench descriptor does not declare
+belongs in a named suite instead.
+
+### Running it by hand
+
+Actions → *HIL bench test* → **Run workflow**. `suite` takes the same
+values as above. Also useful: `bench` pins a bench id, `capabilities`
+matches by capability instead, `pytest_args` passes extra pytest flags,
+`comment_on` + `comment_repo` post the result to a firmware PR, and
+`allow_bench_build` lets the bench compile the firmware itself when the
+artifact quota blocks the cloud upload. Leave `allow_degraded` alone —
+it runs the suite on a bench that failed its own preflight.
+
+### Before blaming the firmware
+
+Some reds belong to the bench. Check the suite's own notes and the open
+issues first — `configs/suites.yaml` records which cases bench-01
+structurally cannot pass (no inverter; `flash_dut` de-energises MLC2 to
+flash the ECU, so cases needing a live AMS fail in a dispatched ECU run).
+
+One CI failure mode is worth knowing because it is silent. An invalid
+expression in a workflow is a *startup* failure: GitHub cannot parse the
+file, so the run gets zero jobs, no logs, and **no check-run** — which
+means `gh pr checks` reads green while nothing ran. This hid a dead
+`hil-test.yml` for three weeks. Zero jobs means it never started:
+
+```sh
+$ gh api repos/isc-fs/IFS_HIL/actions/runs/<id>/jobs -q .total_count
+```
 
 ---
 

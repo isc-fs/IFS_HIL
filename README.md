@@ -74,6 +74,10 @@ flowchart TD
   [`docs/operator-guide.md`](docs/operator-guide.md)
   for recipes: start/stop services, run the HIL suite, flash an ECU,
   view CAN traffic, recover from bus-off.
+- **Testing a firmware PR** — label it `hil-test` (or comment
+  `/hil-test`) and CI does the rest. Named suites, so a developer picks
+  what runs instead of getting the whole tree:
+  [`docs/development/testing.md`](docs/development/testing.md#running-a-suite-from-a-firmware-pr).
 - **Hardware signal map** —
   [`docs/hardware-reference.md`](docs/hardware-reference.md)
   documents GPIO/I²C/SPI assignments, the CAN netdev ↔ PCB label
