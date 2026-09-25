@@ -1,14 +1,22 @@
 # Testing guide
 
-Two test suites live in the repo, serving distinct purposes:
+Four kinds of test live in the repo, serving distinct purposes:
 
 | Suite | Location | Needs hardware? | When it runs |
 |---|---|---|---|
-| Broker unit / integration | [`tests/broker/`](../../tests/broker/) | No — uses fake backend | Every PR, CI-safe |
-| HIL on-bench | [`tests/hil/`](../../tests/hil/) | Yes — needs a live broker | Pre-merge on the Pi, and in CI once the runner is wired |
+| Broker unit / integration | [`tests/broker/`](../../tests/broker/) | No — uses fake backend | CI (`host-tests.yml`), and locally |
+| Host-only guards | `tests/test_*.py` | No | CI (`host-tests.yml`), and locally |
+| Bench self-tests | [`tests/hil/`](../../tests/hil/) (top-level `test_*.py`) | Yes — needs a live broker | By hand on the Pi; they flash nothing |
+| DUT suites | `tests/hil/vcu/` (the ECU; the name is historical), `tests/hil/ams/` | Yes — drive a carrier and can **reflash** it | CI from a firmware PR ([below](#running-a-suite-from-a-firmware-pr)), or by hand under the bench lock |
 
-Both suites use `pytest`. Both are designed so off-bench runs
-degrade gracefully (broker tests pass on a laptop with no
+`host-tests.yml` runs a whole-tree `--collect-only` plus everything
+outside `tests/hil/`, on PRs that touch `tests/`, `tools/`,
+`configs/`, `conftest.py` or `pyproject.toml` and on pushes to `dev`.
+A change confined to `broker/` does not trigger it — run
+`tests/broker/` yourself.
+
+All of them use `pytest`, and all are designed so off-bench runs
+degrade gracefully (broker and host tests pass on a laptop with no
 hardware; HIL tests auto-skip when the broker socket is
 unreachable).
 
@@ -26,27 +34,50 @@ $ pytest tests/broker/ -v
 These exercise:
 
 - `tests/broker/test_rpc.py` — the JSON-RPC dispatcher against
-  `FakeHardwareManager`. Covers every method-table entry,
+  `FakeHardwareManager`. Exercises every method group except
+  `i2c.*` (a cross-section, not every method-table entry),
   invalid-JSON handling, unknown methods, missing params,
   notifications (no `id`), and the op-counter increment.
 - `tests/broker/test_server.py` — end-to-end socket round-trip
   via `BrokerClient`, with multiple concurrent clients and an
   error-surface smoke test.
 
-### HIL tests (on-bench)
+### Host-only guards (off-bench safe)
 
 ```sh
-pi$ pytest tests/hil/ -v
+$ python3 -m pytest tests/ --ignore=tests/hil -q    # what host-tests.yml runs
+```
+
+The top-level `tests/test_*.py` pin things that break silently
+between bench runs: the bench descriptors, the named suites,
+`flash_dut`, the recovery and watchdog logic, the Pico cell map and
+NTC table, the workflow's build fallback.
+
+### Bench self-tests (on-bench)
+
+```sh
+pi$ pytest tests/hil/ --ignore=tests/hil/vcu --ignore=tests/hil/ams -v
 ```
 
 Expected: ~93 passed, ~11 skipped. Skips are for unpopulated
 hardware (the nRF24L01+ isn't installed on the current boards, so
-its test module skips).
+its test module skips). Without the two `--ignore`s pytest also
+collects the DUT suites, which drive and can reflash carriers.
 
 The suite runs concurrently with the dashboard without contention —
 the broker serialises SPI/I²C across processes. Phase 3 was the
 milestone that made this safe; the old "stop the dashboard before
 running tests" rule is gone.
+
+It does leave the bench changed, though. `test_can.py` ends with all
+three `canN` links DOWN, last brought up with only a bitrate — so at
+the kernel's default sample point, not the bench's 0.6875 — and
+`test_spi_dac.py` soft-resets every DAC, which undoes the init the
+broker wrote. Before any DUT run, put both back:
+
+```sh
+pi$ sudo systemctl restart hil-can-up hil-broker
+```
 
 Per-module invocation:
 
@@ -54,6 +85,27 @@ Per-module invocation:
 pi$ pytest tests/hil/test_spi_dac.py -v
 pi$ pytest tests/hil/test_can.py -v -k loopback
 ```
+
+### DUT suites by hand (on-bench)
+
+Expand a named suite from
+[`configs/suites.yaml`](../../configs/suites.yaml) exactly as CI does,
+under the bench lock:
+
+```sh
+pi$ export AMS_FIRMWARE_BIN=/path/to/AMS.bin     # or ECU_FIRMWARE_BIN
+pi$ flock /tmp/hil-bench.lock \
+      pytest $(python3 -m tools.bench suite --dut ams --suite smoke) -v
+```
+
+- **The lock is not optional.** CI holds `/tmp/hil-bench.lock` for
+  flash + pytest; it is the only thing that stops a dispatched run
+  landing in the middle of your session.
+- **Point the reflash fixture at your image.** Block A's A-003
+  reflashes the carrier from `ECU_FIRMWARE_BIN` / `AMS_FIRMWARE_BIN`.
+  Unset, the ECU suite falls back to `~/firmware-builds/ECU_fix.bin`
+  (a stale 2026-06 diagnostic build on bench-01) and every later case
+  reports on that; the AMS one looks for `/tmp/AMS.bin`.
 
 ---
 
@@ -103,7 +155,10 @@ return broker proxies:
   owns the real handles) for tests still taking them as
   parameters.
 
-Test files are grouped by subsystem:
+The bench self-tests (top-level `tests/hil/test_*.py`) are grouped by
+subsystem. The DUT suites under `tests/hil/vcu/` and `tests/hil/ams/`
+add their own `conftest.py` and a DUT profile (`vcu_profile.yaml`,
+`ams_profile.yaml`).
 
 | File | Covers |
 |---|---|
@@ -130,8 +185,10 @@ Test files are grouped by subsystem:
        if not X.is_present():
            pytest.skip("X not responding — skipping")
    ```
-5. Run locally against the fake backend where feasible, then on
-   the bench.
+5. Run locally against the fake backend where feasible
+   (`python3 -m broker.server --fake --socket /tmp/hil-broker.sock`
+   plus `HIL_BROKER_SOCKET=/tmp/hil-broker.sock`; see
+   [`setup.md`](setup.md)), then on the bench.
 
 ---
 
@@ -218,7 +275,7 @@ $ gh api repos/isc-fs/IFS_HIL/actions/runs/<id>/jobs -q .total_count
 
 ## Reading test output
 
-### Successful HIL run
+### Successful bench self-test run
 
 ```
 tests/hil/test_can.py::TestMCP2515Reset::test_reset_enters_config_mode[CAN1 (U17)] PASSED
@@ -240,11 +297,12 @@ Skips you should see:
 Means the broker socket isn't reachable:
 
 ```
-93 skipped in 0.5s
+104 skipped in 0.5s
 ```
 
-Check `ls /run/hil-broker/broker.sock` and
-`systemctl status hil-broker`. See
+Check `ls /run/hil-broker/broker.sock`,
+`systemctl status hil-broker`, and that `HIL_BROKER_SOCKET` isn't
+set to a stale path. See
 [`../troubleshooting.md`](../troubleshooting.md).
 
 ---
