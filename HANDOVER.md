@@ -49,10 +49,13 @@ truth is the code file [`tools/hw_config.py`](tools/hw_config.py).
 1. **CAN netdev names are inverted vs the PCB silk.** Kernel `can2` = PCB
    CAN1 = where the carriers live. Carrier flashes target `can2`. Do not
    "fix" this — it is the kernel's probe order.
-2. **The bench Pi has no git checkout.** `~/IFS_HIL` on the Pi is an rsync
-   working copy (no GitHub credentials on the bench); the CI runner keeps its
-   own separate checkout under `~/actions-runner/`. Sync by hand with
-   [`scripts/sync_to_pi.sh`](scripts/sync_to_pi.sh) — **never `--delete`**.
+2. **Update the bench with rsync, not git.** `~/IFS_HIL` on the Pi is the
+   tree the services run from. After the first install (a plain `git clone`
+   of this public repo) it is updated from a developer machine with
+   [`scripts/sync_to_pi.sh`](scripts/sync_to_pi.sh) — **never `--delete`** —
+   so uncommitted work can be tested and no GitHub credentials live on the
+   bench. The CI runner keeps its own separate checkout under
+   `~/actions-runner/`.
 3. **SPI is dead until the PSU is on.** The MISO buffer is enabled in
    hardware by ATX `PWR_OK`, so every SPI operation presupposes
    `psu.status()['pwr_ok']`.
@@ -333,13 +336,16 @@ with Raúl before touching anything hardware-adjacent.
   require `/dev/spidev0.4`–`0.11`, and `bench_setup.sh` should compare the
   installed `.dtbo` with a fresh compile (it already does that for the
   systemd units) — see [§4](#4-standing-up-a-new-pi--bench).
-- **Stale references**: `configs/benches/bench-01.yaml` points at
-  `configs/ecu_udv.yaml`, which does not exist (the micro-DV config is
-  `ecu_microdv.yaml`); `infra/systemd/hil-broker.service` and
-  `infra/systemd/README.md` point at `docs/broker_migration_plan.md`
-  (actual file: `docs/design/broker-migration.md`); the header comment in
-  `infra/devicetree/mcp2515-triple.dts` names the netdevs pre-inversion and
-  predates the nine non-CAN chip-selects.
+- **One stale reference, left on purpose**: a comment in
+  `infra/systemd/hil-broker.service` points at `docs/broker_migration_plan.md`
+  (actual file: `docs/design/broker-migration.md`). `bench_setup.sh`
+  compares installed units byte-for-byte, so touching it makes every bench
+  re-install the unit; fix it alongside a real change to that unit.
+- **Check `bench_setup.sh` on a fresh image**: its step 1 enables SPI via
+  `raspi-config` whenever `config.txt` has neither the overlay nor
+  `dtparam=spi=on` — always the case on a fresh Pi, since the overlay is
+  installed later — although its own comment calls that parameter a second
+  claimant for SPI0. Never exercised: bench-01 was built by hand.
 - **Legacy udev rule**: `infra/udev/99-hil.rules` renames a USB-CAN adapter
   to `can0`, which would collide with the kernel `mcp251x` `can0`. No such
   adapter is on the bench; drop the rule.
@@ -402,7 +408,9 @@ In rough priority order:
 4. **Protect `dev`** on IFS_HIL (PR + green checks required).
 5. **Push `feat/hil-96`** (Block K) so it exists somewhere other than one Mac.
 6. **Do a second, independent bringup** (`bench_setup.sh --bench bench-02` on
-   a spare Pi) to prove the docs, and file every gap you hit.
+   a spare Pi) to prove the docs, and file every gap you hit — starting with
+   whether `config.txt` ends up carrying `dtparam=spi=on`
+   ([§7](#7-known-drift--cleanup-backlog)).
 7. **Remove the dead Chain B and legacy files**, harden `doctor` against an
    old overlay, and close #117 / #94.
 8. **Document the stimulus hardware** so a new bench can declare

@@ -124,7 +124,9 @@ export HIL_BENCH_HOST=isc@100.96.95.78    # off-network via Tailscale (slower)
 ```
 
 **Always sync via the script. Do not `git clone` or `git pull` on
-the Pi.**
+the Pi** — the one exception is a brand-new bench's first install,
+which clones this (public) repo so `scripts/bench_setup.sh` can run
+([`docs/getting-started.md`](docs/getting-started.md) §3).
 
 ```sh
 # from the repo root on your Mac
@@ -651,14 +653,21 @@ whim. Confirm with Raul before touching them.
   `HIL_CROSS_REPO_PAT` when checking out the (public) firmware repos, an
   expired token breaks the build itself, not just the verdict comment.
 
-- **Stale references.** `configs/benches/bench-01.yaml` points at
-  `configs/ecu_udv.yaml` (doesn't exist; it's `ecu_microdv.yaml`);
-  `infra/systemd/hil-broker.service` and `infra/systemd/README.md`
-  point at `docs/broker_migration_plan.md` (it's
-  `docs/design/broker-migration.md`); the header comment of
-  `infra/devicetree/mcp2515-triple.dts` names the netdevs
-  pre-inversion (its GPIO27 chip is kernel `can2`, not `can0`) and
-  predates the nine non-CAN chip-selects.
+- **One stale reference, left on purpose.** A comment in
+  `infra/systemd/hil-broker.service` points at
+  `docs/broker_migration_plan.md` (it's
+  `docs/design/broker-migration.md`). It stays because
+  `bench_setup.sh` compares installed units byte-for-byte: touching the
+  file makes every bench re-install the unit on its next run. Fix it
+  together with a real change to that unit.
+
+- **`bench_setup.sh` may add `dtparam=spi=on` on a fresh image.** Its
+  step 1 runs `raspi-config do_spi` whenever `config.txt` has neither
+  the overlay nor `dtparam=spi=on` — always true on a fresh Pi, since
+  the overlay is only installed in step 4 — although its own comment
+  calls that parameter a second claimant for SPI0. bench-01 was built
+  by hand and never took this path. Unverified: check `config.txt`
+  after the first scripted bringup.
 
 - **Legacy udev rule.** `infra/udev/99-hil.rules` renames a gs_usb CAN
   adapter to `can0`, which would collide with the kernel `mcp251x`
