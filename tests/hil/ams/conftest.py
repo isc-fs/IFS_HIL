@@ -75,8 +75,9 @@ def pytest_addoption(parser):
     parser.addoption(
         "--soak-scale", action="store", default="1.0", type=float,
         help=(
-            "Scale factor for Block E soak durations "
-            "(default 1.0 = full, 0.1 makes a 30-minute soak run for 3 min)."
+            "Scale factor for soak durations and cycle counts "
+            "(default 1.0 = full, 0.1 makes a 30-minute soak run for 3 min). "
+            "Soak cases themselves only run under `-m soak`."
         ),
     )
 

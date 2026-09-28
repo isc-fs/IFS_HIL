@@ -161,7 +161,7 @@ pytest path is passed straight through:
 ```sh
 /hil-test                                      # smoke (the default)
 /hil-test dv                                   # a named suite
-/hil-test full                                 # everything for that DUT
+/hil-test full                                 # everything for that DUT but soak cases
 /hil-test tests/hil/vcu/test_block_c_fsm.py    # a path, unchanged
 ```
 
@@ -177,7 +177,7 @@ which is the source of truth — this table will drift, that file will not:
 | | `inverter` | inverter + fault recovery (bench-01 has none) |
 | | `telemetry` | telemetry + pit-diag |
 | `ams` | `smoke` | Block A boot |
-| | `full` | all of `tests/hil/ams/` |
+| | `full` | all of `tests/hil/ams/` except the [soak cases](#soak-cases-are-opt-in) |
 | | `balancing` | cell balancing |
 | | `safety` | safety predicates |
 | | `relays` | relay driver |
@@ -187,11 +187,54 @@ unattended on a healthy bench. Adding a case to it is a promise to that
 effect; a case needing hardware the bench descriptor does not declare
 belongs in a named suite instead.
 
+#### Soak cases are opt-in
+
+A case marked `soak` never runs unless you ask for it: not in `full`,
+not from a path, not even when you name it outright. `pyproject.toml`
+sets `addopts = "-m 'not soak'"`, so every pytest run in this repo
+deselects them, on the bench, in CI and on a laptop. They are the AMS
+endurance rows, and some of them are destructive:
+
+- **Block F** (`test_block_f_flash_endurance.py`), F-070…F-081:
+  reset/flash/boot endurance, up to 1000 cycles a row. **F-077 cuts
+  carrier power mid-flash**, ten times. An interrupted flash has left
+  an STM32H7 unrecoverable over CAN before
+  ([stm32-can-bootloader#166](https://github.com/isc-fs/stm32-can-bootloader/issues/166)).
+- **Block G** (`test_block_g_soak.py`): E-050 and E-051 (30 min
+  each) and E-052 (50 power cycles). G-097 and G-102 in the same file
+  are quick and are not soak.
+- **`test_block_can1m.py`**: M-05 (reboot + reflash) and M-06 (a
+  5-minute soak).
+
+`pytest tests/hil/ams/ -m soak --collect-only -q` lists them.
+
+To run one, pass `-m soak` and narrow it down. `-m` is last-wins, so
+yours replaces the default rather than adding to it. That cuts both
+ways: *any* `-m` you pass brings the soak cases back unless it also
+says `and not soak`. `--soak-scale` shrinks durations and cycle counts
+(0.1 turns a 30-minute soak into 3 minutes, 100 cycles into 10). Block F
+reflashes from `AMS_FIRMWARE_BIN` (default `/tmp/AMS.bin`), so stage the
+image you mean it to write.
+
+```sh
+pi$ flock /tmp/hil-bench.lock \
+      pytest tests/hil/ams/test_block_g_soak.py -m soak --soak-scale 0.1 -v
+```
+
+Run them by hand, on a bench you are watching. Through CI, keep it to
+one scaled case: `suite` = `tests/hil/ams/test_block_f_flash_endurance.py`,
+`pytest_args` = `-m soak -k f070 --soak-scale 0.1`. The test job's
+`timeout-minutes: 90` kills the run wherever it is, and in Block F that
+can be the middle of a flash.
+[`tests/test_soak_is_opt_in.py`](../../tests/test_soak_is_opt_in.py)
+fails host CI if a soak case ever reaches the default run.
+
 ### Running it by hand
 
 Actions → *HIL bench test* → **Run workflow**. `suite` takes the same
 values as above. Also useful: `bench` pins a bench id, `capabilities`
-matches by capability instead, `pytest_args` passes extra pytest flags,
+matches by capability instead, `pytest_args` passes extra pytest flags
+(`-m soak` included — [read the above first](#soak-cases-are-opt-in)),
 `comment_on` + `comment_repo` post the result to a firmware PR, and
 `allow_bench_build` lets the bench compile the firmware itself when the
 artifact quota blocks the cloud upload. Leave `allow_degraded` alone —
