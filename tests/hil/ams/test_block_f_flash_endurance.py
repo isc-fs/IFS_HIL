@@ -24,7 +24,7 @@ the variant rows.
 
 All rows are marked with `@pytest.mark.soak` so the default suite
 stays fast — opt-in via `pytest -m soak`. Cycle counts can be
-overridden with `--soak-cycle-scale` (default 1.0; 0.1 makes a
+overridden with `--soak-scale` (default 1.0; 0.1 makes a
 100-cycle row run for 10 cycles).
 
 Counters are pushed into the KPI ledger via
@@ -49,7 +49,7 @@ from tools.firmware_test.ams import can_map as M
 
 # Cycle-count multiplier for development runs (full counts are slow).
 # Profile-side hook: scripts/conftest pulls the multiplier from
-# `--soak-cycle-scale` (default 1.0).
+# `--soak-scale` (default 1.0).
 def _cycles(n: int, scale: float) -> int:
     return max(1, int(n * scale))
 
@@ -610,7 +610,7 @@ class TestF075MixedVersionRoundTrip:
     reports exactly what we flashed," not a hard-coded constant. Skips
     cleanly if image B isn't staged.
 
-    10 round-trips (B then A) scaled by --soak-cycle-scale.
+    10 round-trips (B then A) scaled by --soak-scale.
     """
 
     @pytest.mark.soak
@@ -795,7 +795,7 @@ class TestF077InterruptedFlashRecovery:
     interrupting flash uses --no-diff so it always writes every sector
     (a same-image diff-flash would finish before the cut).
 
-    10 cycles scaled by --soak-cycle-scale.
+    10 cycles scaled by --soak-scale.
     """
 
     @pytest.mark.soak
@@ -937,7 +937,7 @@ class TestF078PowerOffDurationSweep:
     out any RTC-backed / brown-out-latch assumption. Every duration must
     still yield a clean first 0x4A0 in Start/Error.
 
-    5 cycles per duration (scaled by --soak-cycle-scale). NB the 300 s
+    5 cycles per duration (scaled by --soak-scale). NB the 300 s
     point is deliberately long -- at full scale this row alone parks the
     bench for ~30 min on the 300 s case.
     """
@@ -1092,7 +1092,7 @@ class TestF080TriggerFromError:
 
     Sibling to D-051b but a soak regression net for the post-#243
     trigger-from-Error path. Default 20 cycles per #272; scaled by
-    `--soak-cycle-scale`.
+    `--soak-scale`.
     """
 
     @pytest.mark.soak
@@ -1181,7 +1181,7 @@ class TestF081BenchNoiseImmunity:
          the real trigger.
 
     Duration is 60 s at full scale, floored at 5 s and scaled by
-    --soak-cycle-scale. Leaves the bench running: it reflashes + jumps the
+    --soak-scale. Leaves the bench running: it reflashes + jumps the
     app back after the trigger check.
     """
 
