@@ -7,6 +7,11 @@ plan, with `--soak-scale=N` to compress run time for CI / pre-flight
 sanity (N=1 is the doc default, N=0.1 makes a 30-minute soak run for 3
 minutes).
 
+E-050..E-052 are marked `soak`, so they run only under `-m soak` --
+together they are ~72 minutes at full budget. G-097 and G-102 are
+quick and stay in the default run, which is why the mark is per test
+and not module-wide.
+
 | Test  | What it checks                                          | Status      |
 |-------|---------------------------------------------------------|-------------|
 | E-050 | 30-minute idle soak in Start                            | implemented |
@@ -123,6 +128,7 @@ def _run_soak(observe_acu, ams_profile, *,
 
 class TestE050IdleSoakInStart:
 
+    @pytest.mark.soak
     def test_e050(self, fresh_boot, observe_acu, ams_profile, soak_scale):
         minutes = float(ams_profile["soak_idle_minutes"]) * soak_scale
         _run_soak(observe_acu, ams_profile,
@@ -137,6 +143,7 @@ class TestE050IdleSoakInStart:
 
 class TestE051RunSoak:
 
+    @pytest.mark.soak
     def test_e051(self, fresh_boot, tsms, dash_chg, acu_heartbeat,
                   wait_for_state, observe_acu, ams_profile, soak_scale):
         # Drive into Run via the TSMS + DASH_CHG GPIOs (replaces the
@@ -166,6 +173,7 @@ class TestE051RunSoak:
 
 class TestE052PowerCycleResilience:
 
+    @pytest.mark.soak
     def test_e052(self, mlc_powered, observe_acu, acu_heartbeat,
                   ams_profile, soak_scale):
         from broker.server import BrokerClient

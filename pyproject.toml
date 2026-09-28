@@ -47,6 +47,13 @@ where = ["."]
 include = ["tools*"]
 
 [tool.pytest.ini_options]
+# `soak` is opt-in, and this line is the only thing making it so. Without it a
+# plain `pytest tests/hil/ams/` -- which is what the AMS `full` suite expands to
+# -- ran every soak case unattended, F-077's mid-flash power cut included.
+# `-m` is last-wins: an explicit `-m soak` replaces this default instead of
+# combining with it, and so does any other `-m` (add `and not soak` to yours).
+# tests/test_soak_is_opt_in.py fails if a soak case reaches the default run.
+addopts = "-m 'not soak'"
 markers = [
-    "soak: long-running bench-endurance test; opt-in via `pytest -m soak`.",
+    "soak: long-running or destructive bench endurance (reflash cycles, F-077 cuts power mid-flash, 30-min soaks). Deselected by default; opt in deliberately with `-m soak` -- see docs/development/testing.md.",
 ]
