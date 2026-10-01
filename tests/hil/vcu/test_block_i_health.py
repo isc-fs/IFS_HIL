@@ -72,13 +72,14 @@ class TestI003TaskLiveness:
 
     def test_i003_all_tasks_live(self, fresh_boot, inv_heartbeat, pit_diag,
                                  observe_acu):
-        """I-003: all four task-liveness bits set — control / can_rx / can_tx /
-        diag. CanRxTask only runs when frames arrive, so inv_heartbeat drives
-        continuous 0x461 on the INV bus (the car's bus is never silent). DiagTask
-        clears the mask each 1 Hz cycle, so OR the per-cycle masks over a window:
-        each task must be seen running at least once."""
+        """I-003: all five task-liveness bits set — control / can_rx / can_tx /
+        telemetry / diag. CanRxTask only runs when frames arrive, so
+        inv_heartbeat drives continuous 0x461 on the INV bus (the car's bus is
+        never silent). DiagTask clears the mask each 1 Hz cycle, so OR the
+        per-cycle masks over a window: each task must be seen running at least
+        once."""
         seen = 0
-        want = M.TASK_CONTROL | M.TASK_CAN_RX | M.TASK_CAN_TX | M.TASK_DIAG
+        want = M.TASK_ALL
         deadline = time.monotonic() + 4.0
         while time.monotonic() < deadline and (seen & want) != want:
             h = _wait_health(observe_acu, 1.5)
