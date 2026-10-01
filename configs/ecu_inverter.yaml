@@ -1,9 +1,12 @@
 ecu:
   name: inverter
   board: stm32h733zg
-  slot: MLC4
+  slot: MLC4                    # NOTE: collides with ecu_vcu.yaml, which also
+                                # claims MLC4. Inactive, so nothing trips on it
+                                # today -- resolve before enabling this target.
   transport: can
-  can_channel: can0
+  can_channel: can2             # any MLC carrier is reached on kernel can2
+                                # (PCB CAN1 / U17, invariant #3); was can0
   enabled: false                # placeholder — not yet active
   firmware:
     binary: /srv/hil/build/inverter/firmware.bin

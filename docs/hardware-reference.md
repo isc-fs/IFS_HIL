@@ -1,0 +1,348 @@
+# Hardware reference
+
+Signal map for the BACKPLANE_HIL PCB as driven by the Raspberry Pi.
+This is the authoritative reference any operator or contributor will
+consult when they need to know *"what pin / what address / what
+netdev maps to what physical chip."*
+
+The canonical single source of truth in the source tree is
+[`tools/hw_config.py`](../tools/hw_config.py); this document is its
+expanded companion. If the two disagree, trust `hw_config.py` and
+file a PR against this document.
+
+All GPIO numbers are **BCM** numbering throughout.
+
+---
+
+## On-board ICs at a glance
+
+| Ref | Part | Qty | Role | Bus |
+|---|---|---:|---|---|
+| U9–U11 | MCP3208 | 3 | 8-channel 12-bit ADC | SPI0 (`spidev0.8`–`0.10`) |
+| U12–U15 | DAC80504 | 4 | 4-channel 16-bit DAC | SPI0 (`spidev0.4`–`0.7`) |
+| U17, U19, U21 | MCP2515 | 3 | CAN 2.0B controller | SPI0 (kernel `mcp251x`) |
+| U16, U18, U20 | SN65HVD230 | 3 | CAN transceiver | paired with each MCP2515 |
+| U1, U2, U4 (+ standby) | INA226 | 4 | Power monitor per MLC carrier | I²C1 |
+| U3, U6, U8 | TCA9555 | 3 | 16-bit GPIO expander | I²C1 |
+| U5 | TLV75533 | 1 | LDO: +5VSBY → +3V3SBY | — |
+| IC1 | SN74LVC125A | 1 | Quad tri-state buffer on MOSI/MISO/SCK | enabled by Q5 via `PWR_OK` |
+| U23 | nRF24L01+ | 1 | 2.4 GHz transceiver (not populated on current boards) | SPI0 (`spidev0.11`) |
+| Q1–Q4 | DMN6075S | 4 | Relay driver NMOS for K1–K4 | TCA9555 port 0 bits 0–3 |
+| Q5 | DMN6075S | 1 | Enables IC1 `~OE` from `PWR_OK` | GPIO8 (PWR_OK) |
+| K1–K4 | RT314A12 | 4 | +12 V SPDT relay per MLC carrier | driven by Q1–Q4 |
+| Y1–Y3 | 16 MHz crystal | 3 | MCP2515 clock source | — |
+
+---
+
+## SPI0 bus
+
+Single hardware SPI0 master. **The kernel owns all twelve
+chip-selects**: they are declared as `cs-gpios` in the
+[`mcp2515-triple`](../infra/devicetree/mcp2515-triple.dts) overlay, so
+the SPI core asserts each one *inside* its transfer, under the
+controller lock.
+
+- **Kernel `mcp251x` driver** owns `spi0.0`, `spi0.1`, `spi0.2`. Each
+  SPI device maps to one MCP2515, and each MCP2515 appears to
+  userspace as a SocketCAN netdev (`canN`). See the [CAN netdev ↔ PCB
+  label mapping](#can-netdev--pcb-label-mapping-crucial) section below.
+- **Per-device spidev nodes** — `/dev/spidev0.4`–`0.7` (DACs),
+  `0.8`–`0.10` (ADCs), `0.11` (nRF24) — are what the broker opens for
+  the non-CAN chips. Each node carries its own SPI mode, so nothing
+  switches modes between users.
+- **`/dev/spidev0.3`** is the legacy shared node, its nominal CS on
+  the unwired GPIO16. The broker falls back to it — with `no_cs=True`,
+  pulsing the real CS GPIOs by hand, and a logged warning — only when
+  the per-device nodes are missing, i.e. an old overlay is installed.
+
+Why the kernel has to own them: while the broker asserted a DAC's CS
+from userspace, the gap between "CS low" and the transfer starting was
+open to the kernel, which could clock out an MCP2515 message while the
+DAC was selected. The DAC shifted in the stray edges and latched a bad
+state — the DAC wedges of #124 (one read back `0x082E`, which is
+`0x0417 << 1`). With kernel-owned chip-selects that gap is gone.
+
+### SPI physical pins
+
+| BCM GPIO | Header pin | Function |
+|---:|---:|---|
+| 9  | 21 | SPI0 MISO |
+| 10 | 19 | SPI0 MOSI |
+| 11 | 23 | SPI0 SCLK |
+
+All three data lines pass through IC1 (`SN74LVC125A`) before reaching
+the on-board ICs. IC1's `~OE` is pulled low by Q5 only when ATX
+`PWR_OK` is high — that is, the SPI bus to the peripherals is
+**gated by the PSU being alive**.
+
+### SPI chip-selects (all active-low, kernel-driven)
+
+In the overlay's `cs-gpios` order, which is also the spidev index:
+
+| BCM GPIO | Header pin | CS for | Kernel device | SPI mode |
+|---:|---:|---|---|---:|
+| 27 | 13 | MCP2515 U17 (PCB **CAN1**) | `spi0.0` → `mcp251x` (`can2`) | 3 |
+| 17 | 11 | MCP2515 U19 (PCB **CAN2**) | `spi0.1` → `mcp251x` (`can1`) | 3 |
+| 18 | 12 | MCP2515 U21 (PCB **CAN3**) | `spi0.2` → `mcp251x` (`can0`) | 3 |
+| 16 | 36 | **unused** (nominal CS of the legacy node) | `spidev0.3` | 0 |
+| 22 | 15 | DAC80504 U12 (DAC1) | `spidev0.4` | 1 |
+| 23 | 16 | DAC80504 U13 (DAC2) | `spidev0.5` | 1 |
+| 24 | 18 | DAC80504 U14 (DAC3) | `spidev0.6` | 1 |
+| 25 | 22 | DAC80504 U15 (DAC4) | `spidev0.7` | 1 |
+| 19 | 35 | MCP3208 U9  (ADC1) | `spidev0.8` | 0 |
+| 20 | 38 | MCP3208 U10 (ADC2) | `spidev0.9` | 0 |
+| 21 | 40 | MCP3208 U11 (ADC3) | `spidev0.10` | 0 |
+| 26 | 37 | nRF24L01+ (U23, unpopulated) | `spidev0.11` | 0 |
+
+The nRF24's CE (GPIO13) and IRQ (GPIO12) stay plain GPIOs — CE gates
+the radio, not the bus.
+
+---
+
+## MCP2515 CAN controllers
+
+### CAN netdev ↔ PCB label mapping (CRUCIAL)
+
+The kernel `mcp251x` driver on this kernel probes SPI children in
+**reverse `reg` order**, so the kernel netdev names are **inverted**
+relative to the PCB silk-screen labels. Forgetting this fact is the
+single most common reason `can-flasher discover` returns empty.
+
+| kernel netdev | spi device | CS GPIO | PCB label | chip | INT GPIO |
+|---|---|---:|---|---|---:|
+| `can0` | `spi0.2` | 18 | **CAN3** | U21 | 6 |
+| `can1` | `spi0.1` | 17 | **CAN2** | U19 | 5 |
+| `can2` | `spi0.0` | 27 | **CAN1** | U17 | 4 |
+
+The MLC1..MLC4 carrier boards are wired to PCB CAN1 — which is kernel
+**`can2`**. Flashing always targets `can2`.
+
+### MCP2515 crystals
+
+Each MCP2515 has its own 16 MHz crystal (Y1/Y2/Y3) with 22 pF load
+caps. The CAN bitrate calculation happens in the kernel driver based
+on the device-tree `clocks` reference to a `fixed-clock` node at 16
+MHz; see [`infra/devicetree/mcp2515-triple.dts`](../infra/devicetree/mcp2515-triple.dts).
+
+Bus bitrate for all ECU traffic is **500 kbps**.
+
+### Auto-recovery
+
+`hil-can-up.service` brings each interface up with
+`restart-ms=200`, so the kernel auto-recovers from bus-off after
+200 ms without operator intervention.
+
+---
+
+## I²C bus (`/dev/i2c-1`)
+
+| BCM GPIO | Header pin | Function |
+|---:|---:|---|
+| 2 | 3 | I²C1 SDA |
+| 3 | 5 | I²C1 SCL |
+
+Pull-ups `R50`/`R51` are to `+3V3_SBY`; the I²C bus stays alive
+whether the main ATX rails are on or not.
+
+### INA226 power monitors (one per MLC carrier)
+
+Low-side current-sensing wiring. `bus_voltage()` reads ~0 V by design;
+only `current()` and `power()` carry useful information.
+
+| Address | Carrier | A1 | A0 |
+|---:|---|---|---|
+| `0x40` | **MLC1** | GND | GND |
+| `0x41` | **MLC2** | GND | VS  |
+| `0x44` | **MLC3** | VS  | GND |
+| `0x45` | **MLC4** | VS  | VS  |
+
+Shunt resistor: **10 mΩ** (`INA226_SHUNT_OHM = 0.01`).
+Overcurrent warning threshold in the broker: **3 A**
+(`MLC_CURRENT_MAX_A = 3.0`).
+
+Typical MLC current with an STM32H733 bootloader idling on the
+carrier: **~130 mA**. ≤ 1 mA means the relay didn't close or the
+fuse is blown.
+
+### TCA9555 I/O expanders
+
+| Address | Ref | Role |
+|---:|---|---|
+| `0x20` | **U3** | Relay coil drivers (port 0 bits 0–3) |
+| `0x21` | **U6** | Slot LED indicators (port 1 bit 4 = SLOT3_LED_RESULT) |
+| `0x22` | **U8** | Other I/O |
+
+Each TCA9555 has 16 bidirectional pins split into two 8-bit ports.
+By default after power-on, all pins are inputs with the chip's
+internal weak pull-up. The broker configures pins as outputs before
+driving them (`tca.set_direction`).
+
+### Carrier relay map
+
+Relay K_n energises MLC_n. Each relay's NMOS gate driver is wired to
+TCA9555 **U3** (addr `0x20`) **port 0**:
+
+| Relay | TCA9555 addr | Port | Bit | MLC carrier |
+|---|---:|---:|---:|---|
+| K1 | `0x20` | 0 | 0 | MLC1 |
+| K2 | `0x20` | 0 | 1 | MLC2 |
+| K3 | `0x20` | 0 | 2 | MLC3 |
+| K4 | `0x20` | 0 | 3 | MLC4 |
+
+To energise one carrier:
+
+```python
+c.call('tca.set_direction', addr=0x20, port=0, mask=0x00)  # port0 all outputs
+c.call('tca.write_pin',    addr=0x20, port=0, pin=0, value=True)  # K1 on
+```
+
+Or from the dashboard's "Carrier N power" toggle.
+
+---
+
+## Power control signals
+
+| BCM GPIO | Header pin | Signal | Direction | Polarity |
+|---:|---:|---|---|---|
+| 7 | 26 | `PS_ON#` → ATX | output | active-LOW (drive low = PSU on) |
+| 8 | 24 | `PWR_OK` ← ATX | input | active-HIGH (high = rails stable) |
+
+### Boot-time assertion
+
+The Pi 4's GPIO output-state persists across reboots, so a prior
+userspace `pinctrl set 7 op dh` (or a broker crash mid-shutdown) can
+stick and leave `PS_ON#` de-asserted. Two safeguards land the correct
+state anyway:
+
+1. **Firmware directive** in `/boot/firmware/config.txt`:
+   ```
+   gpio=7=op,dl
+   gpio=8=ip,pd
+   ```
+   Runs before the kernel boots, so `mcp251x` probe sees powered chips.
+
+2. **`hil-psu-on.service`** re-asserts the same state in userspace at
+   `sysinit.target`, as a belt-and-braces against the firmware
+   directive being defeated by the persistence quirk.
+
+### MISO buffer gating (hardware-only)
+
+IC1 (`SN74LVC125A`) buffers MOSI, MISO, and SCK. All four `~OE` pins
+are tied to Q5 (NMOS, gate = `PWR_OK`, source = GND, drain = `~OE`).
+
+- `PWR_OK = HIGH`  → Q5 conducts → `~OE = LOW` → buffer **enabled**.
+- `PWR_OK = LOW`   → Q5 off        → `~OE` floats → buffer disabled.
+
+**The SPI bus to every peripheral is therefore silent when the PSU
+is off.** This is why `psu.power(True)` is a prerequisite for
+anything via SPI, including reading MCP3208s.
+
+---
+
+## Pi header pinout reference
+
+For clarity, all GPIOs this bench uses by BCM number, sorted:
+
+| BCM | Pi header | Role |
+|---:|---:|---|
+| 2  | 3  | I²C1 SDA |
+| 3  | 5  | I²C1 SCL |
+| 4  | 7  | INT from MCP2515 U17 (PCB CAN1 → kernel `can2`) |
+| 5  | 29 | INT from MCP2515 U19 (PCB CAN2 → kernel `can1`) |
+| 6  | 31 | INT from MCP2515 U21 (PCB CAN3 → kernel `can0`) |
+| 7  | 26 | `PS_ON#` to ATX |
+| 8  | 24 | `PWR_OK` from ATX |
+| 9  | 21 | SPI0 MISO |
+| 10 | 19 | SPI0 MOSI |
+| 11 | 23 | SPI0 SCLK |
+| 12 | 32 | nRF24 IRQ (unpopulated) |
+| 13 | 33 | nRF24 CE (unpopulated) |
+| 16 | 36 | dummy CS for `spidev0.3` |
+| 17 | 11 | CS for MCP2515 U19 |
+| 18 | 12 | CS for MCP2515 U21 |
+| 19 | 35 | CS for MCP3208 U9 |
+| 20 | 38 | CS for MCP3208 U10 |
+| 21 | 40 | CS for MCP3208 U11 |
+| 22 | 15 | CS for DAC80504 U12 |
+| 23 | 16 | CS for DAC80504 U13 |
+| 24 | 18 | CS for DAC80504 U14 |
+| 25 | 22 | CS for DAC80504 U15 |
+| 26 | 37 | CS for nRF24 (unpopulated) |
+| 27 | 13 | CS for MCP2515 U17 |
+
+---
+
+## Power tree
+
+Abridged from the PCB design review. Colour-coded by rail.
+
+```mermaid
+flowchart LR
+    ATX["ATX PSU (J1)"]
+
+    V12["+12V"]
+    V5["+5V"]
+    V5SBY["+5V_SBY"]
+    V3V3["+3V3 (ATX main)"]
+    V3V3SBY["+3V3_SBY<br/>(via U5 TLV75533 LDO)"]
+    V3V3PI["RPi 3V3_out<br/>(Pi internal LDO, J2 pin 1)"]
+
+    RPI["Raspberry Pi 4<br/>⚠ ≥ 3 A peak on 5V_SBY"]
+
+    RELAYS["Relay coils K1–K4<br/>via Q1–Q4 / F1–F4"]
+    CAN5V["CAN transceivers,<br/>buffer logic, general 5V"]
+    I2C_DEVS["INA226 ×4 · TCA9555 ×3<br/>(I²C, alive on standby)"]
+    SPI_DEVS["MCP3208 ×3 · DAC80504 ×4 (+VREF)<br/>MCP2515 ×3 · SN65HVD230 ×3"]
+    BUFFER["IC1 SN74LVC125A<br/>buffered SPI to peripherals<br/>(gated by PWR_OK via Q5)"]
+
+    ATX --> V12 --> RELAYS
+    ATX --> V5 --> CAN5V
+    ATX --> V5SBY
+    ATX --> V3V3 --> SPI_DEVS
+    V5SBY --> V3V3SBY --> I2C_DEVS
+    V5SBY --> RPI --> V3V3PI --> BUFFER
+
+    classDef source fill:#f5f5f5,stroke:#424242,color:#212121
+    classDef v12 fill:#ffebee,stroke:#c62828,color:#b71c1c
+    classDef v5 fill:#fff3e0,stroke:#ef6c00,color:#e65100
+    classDef v5sby fill:#fffde7,stroke:#f9a825,color:#6c4d00
+    classDef v3v3 fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20
+    classDef v3v3sby fill:#e0f7fa,stroke:#00838f,color:#004d40
+    classDef v3v3pi fill:#f3e5f5,stroke:#6a1b9a,color:#4a148c
+    classDef load fill:#fafafa,stroke:#9e9e9e,color:#424242
+
+    class ATX,RPI source
+    class V12 v12
+    class V5 v5
+    class V5SBY v5sby
+    class V3V3 v3v3
+    class V3V3SBY v3v3sby
+    class V3V3PI v3v3pi
+    class RELAYS,CAN5V,I2C_DEVS,SPI_DEVS,BUFFER load
+```
+
+Important consequences:
+
+- **I²C peripherals (INA226, TCA9555) are on standby power.** They
+  answer even when the PSU is off. Useful for pre-flight checks.
+- **The MCP2515s and the rest of SPI are on main 3V3**, so they need
+  `PS_ON#` asserted before kernel `mcp251x` probe will succeed.
+- **The Pi is powered from 5VSBY.** A supply rated below ~3 A on SBY
+  produces undervoltage events during kernel boot and SPI bursts —
+  which were the root cause of several false-positive mcp251x
+  diagnostics during bring-up. Use a PSU with ≥ 3 A on 5VSBY.
+
+---
+
+## Where the single source of truth lives
+
+- **Pin assignments, I²C addresses, constants** →
+  [`tools/hw_config.py`](../tools/hw_config.py)
+- **Device-tree overlay** (SPI bus layout for the kernel, including the
+  chip-select → spidev mapping; its `cs-gpios` must agree with the
+  `CS_*` GPIOs in `hw_config.py`) →
+  [`infra/devicetree/mcp2515-triple.dts`](../infra/devicetree/mcp2515-triple.dts)
+- **Kernel module (patched)** →
+  [`infra/kernel-module/mcp251x-patched/`](../infra/kernel-module/mcp251x-patched/)
+- **This document** — human-readable companion; PRs welcome when
+  something changes.

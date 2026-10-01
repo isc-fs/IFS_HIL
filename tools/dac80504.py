@@ -36,7 +36,11 @@ class DAC80504:
       Output range 0 – 3.3 V, LDAC async (low), gain = ×1.
     """
 
-    def __init__(self, spi: spidev.SpiDev, cs_pin: int, vref: float = 3.3):
+    def __init__(self, spi: spidev.SpiDev, cs_pin: int | None = None,
+                 vref: float = 3.3):
+        """`cs_pin=None` means this DAC has its own spi_device and the kernel
+        owns its chip-select; anything else is the legacy shared-spidev path
+        where CS is toggled from userspace (see _xfer)."""
         self._spi = spi
         self._cs = cs_pin
         self._vref = vref
@@ -72,6 +76,21 @@ class DAC80504:
         spi_bus is opened in mode 0 for the CAN and ADC devices; we switch
         mode around each DAC transaction and restore it afterwards.
         """
+        if self._cs is None:
+            # Kernel-managed CS: this DAC has its own spi_device (spidev0.4-0.7,
+            # cs-gpios in mcp2515-triple.dts), so the SPI core asserts CS as
+            # PART of the message, under the controller lock, with the mode
+            # taken from the device tree.
+            #
+            # The legacy path below cannot do that. It writes CS low from
+            # userspace, then calls xfer2 -- and between those two the kernel
+            # is free to clock an mcp251x message on the same controller while
+            # this DAC is already selected, so the DAC shifts in edges meant
+            # for someone else. Measured under CAN load: DEVID 0x082E, which is
+            # 0x0417 shifted left one bit (one stray clock), and less often a
+            # persistent latch that only a rail power-cycle clears (IFS_HIL#124).
+            return self._spi.xfer2(pkt)
+
         old_mode = self._spi.mode
         self._spi.mode = 0b01          # mode 1: CPOL=0, CPHA=1
         GPIO.output(self._cs, GPIO.LOW)

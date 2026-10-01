@@ -1,0 +1,9 @@
+# Allow the `isc` user (running hil-broker) to manage the SocketCAN netdevs
+# for the three MCP2515 controllers without a password prompt. The broker
+# calls `ip link set canN ...` to change mode / bitrate / loopback.
+#
+# Install with:
+#   sudo cp infra/sudoers.d/hil-broker /etc/sudoers.d/hil-broker
+#   sudo chmod 0440 /etc/sudoers.d/hil-broker
+#   sudo visudo -c        # sanity check
+isc ALL=(root) NOPASSWD: /usr/sbin/ip link set can[0-9] *

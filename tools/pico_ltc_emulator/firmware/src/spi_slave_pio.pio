@@ -1,0 +1,74 @@
+; SPI mode 3 slave for LTC6811 emulation, implemented in PIO so the
+; bit-level timing is deterministic. Replaces PL022 which had polled-
+; loop latency that caused bidirectional bit-shifts the STM32H7
+; master would reject via PEC.
+;
+; Mode 3 = CPOL=1 (SCK idle HIGH), CPHA=1:
+;   - Master changes MOSI on SCK FALLING. Slave samples MOSI on SCK
+;     RISING.
+;   - Slave changes MISO on SCK FALLING. Master samples MISO on SCK
+;     RISING.
+;   - First SCK edge after CS-fall is FALLING (it idles HIGH).
+;
+; Two SMs run independently with CS gating in each:
+;   spi_slave_tx  — drives MISO from TX FIFO (autopull at 8 bits)
+;   spi_slave_rx  — samples MOSI into RX FIFO (autopush at 8 bits)
+;
+; PIN MAPPING (both SMs share in_base = PIN_SPI_RX = GP16, pins
+; 16/17/18/19 are contiguous: MOSI/CSn/SCK/MISO):
+;   in pin 0 = MOSI (sampled by RX SM)
+;   in pin 1 = CSn  (used by `wait` in both SMs for CS-low gating)
+;   in pin 2 = SCK  (used by `wait` in both SMs for clock edges)
+;   out pin 0 (TX SM only) = MISO at GP19
+;   jmp_pin (both SMs)     = CSn at GP17 (for `jmp pin` = abort on CS HIGH)
+
+; ---------------------------------------------------------------------
+; TX state machine: drive MISO from autopulled FIFO bytes, one bit
+; per SCK falling edge while CS is low. Re-arm cleanly on CS rising
+; so byte alignment can never desync across xacts.
+; ---------------------------------------------------------------------
+.program spi_slave_tx
+
+public restart:
+    ; Wait for CSn LOW (in pin 1 = CSn). MISO holds its last driven
+    ; state during inter-xact idle (no `out` runs).
+    wait 0 pin 1
+
+bit_loop:
+    ; Mode 3 / CPHA=1: data CHANGES on the first SCK edge after CS-fall
+    ; (= falling, since SCK idles HIGH), and is SAMPLED on the second
+    ; edge (= rising). So bit 7 of byte 0 must be driven AT the first
+    ; falling -- driving it pre-emptively at CS-fall and then shifting
+    ; to bit 6 at the first falling would race-overwrite it to bit 6
+    ; before master's first rising-edge sample.
+    wait 0 pin 2            ; wait for SCK FALLING (master's shift edge)
+    out pins, 1             ; shift next MISO bit (first iter = bit 7)
+    ; If CS went HIGH (jmp_pin = CSn), abandon and re-arm.
+    jmp pin restart
+    wait 1 pin 2            ; wait for SCK RISING (master's sample edge)
+    jmp bit_loop
+
+
+; ---------------------------------------------------------------------
+; RX state machine: sample MOSI on every SCK rising edge while CS
+; is low. Re-arm on CS rising to keep byte alignment in sync across
+; xacts.
+; ---------------------------------------------------------------------
+.program spi_slave_rx
+
+public restart:
+    wait 0 pin 1            ; wait for CSn LOW
+    ; In mode 3, SCK is idle HIGH. We can't `wait 1` on SCK
+    ; immediately because the wait would complete on the already-HIGH
+    ; idle state and we'd sample MOSI before the master's first real
+    ; rising edge — capturing a stray bit and shifting the entire
+    ; byte stream right by 1. Wait for the first FALLING edge first
+    ; so the next `wait 1` only fires on a real RISING edge.
+    wait 0 pin 2            ; wait for first SCK FALLING (skip idle HIGH)
+
+bit_loop:
+    wait 1 pin 2            ; wait for SCK RISING (sample edge)
+    in pins, 1              ; sample MOSI (pin 0 in IN scope)
+    jmp pin restart         ; if CS HIGH, abandon
+    wait 0 pin 2            ; wait for SCK FALLING (next bit incoming)
+    jmp bit_loop

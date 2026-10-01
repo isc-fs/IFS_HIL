@@ -22,7 +22,7 @@ SAFETY: Relay coils run on +12 V. Ensure the ATX PSU is powered before
 import time
 import pytest
 from tools import hw_config as CFG
-from tools.tca9555 import TCA9555
+from tools.hil_client import TCA9555
 
 RELAY_NAMES = ["K1", "K2", "K3", "K4"]
 

@@ -8,10 +8,32 @@ version = "0.1.0"
 description = "CLI utilities and automation helpers for the Raspberry Pi HIL bench."
 readme = "README.md"
 requires-python = ">=3.10"
+# Core. Must install anywhere, including a contributor's laptop: everything here
+# is pure Python or ships wheels for macOS and Linux.
 dependencies = [
     "typer>=0.9",
     "pytest>=7.4",
     "pytest-html>=4.0",
+    "python-can>=4.0",
+    "pyyaml>=6.0",
+    "jsonschema>=4.0",
+    # tools/pico_ltc_emulator talks to the Pico over USB CDC. Pure Python and
+    # installs anywhere, unlike the [bench] extras -- and it was imported
+    # without ever being declared, so it only worked where the Pi happened to
+    # have it system-wide.
+    "pyserial>=3.5",
+]
+
+[project.optional-dependencies]
+# Hardware access, Pi-only. spidev compiles against <linux/spi/spidev.h> and
+# RPi.GPIO against <sys/epoll.h>, so neither builds on macOS. Keeping them out of
+# the core set is what lets `pip install -e .` succeed off-bench -- while they
+# were required, a contributor could not install this repo at all, which made the
+# fake-backend workflow the docs promise unreachable.
+#
+# broker/bus.py imports all three lazily (inside the real backend's setup), so
+# the fake backend and every offline tool work without this extra.
+bench = [
     "spidev>=3.5",
     "smbus2>=0.4",
     "RPi.GPIO>=0.7",
@@ -23,3 +45,15 @@ hil = "tools.flash:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["tools*"]
+
+[tool.pytest.ini_options]
+# `soak` is opt-in, and this line is the only thing making it so. Without it a
+# plain `pytest tests/hil/ams/` -- which is what the AMS `full` suite expands to
+# -- ran every soak case unattended, F-077's mid-flash power cut included.
+# `-m` is last-wins: an explicit `-m soak` replaces this default instead of
+# combining with it, and so does any other `-m` (add `and not soak` to yours).
+# tests/test_soak_is_opt_in.py fails if a soak case reaches the default run.
+addopts = "-m 'not soak'"
+markers = [
+    "soak: long-running or destructive bench endurance (reflash cycles, F-077 cuts power mid-flash, 30-min soaks). Deselected by default; opt in deliberately with `-m soak` -- see docs/development/testing.md.",
+]

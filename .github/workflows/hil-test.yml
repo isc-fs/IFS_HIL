@@ -1,0 +1,684 @@
+name: HIL Test
+
+# Run a HIL suite on a bench that can actually serve it, without anyone
+# touching hardware:
+#
+#   gh workflow run hil-test.yml \
+#     -f capabilities=dut-ams,stim-temps,fault-temp-open \
+#     -f suite=tests/hil/ams/test_block_u_microsd_multirun.py
+#
+# `resolve` runs on a cloud runner and matches the requested capabilities against
+# configs/benches/*.yaml, then the test job runs on whichever bench carries the
+# matching labels. Nothing here names a host.
+#
+# REQUIRES a self-hosted runner registered with the labels a descriptor declares
+# (`python -m tools.bench labels --bench <id>`). Without one the test job queues
+# rather than failing, which looks like a hang -- see docs/development/setup.md.
+
+on:
+  # Registers the workflow with GitHub. A workflow carrying ONLY
+  # workflow_dispatch/workflow_call is never indexed until it has run once, and
+  # until then `gh workflow run hil-test.yml` fails with
+  #   HTTP 404: workflow hil-test.yml not found on the default branch
+  # which reads like a branch problem but is not: the workflow is simply unknown.
+  # A push touching this file runs the cheap self-check job below, which indexes
+  # it. After that, `--ref <any-branch>` dispatches that branch's version, so a
+  # feature branch can be tested without going near main.
+  push:
+    paths:
+      - '.github/workflows/hil-test.yml'
+
+  workflow_dispatch:
+    inputs:
+      capabilities:
+        description: "Comma-separated capabilities the suite needs (e.g. dut-ams,stim-temps)"
+        required: false
+        type: string
+        default: ""
+      bench:
+        description: "Pin to a specific bench id (overrides capability matching)"
+        required: false
+        type: string
+        default: ""
+      suite:
+        description: >-
+          Suite NAME from configs/suites.yaml (smoke / dv / full / ...) or a
+          pytest path. Empty means `smoke`, which is why this is not required:
+          a caller that wants the sensible default should not have to name it.
+        required: false
+        type: string
+        default: ""
+      pytest_args:
+        description: "Extra pytest args (e.g. -k something, -m 'not soak')"
+        required: false
+        type: string
+        default: ""
+      allow_degraded:
+        description: "Run even if the bench fails its own preflight (NOT recommended)"
+        required: false
+        type: boolean
+        default: false
+      comment_on:
+        description: "Issue or PR number to post the result to (optional)"
+        required: false
+        type: string
+        default: ""
+      comment_repo:
+        description: "owner/repo the comment belongs to (default: this repo). Use for firmware PRs."
+        required: false
+        type: string
+        default: ""
+      firmware_ref:
+        description: "Firmware commit/branch under test, for provenance"
+        required: false
+        type: string
+        default: ""
+      allow_bench_build:
+        description: >-
+          Permit the bench to rebuild the firmware itself when the cloud
+          artifact is unavailable, even for a commit not merged to dev/main.
+          Building runs that commit's own CMakeLists on the bench, so set
+          this only for code you trust.
+        required: false
+        type: boolean
+        default: false
+
+  workflow_call:
+    inputs:
+      capabilities: { type: string, required: false, default: "" }
+      bench:        { type: string, required: false, default: "" }
+      suite:        { type: string, required: false, default: "" }
+      pytest_args:  { type: string, required: false, default: "" }
+      allow_degraded: { type: boolean, required: false, default: false }
+      comment_on:   { type: string, required: false, default: "" }
+      comment_repo: { type: string, required: false, default: "" }
+      firmware_ref: { type: string, required: false, default: "" }
+      allow_bench_build: { type: boolean, required: false, default: false }
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Registration + a genuine smoke test of the resolver, on a cloud runner.
+  # Never touches hardware, so it is safe on every push to this file.
+  # ---------------------------------------------------------------------
+  self-check:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install
+        run: pip install --quiet -e .
+      - name: The resolver still works
+        run: |
+          python -m tools.bench validate
+          python -m tools.bench resolve --capabilities dut-ams
+          echo "hil-test.yml is registered; dispatch it with:"
+          echo "  gh workflow run hil-test.yml --repo ${{ github.repository }} --ref <branch> \\"
+          echo "    -f capabilities=dut-ams -f suite=tests/hil/ams/"
+
+  # ---------------------------------------------------------------------
+  # Which bench can serve this? Cloud runner, no hardware access -- which is
+  # exactly why the inventory is committed to the repo rather than served by
+  # the benches themselves.
+  # ---------------------------------------------------------------------
+  resolve:
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      bench: ${{ steps.pick.outputs.bench }}
+      labels: ${{ steps.pick.outputs.labels }}
+      dut: ${{ steps.fw.outputs.dut }}
+      fw_repo: ${{ steps.fw.outputs.repo }}
+      fw_sha: ${{ steps.fw.outputs.sha }}
+      suite: ${{ steps.suite.outputs.targets }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install
+        run: pip install --quiet -e .
+
+      - name: Pick a bench
+        id: pick
+        run: |
+          python -m tools.bench resolve \
+            ${{ inputs.capabilities && format('--capabilities {0}', inputs.capabilities) || '' }} \
+            ${{ inputs.bench && format('--bench {0}', inputs.bench) || '' }} \
+            --github-output
+
+      # A `runs-on` with no matching runner does not fail -- GitHub queues the job
+      # indefinitely, which presents as a hang and has no useful error anywhere.
+      # Check up front so the failure names the cause. Listing runners needs
+      # elevated permissions the default token may not have, so a 403 warns and
+      # continues rather than blocking the run.
+      - name: Check a runner carries these labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LABELS: ${{ steps.pick.outputs.labels }}
+          BENCH: ${{ steps.pick.outputs.bench }}
+        run: |
+          if ! gh api "repos/${{ github.repository }}/actions/runners" > /tmp/runners.json 2>/dev/null; then
+            echo "::warning::Cannot list runners with this token, skipping the check. If the test job sits in Queued, no runner carries $LABELS."
+            exit 0
+          fi
+          python - <<'PY'
+          import json, os, sys
+          want = set(json.loads(os.environ["LABELS"]))
+          runners = json.load(open("/tmp/runners.json"))["runners"]
+          if any(want <= {l["name"] for l in r["labels"]} and r["status"] == "online"
+                 for r in runners):
+              print("A runner carries", " ".join(sorted(want)))
+              sys.exit(0)
+          print("::error::No online self-hosted runner carries all of: "
+                + " ".join(sorted(want)))
+          print("Register one on that bench with the labels from:")
+          print(f"  python -m tools.bench labels --bench {os.environ['BENCH']}")
+          sys.exit(1)
+          PY
+
+      # firmware_ref arrives as "<branch>@<sha>" from the firmware repo trigger.
+      # Absent it, this is a bench-only run: no build, no flash, just the suite.
+      - name: Work out what firmware is under test
+        id: fw
+        env:
+          CAPS: ${{ inputs.capabilities }}
+          REF: ${{ inputs.firmware_ref }}
+          COMMENT_REPO: ${{ inputs.comment_repo }}
+        run: |
+          DUT=""
+          for c in ${CAPS//,/ }; do
+            case "$c" in dut-*) DUT="${c#dut-}"; break ;; esac
+          done
+          SHA=""; BRANCH=""
+          if [ -n "$REF" ]; then
+            case "$REF" in
+              *@*) BRANCH="${REF%@*}"; SHA="${REF##*@}" ;;
+              *)   BRANCH="$REF" ;;
+            esac
+          fi
+          {
+            echo "dut=$DUT"
+            echo "repo=$COMMENT_REPO"
+            echo "sha=$SHA"
+            echo "branch=$BRANCH"
+          } >> "$GITHUB_OUTPUT"
+          if [ -n "$SHA" ] && [ -n "$DUT" ] && [ -n "$COMMENT_REPO" ]; then
+            echo "firmware under test: $COMMENT_REPO@$SHA as dut '$DUT'"
+          else
+            echo "no firmware to build — bench-only run"
+          fi
+
+      # A developer picks WHAT to run. They should not need to know paths, and
+      # they should not get the whole tree by default -- the label used to run
+      # all 63 ECU cases, including ones this bench structurally cannot pass, so
+      # every PR came back red regardless of its contents. configs/suites.yaml
+      # maps a name per DUT; a path is passed through untouched; empty means
+      # `smoke`, which is required to be green on a healthy bench.
+      - name: Expand the suite
+        id: suite
+        env:
+          DUT: ${{ steps.fw.outputs.dut }}
+          SUITE: ${{ inputs.suite }}
+        run: |
+          if [ -z "$DUT" ]; then
+            echo "targets=$SUITE" >> "$GITHUB_OUTPUT"
+            echo "no dut resolved; passing the suite through unchanged: $SUITE"
+            exit 0
+          fi
+          TARGETS="$(python -m tools.bench suite --dut "$DUT" --suite "$SUITE" | tr '\n' ' ')"
+          echo "targets=$TARGETS" >> "$GITHUB_OUTPUT"
+          echo "suite '${SUITE:-smoke}' -> $TARGETS"
+
+
+      - name: Summary
+        run: |
+          {
+            echo "### Resolved to \`${{ steps.pick.outputs.bench }}\`"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| requested | \`${{ inputs.capabilities || '(none)' }}\` |"
+            echo "| suite | \`${{ inputs.suite }}\` |"
+            echo "| runner labels | \`${{ steps.pick.outputs.labels }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------
+  # Build the PR's firmware, on a cloud runner. Skipped entirely for a
+  # bench-only run, so the existing "just run a suite" path is untouched.
+  # ---------------------------------------------------------------------
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.fw_sha != '' && needs.resolve.outputs.dut != ''
+    uses: ./.github/workflows/hil-fw-build.yml
+    with:
+      dut: ${{ needs.resolve.outputs.dut }}
+      firmware_repo: ${{ needs.resolve.outputs.fw_repo }}
+      firmware_sha: ${{ needs.resolve.outputs.fw_sha }}
+    secrets:
+      FIRMWARE_TOKEN: ${{ secrets.HIL_CROSS_REPO_PAT }}
+
+  # ---------------------------------------------------------------------
+  # Run it on that bench.
+  # ---------------------------------------------------------------------
+  test:
+    needs: [resolve, build]
+    # `always()` because build is SKIPPED on a bench-only run, and a skipped
+    # dependency would otherwise skip this too. A build that actually FAILED
+    # must still stop us: the bench is never contacted with an unbuilt image.
+    if: always() && needs.resolve.result == 'success' && needs.build.result != 'failure'
+    runs-on: ${{ fromJSON(needs.resolve.outputs.labels) }}
+    # Per-bench queue. Two developers dispatching at once serialise on the bench
+    # they resolved to, while different benches run in parallel. cancel-in-progress
+    # is false because killing a run mid-way leaves hardware energised in an
+    # arbitrary state.
+    concurrency:
+      group: hil-bench-${{ needs.resolve.outputs.bench }}
+      cancel-in-progress: false
+    timeout-minutes: 90
+    env:
+      HIL_BENCH: ${{ needs.resolve.outputs.bench }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Deliberately NOT `pip install -e .` here. Two reasons, both real:
+      #   1. Pi OS Bookworm is PEP 668 externally-managed, so a plain pip
+      #      install fails outright (error: externally-managed-environment).
+      #   2. Worse, an editable install from THIS workspace would repoint the
+      #      system-wide `hil-bench` package away from /home/isc/IFS_HIL, which
+      #      hil-broker.service runs from -- a CI run would silently reconfigure
+      #      the bench daemon. --break-system-packages would "fix" (1) and make
+      #      (2) certain.
+      # The bench already has the dependencies (docs/getting-started.md §3); this
+      # checkout supplies tools/ and broker/ via cwd on sys.path, which is why
+      # every step below uses `python3 -m`.
+      - name: Check the bench has what the suite needs
+        run: |
+          python3 - <<'PYCHK'
+          import importlib.util, sys
+          need = ("yaml", "jsonschema", "pytest", "can")
+          missing = [m for m in need if importlib.util.find_spec(m) is None]
+          if missing:
+              sys.exit("missing on this bench: " + ", ".join(missing) +
+                       " -- see docs/getting-started.md section 3")
+          print("dependencies present:", ", ".join(need))
+          PYCHK
+
+      # The bench proves it still is what it claims before anything runs. A
+      # descriptor that has drifted from reality is worse than no descriptor:
+      # it attracts runs the bench cannot serve, and the failure shows up an
+      # hour later looking like a firmware bug.
+      # The bench's DAC80504s wedge -- five separate times in one day -- and the
+      # cure is always the same escalating ritual: restart the broker, and if that
+      # is not enough, power-on-reset the rails and rebuild CAN behind them. Doing
+      # that by hand meant a red verdict on a PR whose firmware was fine, so do it
+      # here instead and only fail if the bench is genuinely unfit.
+      #
+      # `bench recover` takes the bench lock itself: level 2 cycles the rails, and
+      # doing that while another run is mid-flash is the interrupted write that
+      # leaves an H7 unrecoverable (F-077).
+      - name: Preflight — bench matches its descriptor
+        id: preflight
+        continue-on-error: ${{ inputs.allow_degraded }}
+        run: |
+          for lvl in 0 1 2; do
+            if [ "$lvl" != 0 ]; then
+              echo "::warning::preflight failed — attempting recovery level $lvl"
+              python3 -m tools.bench recover --bench "$HIL_BENCH" --level "$lvl" || true
+            fi
+            if python3 -m tools.bench verify --bench "$HIL_BENCH"; then
+              if [ "$lvl" != 0 ]; then
+                echo "::warning::bench needed recovery level $lvl before it matched its descriptor"
+              fi
+              exit 0
+            fi
+          done
+          echo "::error::bench still does not match its descriptor after recovery — it needs a human"
+          exit 1
+
+      - name: Record what is under test
+        run: |
+          mkdir -p artifacts
+          {
+            echo "bench:    $HIL_BENCH"
+            echo "commit:   ${{ github.sha }}"
+            echo "firmware: ${{ inputs.firmware_ref || '(none given)' }}"
+            echo "suite:    ${{ inputs.suite }}"
+            echo "degraded: ${{ inputs.allow_degraded }}"
+            echo ""
+            python3 -m tools.bench describe 2>&1 || true
+          } > artifacts/bench-state.txt
+
+      - name: Capture CAN traffic
+        run: |
+          # Best-effort: the bus name comes from the descriptor, and a bench
+          # without candump should not fail the run.
+          DEV=$(python3 -c "from tools.bench import load_bench; print(load_bench()['can']['acu']['dev'])")
+          echo "CANDUMP_DEV=$DEV" >> "$GITHUB_ENV"
+          ( candump -t d "$DEV" > artifacts/candump.log 2>/dev/null & echo $! > /tmp/candump.pid ) || true
+
+      - name: Fetch the built firmware
+        if: needs.build.result == 'success' && needs.build.outputs.uploaded == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact }}
+          path: fw
+
+      - name: Use the downloaded image
+        if: needs.build.result == 'success' && needs.build.outputs.uploaded == 'true'
+        run: |
+          {
+            echo "FW_IMAGE=fw/${{ needs.build.outputs.bin_name }}"
+            echo "FW_SHA256=${{ needs.build.outputs.sha256 }}"
+            echo "FW_SOURCE=cloud-artifact"
+            echo "FW_VERSION=${{ needs.build.outputs.version }}"
+          } >> "$GITHUB_ENV"
+
+      # ------------------------------------------------------------------
+      # Fallback. The firmware COMPILED and passed the layout gate, but its
+      # artifact never reached storage -- the org is on the free plan, and a
+      # full quota fails the upload while the build itself is fine. Rather
+      # than take the fleet offline for the 6-12 h GitHub takes to recalculate
+      # usage, the bench rebuilds the same commit from the same reviewed
+      # recipe. The bench toolchain is the release the recipe pins.
+      #
+      # This crosses the boundary hil-fw-build.yml documents, on purpose: a
+      # PR's own CMakeLists should not execute next to the broker socket, the
+      # NOPASSWD ip link rule and the spi/i2c/gpio groups. So it is allowed
+      # ONLY for a commit already merged into the firmware repo's dev or main
+      # -- code that has been through review. Anything else must opt in with
+      # allow_bench_build, and the log says so.
+      # ------------------------------------------------------------------
+      - name: Fallback — rebuild on the bench
+        if: needs.build.result == 'success' && needs.build.outputs.uploaded != 'true'
+        env:
+          DUT: ${{ needs.resolve.outputs.dut }}
+          FW_REPO: ${{ needs.resolve.outputs.fw_repo }}
+          FW_SHA: ${{ needs.resolve.outputs.fw_sha }}
+          ALLOW: ${{ inputs.allow_bench_build }}
+        run: |
+          set -euo pipefail
+          echo "::warning::Cloud artifact unavailable — rebuilding $FW_SHA on the bench."
+
+          R="configs/firmware/${DUT}.yaml"
+          test -f "$R" || { echo "::error::no build recipe $R"; exit 1; }
+
+          python3 - "$R" > "$RUNNER_TEMP/recipe.env" <<'PY'
+          import sys, yaml, shlex
+          r = yaml.safe_load(open(sys.argv[1]))
+          for k in ("repo", "configure", "build", "elf", "layout_check",
+                    "toolchain_release"):
+              print("RCP_%s=%s" % (k.upper(), shlex.quote(str(r[k]))))
+          PY
+          . "$RUNNER_TEMP/recipe.env"
+
+          # The same guard the cloud build applies: the recipe pins the repo,
+          # and a run naming a different one is either a bug or an attempt to
+          # build something else under this DUT's name.
+          if [ "$RCP_REPO" != "$FW_REPO" ]; then
+            echo "::error::dut '$DUT' is pinned to $RCP_REPO but the run asked for $FW_REPO"
+            exit 1
+          fi
+
+          # A bench provisioned before this fallback existed will not have the
+          # cross-compiler. Say so plainly -- otherwise this surfaces as a
+          # confusing cmake error about a missing compiler.
+          for t in arm-none-eabi-gcc arm-none-eabi-objcopy cmake; do
+            command -v "$t" >/dev/null 2>&1 || {
+              echo "::error::$t is not installed on this bench, so the firmware cannot be"
+              echo "rebuilt here. Install it with: sudo apt-get install -y gcc-arm-none-eabi cmake"
+              echo "(scripts/bench_setup.sh installs these on a fresh bench.)"
+              exit 1
+            }
+          done
+
+          SRC="$RUNNER_TEMP/fw-src"
+          rm -rf "$SRC"
+          git clone --quiet --filter=blob:none "https://github.com/${FW_REPO}.git" "$SRC"
+          git -C "$SRC" fetch --quiet origin "$FW_SHA"
+
+          if [ "$ALLOW" != "true" ]; then
+            MERGED=no
+            for b in dev main; do
+              if git -C "$SRC" merge-base --is-ancestor "$FW_SHA" "origin/$b" 2>/dev/null; then
+                MERGED="$b"; break
+              fi
+            done
+            if [ "$MERGED" = "no" ]; then
+              echo "::error::Refusing to build $FW_SHA on the bench: not merged into dev or main."
+              echo "Building runs that commit's own CMakeLists on the bench, next to the"
+              echo "broker socket and the hardware groups. For unreviewed code, either wait"
+              echo "for the artifact quota to clear or re-dispatch with allow_bench_build=true."
+              exit 1
+            fi
+            echo "commit is merged into origin/$MERGED — bench build permitted"
+          else
+            echo "::warning::allow_bench_build=true — building an unreviewed commit on the bench"
+          fi
+
+          git -C "$SRC" checkout --quiet --detach "$FW_SHA"
+          echo "recipe pins arm-none-eabi $RCP_TOOLCHAIN_RELEASE; bench has $(arm-none-eabi-gcc -dumpversion)"
+
+          ( cd "$SRC" && eval "$RCP_CONFIGURE" && eval "$RCP_BUILD" && eval "$RCP_LAYOUT_CHECK" )
+
+          BIN="$(basename "${RCP_ELF%.elf}").bin"
+          mkdir -p "$SRC/out"
+          arm-none-eabi-objcopy -O binary "$SRC/$RCP_ELF" "$SRC/out/$BIN"
+          SUM=$(sha256sum "$SRC/out/$BIN" | cut -d' ' -f1)
+          echo "bench-built $BIN  sha256 $SUM"
+          {
+            echo "FW_IMAGE=$SRC/out/$BIN"
+            echo "FW_SHA256=$SUM"
+            echo "FW_SOURCE=bench-rebuild"
+            echo "FW_VERSION=$(tr -d ' \t\r\n' < "$SRC/VERSION" 2>/dev/null || true)"
+          } >> "$GITHUB_ENV"
+
+      # flock, not just the concurrency group: it also covers anyone who SSHes
+      # in and runs pytest by hand while a dispatched run is live.
+      #
+      # Flash and test share ONE lock deliberately. Two locked steps would leave
+      # a window between them in which a hand-run pytest could land on the bench
+      # mid-flash, or between a flash and the suite that is supposed to be
+      # judging it.
+      - name: Flash and run suite
+        id: run
+        # FW_IMAGE / FW_SHA256 / FW_SOURCE come from GITHUB_ENV, set by whichever
+        # path produced the image -- the cloud artifact or the bench rebuild.
+        # They are deliberately NOT re-declared here: a step-level env would
+        # override the job-level value and silently pin this to the cloud build's
+        # sha256, which a bench rebuild does not share.
+        env:
+          DUT: ${{ needs.resolve.outputs.dut }}
+          WANTED_FW: ${{ needs.resolve.outputs.fw_sha }}
+        run: |
+          flock -w 3000 /tmp/hil-bench.lock bash -euo pipefail -c '
+            if [ -n "${FW_IMAGE:-}" ]; then
+              echo "::group::flash $DUT  (image from ${FW_SOURCE:-unknown})"
+              # --expect-sha256 re-checks the image on the bench: the artifact
+              # round-trip is the one place a build and a flash can disagree.
+              #
+              # No --restore-relays: the bench stays isolated on the DUT under
+              # test for the whole suite. A run from the ECU repo powers the ECU
+              # carrier and nothing else.
+              python3 -m tools.flash_dut --dut "$DUT" --bin "$FW_IMAGE" --bench "$HIL_BENCH" --expect-sha256 "$FW_SHA256" --out artifacts/flash.json
+              echo "::endgroup::"
+
+              # Point the suite'"'"'s OWN reflash fixtures at the image we just
+              # flashed. tests/hil/<dut>/test_block_a_boot.py has an A-003
+              # "flash and jump" case that reflashes from
+              # ECU_FIRMWARE_BIN / AMS_FIRMWARE_BIN, and those fall back to a
+              # hardcoded path when unset. On bench-01 the ECU fallback
+              # (~/firmware-builds/ECU_fix.bin, a 2026-06-21 diagnostic build)
+              # EXISTS, so A-003 silently flashed it over the firmware under
+              # test at 7 % and the remaining 56 cases judged that binary
+              # instead of the PR. It passed while doing it. Absolute path:
+              # pytest may run from elsewhere, and the artifact path is relative.
+              FW_ABS="$(readlink -f "$FW_IMAGE")"
+              case "$DUT" in
+                ecu) export ECU_FIRMWARE_BIN="$FW_ABS" ;;
+                ams) export AMS_FIRMWARE_BIN="$FW_ABS" ;;
+              esac
+              echo "suite reflash fixtures pinned to $FW_ABS"
+
+              # Tell the suite WHICH firmware it is judging. The release-gate
+              # cases (AMS A-013: 0x6C6 self-reported semver + git hash) compare
+              # the running image against the source it was built from, and
+              # without these they fall back to <repo>/firmware on the bench --
+              # a checkout nothing else uses, that no step keeps current, and
+              # that CI does not even need (the artifact-quota rebuild clones
+              # into RUNNER_TEMP). On bench-01 that stale tree read v1.6.0 while
+              # the carrier ran v3.0.0, so the gate was judging a three-month-old
+              # source. The build knows the answer; carry it instead.
+              if [ -n "${FW_VERSION:-}" ]; then
+                META="$RUNNER_TEMP/fw-meta"
+                rm -rf "$META" && mkdir -p "$META"
+                printf %s "$FW_VERSION" > "$META/VERSION"
+                case "$DUT" in
+                  ecu) export ECU_SOURCE_DIR="$META" ECU_GIT_HASH="${WANTED_FW:0:8}" ;;
+                  ams) export AMS_SOURCE_DIR="$META" AMS_GIT_HASH="${WANTED_FW:0:8}" ;;
+                esac
+                echo "release gate pinned to $FW_VERSION @ ${WANTED_FW:0:8}"
+              else
+                echo "::warning::the build reported no VERSION, so release-gate cases fall back to the bench source tree"
+              fi
+            elif [ -n "${WANTED_FW:-}" ]; then
+              # Firmware WAS under test but no image reached the bench. Running
+              # the suite now would judge whatever the carrier happens to hold
+              # and report it as a verdict on $WANTED_FW -- a false green, which
+              # is worse than a red run.
+              echo "::error::firmware $WANTED_FW was under test but no image reached the bench"
+              exit 1
+            else
+              echo "bench-only run — no firmware requested; testing whatever is on the carrier"
+            fi
+            python3 -m pytest ${{ needs.resolve.outputs.suite }} ${{ inputs.pytest_args }} -v --junitxml=artifacts/junit.xml
+          '
+
+      - name: Stop capture + collect logs
+        if: always()
+        run: |
+          [ -f /tmp/candump.pid ] && kill "$(cat /tmp/candump.pid)" 2>/dev/null || true
+          journalctl -u hil-broker -u hil-can-up -u hil-psu-on -n 400 --no-pager \
+            > artifacts/services.log 2>&1 || true
+          ip -details -statistics link show "${CANDUMP_DEV:-can2}" \
+            > artifacts/can-link.txt 2>&1 || true
+
+      # Non-fatal on purpose. These artifacts are provenance, not the result:
+      # the verdict is already in the step summary and the PR comment. A run
+      # that flashed, tested and passed must not go red because the account's
+      # artifact storage quota is full -- which is exactly what happened on the
+      # first successful bench run (run 33385267560).
+      - name: Upload artifacts
+        id: upload
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: hil-${{ needs.resolve.outputs.bench }}-${{ github.run_id }}
+          path: artifacts/
+          retention-days: 30
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### ${{ steps.run.outcome == 'success' && '🟢' || '🔴' }} \`${{ inputs.suite }}\` on \`$HIL_BENCH\`"
+            echo ""
+            echo "- preflight: ${{ steps.preflight.outcome }}"
+            echo "- result: ${{ steps.run.outcome }}"
+            echo "- commit: \`${{ github.sha }}\`"
+            if [ "${{ steps.upload.outcome }}" = "failure" ]; then
+              echo "- :warning: artifacts were NOT uploaded (storage quota?) — logs above still hold the detail"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Commenting on a firmware PR is cross-repo, so it needs the PAT; the
+      # default GITHUB_TOKEN is scoped to this repository only.
+      # Turn the JUnit XML into something a developer can read without leaving
+      # the PR. A bare red tick plus a link means opening Actions, finding the
+      # job and scrolling past 500 lines of candump to learn which case failed --
+      # so most people re-run it or stop reading it.
+      - name: Summarise the run
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import pathlib, xml.etree.ElementTree as ET
+
+          src = pathlib.Path("artifacts/junit.xml")
+          out = pathlib.Path("artifacts/summary.md")
+          out.parent.mkdir(parents=True, exist_ok=True)
+          if not src.is_file():
+              out.write_text("")
+              raise SystemExit(0)
+
+          root = ET.parse(src).getroot()
+          suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
+          tot = fail = err = skip = 0
+          rows = []
+          for ts in suites:
+              tot  += int(ts.get("tests") or 0)
+              fail += int(ts.get("failures") or 0)
+              err  += int(ts.get("errors") or 0)
+              skip += int(ts.get("skipped") or 0)
+              for tc in ts.iter("testcase"):
+                  for kind in ("failure", "error"):
+                      node = tc.find(kind)
+                      if node is None:
+                          continue
+                      why = (node.get("message") or node.text or "").strip()
+                      why = why.splitlines()[0] if why else "(no message)"
+                      if len(why) > 180:
+                          why = why[:177] + "..."
+                      rows.append((tc.get("name") or "?", why.replace("|", "\\|")))
+
+          passed = tot - fail - err - skip
+          lines = ["", "**%d passed, %d failed, %d skipped**" % (passed, fail + err, skip), ""]
+          if rows:
+              lines += ["| failed case | why |", "|---|---|"]
+              for name, why in rows[:15]:
+                  lines.append("| `%s` | %s |" % (name, why))
+              if len(rows) > 15:
+                  lines.append("| ... | and %d more |" % (len(rows) - 15))
+              lines.append("")
+          out.write_text("\n".join(lines))
+          print("\n".join(lines))
+          PY
+
+      - name: Comment result
+        if: always() && inputs.comment_on != ''
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ inputs.comment_repo != '' && secrets.HIL_CROSS_REPO_PAT || github.token }}
+          script: |
+            const fs = require('fs');
+            // Written by the previous step from artifacts/junit.xml. Absent when the
+            // run died before pytest (failed preflight or flash), in which case the
+            // table is simply omitted.
+            let summary = '';
+            try { summary = fs.readFileSync('artifacts/summary.md', 'utf8'); } catch (e) {}
+            const ok = '${{ steps.run.outcome }}' === 'success';
+            const body = [
+              `### ${ok ? '🟢' : '🔴'} HIL run on \`${{ needs.resolve.outputs.bench }}\``,
+              '',
+              `| | |`,
+              `|---|---|`,
+              `| suite | \`${{ inputs.suite }}\` |`,
+              `| preflight | ${{ steps.preflight.outcome }} |`,
+              `| result | ${{ steps.run.outcome }} |`,
+              `| commit | \`${{ github.sha }}\` |`,
+              `| firmware | \`${{ inputs.firmware_ref || 'n/a' }}\` |`,
+              '',
+              summary,
+              `[Full logs and JUnit XML](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
+            ].join('\n');
+            const target = '${{ inputs.comment_repo }}' || `${context.repo.owner}/${context.repo.repo}`;
+            const [owner, repo] = target.split('/');
+            await github.rest.issues.createComment({
+              owner, repo,
+              issue_number: Number('${{ inputs.comment_on }}'),
+              body,
+            });

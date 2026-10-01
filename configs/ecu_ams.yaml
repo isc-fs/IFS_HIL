@@ -3,7 +3,8 @@ ecu:
   board: stm32h733zg
   slot: MLC2
   transport: can
-  can_channel: can0
+  can_channel: can2          # AMS FDCAN1 = PCB CAN1 (U17) = kernel can2
+                             # (invariant #3); v1.6.0 fleet cutover, was can0
   firmware:
     binary: /srv/hil/build/ams/firmware.bin
     cmake_target: ams_firmware

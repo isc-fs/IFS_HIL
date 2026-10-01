@@ -1,0 +1,16 @@
+[Unit]
+Description=Run the HIL bench self-check every 5 minutes
+Requires=hil-bench-watchdog.service
+
+[Timer]
+# First check a minute after boot -- the PSU, CAN and broker units all settle
+# before this, and a bench that came up wrong should not wait 5 minutes to say so.
+OnBootSec=1min
+OnUnitActiveSec=5min
+# Spread across benches so a fleet does not power-cycle in lockstep.
+RandomizedDelaySec=30s
+AccuracySec=10s
+Unit=hil-bench-watchdog.service
+
+[Install]
+WantedBy=timers.target

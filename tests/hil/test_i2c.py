@@ -13,8 +13,8 @@ on some kernels; write_byte reliably ACKs all 7 devices.
 """
 
 import pytest
-import smbus2
 from tools import hw_config as CFG
+from tools.hil_client import i2c_scan
 
 
 # ---------------------------------------------------------------------------
@@ -24,15 +24,9 @@ from tools import hw_config as CFG
 class TestI2CScan:
     """Scan the I2C bus and report all responding addresses."""
 
-    def test_scan_finds_7_devices(self, i2c_bus, capsys):
+    def test_scan_finds_7_devices(self, capsys):
         """Expect exactly 7 devices: 4 INA226 + 3 TCA9555."""
-        found = []
-        for addr in range(0x08, 0x78):
-            try:
-                i2c_bus.write_byte(addr, 0x00)
-                found.append(addr)
-            except OSError:
-                pass
+        found = i2c_scan()
 
         with capsys.disabled():
             print(f"\n  I2C scan found {len(found)} device(s): "

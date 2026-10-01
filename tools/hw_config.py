@@ -7,7 +7,10 @@ and confirmed by hardware SPI scan. PCB is the authoritative source.
 RPi GPIO numbering is BCM throughout.
 
 SPI bus: hardware SPI0 (MISO=GPIO9, MOSI=GPIO10, SCLK=GPIO11).
-All chip-selects are software GPIO (active-low).
+All twelve chip-selects are kernel-owned (active-low): the CS_* GPIOs below
+are the cs-gpios of infra/devicetree/mcp2515-triple.dts, and the two must
+agree. The SPI core asserts CS inside each transfer; userspace must never
+drive one (IFS_HIL#124).
 
 I2C bus: hardware I2C1 (/dev/i2c-1, SDA=GPIO2, SCL=GPIO3).
 
@@ -22,11 +25,18 @@ MISO BUFFER (IC1, SN74LVC125A):
 # SPI bus
 # ---------------------------------------------------------------------------
 SPI_BUS = 0          # /dev/spidev0.x
-SPI_DEVICE = 0       # opened as spidev0.0; CS managed manually
+SPI_DEVICE = 3       # spidev0.3: the legacy shared node (no_cs=True, CS pulsed
+                     # by hand). The broker now opens the per-device nodes
+                     # spidev0.4-0.11 and falls back to this one only when they
+                     # are missing (an old overlay). spi0.0/1/2 are claimed by
+                     # the kernel mcp251x driver for the three MCP2515s --
+                     # see infra/devicetree/mcp2515-triple.dts.
 SPI_MAX_HZ = 1_000_000  # conservative 1 MHz for all peripherals
 
 # ---------------------------------------------------------------------------
-# SPI chip-selects  (active LOW — drive low to select, high to deselect)
+# SPI chip-selects (active LOW). Kernel-owned: each is an entry in the
+# overlay's cs-gpios list (docs/hardware-reference.md gives the spidev node
+# of each). Only the spidev0.3 fallback path drives the non-CAN ones by hand.
 # ---------------------------------------------------------------------------
 
 # MCP2515 CAN controllers (U17=CAN1, U19=CAN2, U21=CAN3)
@@ -121,7 +131,9 @@ RELAY_PINS = {
 # ---------------------------------------------------------------------------
 MCP2515_OSC_HZ = 16_000_000
 
-# CAN bus bitrate for loopback test
+# CAN bus bitrate for loopback test. Bench bus is 500 kbps (classic CAN,
+# 68.75 % SP): both the AMS app (AMS #351) and the v1.6.2 multi-FDCAN
+# bootloader reverted from the 1 Mbps experiment (#338/#341) back to 500 k.
 CAN_BITRATE = 500_000
 
 # ---------------------------------------------------------------------------

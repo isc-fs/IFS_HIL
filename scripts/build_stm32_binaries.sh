@@ -13,6 +13,7 @@ fi
 docker run --rm "${TTY_OPTS[@]}" \
   -v "${ROOT}:/workspace" -w /workspace \
   --device /dev/bus/usb:/dev/bus/usb --privileged \
+  -e GIT_HASH="${GIT_HASH:-}" \
   "$IMAGE" \
   bash -lc '
 set -euo pipefail
@@ -30,8 +31,19 @@ fi
 # Ensure our pinned ARM toolchain is found first regardless of which cmake file is used
 export PATH="/opt/toolchains/arm-gcc/bin:$PATH"
 
+# Stamp firmware build provenance (AMS #323) when the caller passed
+# GIT_HASH=$(git -C <ams-repo> rev-parse --short=8 HEAD). firmware/ carries
+# no .git, so the hash must come from the caller. Also write firmware/GIT_HASH
+# so the HIL A-013 row can assert 0x6C6[3..6] on the non-git Pi.
+GIT_HASH_ARG=()
+if [ -n "${GIT_HASH:-}" ]; then
+  GIT_HASH_ARG=(-DGIT_HASH="$GIT_HASH")
+  echo "$GIT_HASH" > /workspace/firmware/GIT_HASH
+  echo "Stamping git hash: $GIT_HASH"
+fi
+
 cmake -S firmware -B build -G Ninja \
-  -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN"
+  -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" "${GIT_HASH_ARG[@]}"
 cmake --build build -j
 
 # Ensure .bin and .hex exist — some firmware CMakeLists.txt only produce .elf

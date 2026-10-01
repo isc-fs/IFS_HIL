@@ -14,7 +14,10 @@ class MCP3208:
     SPI mode: CPOL=0, CPHA=0 (mode 0,0), max 2 MHz.
     """
 
-    def __init__(self, spi: spidev.SpiDev, cs_pin: int, vref: float = 3.3):
+    def __init__(self, spi: spidev.SpiDev, cs_pin: int | None = None,
+                 vref: float = 3.3):
+        """`cs_pin=None` means this ADC has its own spi_device and the kernel
+        owns its chip-select; anything else is the legacy shared-spidev path."""
         self._spi = spi
         self._cs = cs_pin
         self._vref = vref
@@ -41,9 +44,20 @@ class MCP3208:
             0x00,
         ]
 
-        GPIO.output(self._cs, GPIO.LOW)
-        response = self._spi.xfer2(cmd)
-        GPIO.output(self._cs, GPIO.HIGH)
+        if self._cs is None:
+            # Kernel-managed CS: this ADC has its own spi_device, so the SPI
+            # core asserts CS as part of the message, under the controller
+            # lock. The branch below cannot: it writes CS low from userspace
+            # and only then transfers, leaving a window in which the kernel
+            # mcp251x driver can clock an MCP2515 message on the same
+            # controller while this ADC is already selected. That is the
+            # mechanism that corrupted the DACs (IFS_HIL#124) -- the ADCs
+            # carried it too, it just had not bitten yet.
+            response = self._spi.xfer2(cmd)
+        else:
+            GPIO.output(self._cs, GPIO.LOW)
+            response = self._spi.xfer2(cmd)
+            GPIO.output(self._cs, GPIO.HIGH)
 
         # Result: response[1] bits[3:0] (12-bit MSB) + response[2] (8-bit LSB)
         raw = ((response[1] & 0x0F) << 8) | response[2]

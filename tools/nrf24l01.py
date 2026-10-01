@@ -33,7 +33,30 @@ class NRF24L01:
     responds on SPI and that readable registers hold sensible values.
     """
 
-    def __init__(self, spi: spidev.SpiDev, cs_pin: int, ce_pin: int):
+    def _sel_xfer(self, pkt):
+        """One SPI transaction with this radio selected.
+
+        With a kernel-owned chip-select (`cs_pin=None`) the SPI core asserts CS
+        as part of the message, under the controller lock. Toggling CS from
+        userspace instead leaves a window in which the kernel mcp251x driver
+        can clock an MCP2515 message on the same controller while this device
+        is already selected -- the mechanism that corrupted the DACs
+        (IFS_HIL#124). The nRF24 carried the same exposure.
+
+        CE and IRQ stay plain GPIO; only the chip-select moves.
+        """
+        if self._cs is None:
+            return self._spi.xfer2(pkt)
+        GPIO.output(self._cs, GPIO.LOW)
+        try:
+            return self._spi.xfer2(pkt)
+        finally:
+            GPIO.output(self._cs, GPIO.HIGH)
+
+    def __init__(self, spi: spidev.SpiDev, cs_pin: int | None, ce_pin: int):
+        """`cs_pin=None` means this radio has its own spi_device and the kernel
+        owns its chip-select. CE is a plain GPIO either way -- it gates the
+        radio, not the bus."""
         self._spi = spi
         self._cs = cs_pin
         self._ce = ce_pin
@@ -45,21 +68,15 @@ class NRF24L01:
     # ------------------------------------------------------------------
 
     def _read_reg(self, addr: int) -> int:
-        GPIO.output(self._cs, GPIO.LOW)
-        resp = self._spi.xfer2([_CMD_R_REGISTER | (addr & 0x1F), _CMD_NOP])
-        GPIO.output(self._cs, GPIO.HIGH)
+        resp = self._sel_xfer([_CMD_R_REGISTER | (addr & 0x1F), _CMD_NOP])
         return resp[1]
 
     def _write_reg(self, addr: int, value: int) -> None:
-        GPIO.output(self._cs, GPIO.LOW)
-        self._spi.xfer2([_CMD_W_REGISTER | (addr & 0x1F), value & 0xFF])
-        GPIO.output(self._cs, GPIO.HIGH)
+        self._sel_xfer([_CMD_W_REGISTER | (addr & 0x1F), value & 0xFF])
 
     def _nop(self) -> int:
         """Send NOP and return STATUS byte."""
-        GPIO.output(self._cs, GPIO.LOW)
-        resp = self._spi.xfer2([_CMD_NOP])
-        GPIO.output(self._cs, GPIO.HIGH)
+        resp = self._sel_xfer([_CMD_NOP])
         return resp[0]
 
     # ------------------------------------------------------------------

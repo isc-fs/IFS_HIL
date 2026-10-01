@@ -2,7 +2,7 @@ name: HIL Build Trigger
 
 # This workflow lives in IFS08-CE (or any firmware repo).
 # A collaborator comments "/hil-build <subdir>" on a PR to kick off
-# a build + flash sequence in IFS08_HIL:
+# a build + flash sequence in IFS_HIL:
 #   1. Firmware is compiled in Docker (ubuntu runner)
 #   2. Artifact is flashed to the target ECU via CAN bootloader (hil-rpi runner)
 # Results are posted back to this PR.
@@ -79,7 +79,7 @@ jobs:
             });
             core.setOutput('sha', data.head.sha);
 
-      - name: Trigger HIL build in IFS08_HIL
+      - name: Trigger HIL build in IFS_HIL
         if: steps.permission.outputs.allowed == 'true'
         uses: actions/github-script@v7
         with:
@@ -87,7 +87,7 @@ jobs:
           script: |
             await github.rest.actions.createWorkflowDispatch({
               owner: 'isc-fs',
-              repo: 'IFS08_HIL',
+              repo: 'IFS_HIL',
               workflow_id: 'hil-build-only.yml',
               ref: 'main',
               inputs: {
@@ -114,6 +114,6 @@ jobs:
                 ``,
                 `**Sequence:** compile → upload artifact → flash via CAN bootloader`,
                 ``,
-                `[View run →](https://github.com/isc-fs/IFS08_HIL/actions/workflows/hil-build-only.yml)`,
+                `[View run →](https://github.com/isc-fs/IFS_HIL/actions/workflows/hil-build-only.yml)`,
               ].join('\n'),
             });

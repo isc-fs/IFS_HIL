@@ -1,0 +1,59 @@
+[Unit]
+Description=Bring up the three SocketCAN interfaces on the BACKPLANE_HIL bench
+# Requires the ATX rails (-> mcp251x probe) and the PSU_ON assertion that
+# hil-psu-on.service guarantees. Runs before hil-broker so the broker
+# always sees canN already UP at the expected bitrate.
+After=hil-psu-on.service
+Requires=hil-psu-on.service
+Before=hil-broker.service
+# Ensure the mcp251x kernel driver has had a chance to bind the
+# interfaces before we ip-link them up.
+After=sys-subsystem-net-devices-can0.device sys-subsystem-net-devices-can1.device sys-subsystem-net-devices-can2.device
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# 500 kbps is the bench standard (classic CAN, 68.75 % sample point):
+# both the AMS app (AMS #351) and the v1.6.2 multi-FDCAN bootloader
+# reverted from the 1 Mbps experiment (#338/#341) back to 500 k. The
+# multi-FDCAN BL still serves all three FDCAN buses — only the bitrate
+# moved back.
+#
+# sample-point 0.6875 is passed EXPLICITLY. It used to be described in this
+# comment but never handed to `ip link`, so the kernel chose its own default
+# for the mcp251x at 500 k — 0.875 — and every bus came up mismatched against
+# the STM32 nodes. That failure is invisible from the Pi side: the link is UP
+# at the right bitrate, and the only symptom is the DUT bus-offing, which reads
+# as a firmware fault rather than a bench misconfiguration. It has cost several
+# sessions. ExecStartPost below fails the unit rather than letting it recur
+# silently.
+# txqueuelen=1000 is required for `can-flasher flash` — the default 10
+# overflows the TX queue during sustained flash writes and returns
+# ENOBUFS mid-sector. restart-ms=200 enables the kernel's automatic
+# bus-off recovery (CAN chip auto-restarts after 200 ms so a transient
+# bus problem doesn't require a manual `ip link` cycle).
+ExecStart=/bin/sh -c '\
+  set -e; \
+  for i in 0 1 2; do \
+    /usr/sbin/ip link set "can$i" down 2>/dev/null || true; \
+    /usr/sbin/ip link set "can$i" txqueuelen 1000; \
+    /usr/sbin/ip link set "can$i" up type can bitrate 500000 sample-point 0.6875 restart-ms 200; \
+  done'
+# Post-condition: the kernel silently substitutes the closest achievable timing,
+# so asking for a sample point is not the same as getting it. Fail loudly here
+# instead of handing the bench a bus the DUTs cannot talk on. `ip` renders
+# 0.6875 as "0.687".
+ExecStartPost=/bin/sh -c '\
+  for i in 0 1 2; do \
+    /usr/sbin/ip -details link show "can$i" | grep -q "sample-point 0.687" || { \
+      echo "can$i: sample-point is not 0.6875 — DUTs will bus-off" >&2; \
+      exit 1; \
+    }; \
+  done'
+ExecStop=/bin/sh -c '\
+  for i in 0 1 2; do \
+    /usr/sbin/ip link set "can$i" down 2>/dev/null || true; \
+  done'
+
+[Install]
+WantedBy=multi-user.target
