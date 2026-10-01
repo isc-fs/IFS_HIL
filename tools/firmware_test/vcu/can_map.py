@@ -114,11 +114,16 @@ PIT_FLAG_RTDS_ACTIVE  = 1 << 2
 PIT_FLAG_OK_PRECHARGE = 1 << 3
 PIT_FLAG_START_BUTTON = 1 << 4
 
-# pit-diag 0x704.task_ran_mask bits (EcuTaskId) — a frozen bit = a stalled task
-TASK_CONTROL = 1 << 0
-TASK_CAN_RX  = 1 << 1
-TASK_CAN_TX  = 1 << 2
-TASK_DIAG    = 1 << 3
+# pit-diag 0x704.task_ran_mask bits (EcuTaskId) — a frozen bit = a stalled task.
+# ECU >= 1.0.0 is a 5-task layout: TELEMETRY took bit3 and DIAG MOVED to bit4
+# (pit_diag_health.def). Pre-1.0.0 firmware had DIAG at bit3 and no telemetry.
+TASK_CONTROL   = 1 << 0
+TASK_CAN_RX    = 1 << 1
+TASK_CAN_TX    = 1 << 2
+TASK_TELEMETRY = 1 << 3
+TASK_DIAG      = 1 << 4
+TASK_ALL       = (TASK_CONTROL | TASK_CAN_RX | TASK_CAN_TX
+                  | TASK_TELEMETRY | TASK_DIAG)
 
 # pit-diag 0x704.last_fault sentinels (0 = none)
 LAST_FAULT = {
@@ -192,14 +197,28 @@ def decode_pit_fwinfo(data: bytes) -> dict:
 def decode_pit_health(data: bytes) -> dict:
     """0x704 (8 B): free_heap/min (BE16), task_ran_mask, reset_cause, uptime_s,
     last_fault. The IWDG instrument — @1 Hz from DiagTask, survives a
-    ControlTask stall (see LAST_FAULT / ResetCause / TASK_* helpers)."""
+    ControlTask stall (see LAST_FAULT / ResetCause / TASK_* helpers).
+
+    Bytes 4 and 5 are packed (pit_diag_health.def): byte4 = task liveness b0-b4
+    + stub announce b5-b7; byte5 = reset_cause b0-b2, stub_brake b3,
+    cal_status b4-b5, stub_torque_cap b6, boot_refused b7 (sticky). Reading
+    either as a whole byte turns a stub/cal/refusal bit into a bogus task or
+    reset cause."""
+    b4, b5 = data[4], data[5]
     return {
-        "free_heap":     int.from_bytes(data[0:2], "big"),
-        "min_free_heap": int.from_bytes(data[2:4], "big"),
-        "task_ran_mask": data[4],
-        "reset_cause":   data[5],
-        "uptime_s":      data[6],
-        "last_fault":    data[7],
+        "free_heap":        int.from_bytes(data[0:2], "big"),
+        "min_free_heap":    int.from_bytes(data[2:4], "big"),
+        "task_ran_mask":    b4 & TASK_ALL,
+        "stub_no_ams":      (b4 >> 5) & 1,
+        "stub_no_inverter": (b4 >> 6) & 1,
+        "stub_start":       (b4 >> 7) & 1,
+        "reset_cause":      b5 & 0x07,
+        "stub_brake":       (b5 >> 3) & 1,
+        "cal_status":       (b5 >> 4) & 0x03,
+        "stub_torque_cap":  (b5 >> 6) & 1,
+        "boot_refused":     (b5 >> 7) & 1,
+        "uptime_s":         data[6],
+        "last_fault":       data[7],
     }
 
 
