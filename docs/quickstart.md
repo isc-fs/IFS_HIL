@@ -19,7 +19,7 @@ None of this is quick if a prerequisite is missing, so check first:
 | **Raspberry Pi 4** (2 GB+), Pi OS Lite **64-bit** Bookworm+, SSH on | |
 | **BACKPLANE_HIL PCB**, populated | see the design review |
 | **ATX PSU with ≥ 3 A on +5 V standby** | less causes Pi undervoltage that breaks SPI |
-| **A carrier with the bootloader already burned** | via SWD, out of band — the bench cannot do this |
+| **A carrier with the bootloader already burned** and its node id provisioned (ECU `0x01`, AMS `0x02`) | via SWD, out of band — the bench cannot do this |
 | **`gh` authenticated** on your workstation | `can-flasher` is a private release |
 | **Passwordless sudo** on the Pi | the bootstrap installs packages, a kernel module and units |
 
@@ -41,12 +41,12 @@ bench it changes nothing and says so.
 
 | Phase | What happens | You do |
 |---|---|---|
-| **base** | interfaces, groups, packages, Python package, overlay + boot config, patched `mcp251x`, sudoers, systemd units | nothing — ~30 min, mostly waiting |
+| **base** | interfaces, groups, packages, Python package, overlay + boot config, patched `mcp251x`, sudoers, systemd units + the watchdog timer | nothing — ~30 min, mostly waiting |
 | **reboot** | stops and asks | `sudo reboot`, then re-run |
 | **host** | `bench doctor` — every assertion in the long guide | fix anything red before continuing |
-| **flasher** | installs `can-flasher` if `gh` is authenticated here, otherwise tells you to do it from a workstation | maybe §10 |
+| **flasher** | installs `can-flasher` (≥ 2.8.0, upgrading an older one) if `gh` is authenticated here, otherwise tells you to do it from a workstation | maybe §10 |
 | **descriptor** | drafts `configs/benches/bench-NN.yaml` from a live probe, then stops | **fill the FIXMEs** (below), re-run to validate + verify |
-| **runner** | registers a self-hosted runner with this bench's labels | supply `--runner-token`, or let it mint one via `gh` |
+| **runner** | registers a self-hosted runner with this bench's labels | supply `--runner-token`, or let it mint one via `gh`; then re-run once more — that pass adds the runner's `Restart=always` drop-in |
 
 ### The descriptor is the part only you can do
 
@@ -65,8 +65,13 @@ resolve job can route without contacting any bench.
 ### Then a dispatched run should land on it
 
 ```sh
-$ gh workflow run hil-test.yml -f bench=bench-NN -f suite=tests/hil/test_can.py
+$ gh workflow run hil-test.yml --ref dev -f bench=bench-NN -f suite=tests/hil/test_can.py
 ```
+
+`--ref` matters: the repo's default branch is `main`, which does not carry
+`hil-test.yml`. Use `dev` once your descriptor PR has merged, or your PR's
+branch before then. A green check is not proof that anything ran — see
+[troubleshooting](troubleshooting.md#firmware-pr-looks-green-but-no-hil-verdict-ever-arrives).
 
 ---
 
@@ -93,30 +98,38 @@ little else. That is a known gap, not an oversight on your part.
 
 There is no launch script, and you do not need one: **systemd brings the whole
 bench up at boot**, in dependency order — `hil-psu-on` → `hil-can-up` →
-`hil-broker` → `hil-dashboard`. Power the Pi on and the bench is live.
+`hil-broker` → `hil-dashboard`. Power the Pi on and the bench is live, and
+`hil-bench-watchdog.timer` then checks it every 5 minutes and recovers a wedge
+on its own.
 
 For manual control:
 
 ```sh
-pi$ sudo systemctl start hil-psu-on hil-can-up hil-broker hil-dashboard
-pi$ sudo systemctl stop  hil-dashboard hil-broker hil-can-up hil-psu-on   # reverse order
-pi$ systemctl is-active  hil-psu-on hil-can-up hil-broker hil-dashboard
-pi$ python3 -m tools.bench doctor      # everything above, plus the host build
+pi$ sudo systemctl start hil-psu-on hil-can-up hil-broker hil-dashboard hil-bench-watchdog.timer
+pi$ sudo systemctl stop  hil-bench-watchdog.timer hil-dashboard hil-broker hil-can-up hil-psu-on
+pi$ systemctl is-active  hil-psu-on hil-can-up hil-broker hil-dashboard hil-bench-watchdog.timer
+pi$ python3 -m tools.bench doctor      # the four services, plus the host build
 ```
+
+Include the timer when stopping: left running, the watchdog brings the bench
+back within five minutes — it pulls `hil-broker` up, and with it the PSU and CAN
+units.
 
 `hil-psu-on`'s `ExecStop` drops `PS_ON#`, so stopping it powers the ATX rails
 down. Stop it last, and expect every SPI peripheral to go dark when you do.
 
-> **Ignore `scripts/launch.sh`.** It belongs to the accu-charger project, not
-> this one — it installs Docker and would add a CAN overlay that conflicts with
-> `mcp2515-triple`. It now refuses to run on a bench, but do not go looking for
-> it as the way to start things.
+> **`scripts/launch.sh` is gone** (removed 2026-08-31). It belonged to the
+> accu-charger project — it installed Docker and added a CAN overlay that
+> conflicts with `mcp2515-triple`. An rsync'd bench copy can still carry it
+> (`sync_to_pi.sh` never deletes); do not run it.
 
 ## Two gotchas worth knowing on day one
 
-- **The DAC bank latches.** If all four DACs report device id `0x0000` instead
-  of `0x0417`, a broker restart will not fix it and neither will a reboot — only
-  `psu.power(False)` then `(True)`, a real `PWR_OK` transition. `doctor` and
-  `verify` both surface it.
+- **A DAC can wedge.** If a DAC80504 reports a device id other than `0x0417`
+  (`0x0000`, `0x3FFF`), a broker restart will not fix it and neither will a
+  reboot — it needs a real `PWR_OK` transition, with CAN and the broker rebuilt
+  behind it: `python3 -m tools.bench recover --bench <id> --level 2`. The
+  watchdog runs the same ladder by itself. `verify` surfaces it; `doctor` does
+  not.
 - **`pinctrl get 7 8` is wrong**; the accepted form is `pinctrl get 7,8`. Older
   copies of the guide had the space-separated version, which errors.

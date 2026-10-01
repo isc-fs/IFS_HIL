@@ -46,23 +46,31 @@ $ python3 -m pytest tests/broker/ -v
 HIL tests under `tests/hil/` need a reachable broker socket —
 they auto-skip if the broker isn't there. Running them off-bench
 is a no-op (everything skipped); real validation happens on the
-Pi.
+Pi. To exercise a bench self-test against the fake backend instead:
+
+```sh
+$ python3 -m broker.server --fake --socket /tmp/hil-broker.sock &
+$ HIL_BROKER_SOCKET=/tmp/hil-broker.sock python3 -m pytest tests/hil/test_i2c.py -v
+```
 
 ### Editing against a live bench
 
-If your workstation can SSH into a running bench, a typical inner
-loop is:
+`~/IFS_HIL` on the bench is updated with rsync from your
+workstation, not with git — never `git pull` there (only a brand-new
+bench's first install clones the repo). From the repo root on your
+workstation, pick the bench (addresses are in `CLAUDE.md`, *Bench
+hosts*) and sync with the script:
 
 ```sh
-# from the workstation:
-$ rsync -avz --delete broker/ tools/ dashboard/ tests/ \
-        isc@<pi-ip>:/home/isc/IFS_HIL/
-$ sshpass -p isc ssh isc@<pi-ip> "
-    sudo systemctl restart hil-broker &&
-    pytest /home/isc/IFS_HIL/tests/broker/ -q"
+$ export HIL_BENCH_HOST=isc@<bench-ip>
+$ scripts/sync_to_pi.sh              # rsync, no --delete
+$ ssh "$HIL_BENCH_HOST" 'flock /tmp/hil-bench.lock sudo systemctl restart hil-broker &&
+    cd ~/IFS_HIL && python3 -m pytest tests/broker/ -q'
 ```
 
-or just commit + push + `git pull` on the Pi.
+Use your own SSH key (`ssh-copy-id "$HIL_BENCH_HOST"`), not a shared
+password. The sync never deletes, so a file you rename or remove
+lingers on the bench until you clean it up there.
 
 ---
 
@@ -122,19 +130,27 @@ Conventional-Commits-ish prefixes, split by concern:
 
 ## Local pre-commit checks
 
-Nothing enforced yet. Recommended manual checks before pushing:
+No hooks. CI's `host-tests.yml` runs a whole-tree collection plus
+every suite outside `tests/hil/` — but only on PRs that touch
+`tests/`, `tools/`, `configs/`, `conftest.py` or `pyproject.toml`
+(and on pushes to `dev`); a change confined to `broker/` or
+`dashboard/` does not trigger it. `bench-inventory.yml` validates the
+bench descriptors when `configs/benches/` or `tools/bench.py` changes.
+Run the same checks by hand before pushing:
 
 ```sh
-$ python3 -m pytest tests/broker/              # unit tests
+$ python3 -m pytest tests/ --collect-only -q        # every test module still imports
+$ python3 -m pytest tests/ --ignore=tests/hil -q    # host suites, incl. tests/broker/
 $ python3 -c "from broker import server, bus, rpc, fake_bus; print('imports ok')"
 $ python3 -c "from tools import hil_client, hw_config; print('imports ok')"
-$ python3 -c "import json; json.load(open('dashboard/index.html' if False else 'pyproject.toml'))" 2>/dev/null || true
 ```
 
-For on-bench verification:
+For on-bench verification — the bench self-tests only; `tests/hil/vcu/`
+and `tests/hil/ams/` drive carriers and can reflash them (see
+[`testing.md`](testing.md)):
 
 ```sh
-pi$ pytest tests/hil/ -v
+pi$ pytest tests/hil/ --ignore=tests/hil/vcu --ignore=tests/hil/ams -v
 pi$ curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/api/status
 ```
 
@@ -144,21 +160,30 @@ pi$ curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/api/status
 
 ```
 broker/        daemon source
-dashboard/     Flask UI
-tools/         register-level chip drivers + hil_client proxies
+dashboard/     Flask UI (+ CAN trace)
+tools/         register-level chip drivers + hil_client proxies,
+               hw_config.py (pin/address source of truth), bench.py
+               (fleet CLI), flash_dut.py (what CI flashes with);
+               flash.py and mcp2515.py are legacy
 tests/broker/  unit tests (fake backend, off-bench safe)
-tests/hil/    HIL tests (need the bench)
+tests/*.py     host-only guards (descriptors, suites, flash_dut, …)
+tests/hil/     on-bench: top-level = bench self-tests;
+               vcu/ (the ECU) + ams/ = DUT suites
 infra/
-  devicetree/             custom DT overlay
+  devicetree/             SPI overlay (3× MCP2515 + kernel-owned CS)
   kernel-module/          out-of-tree mcp251x patches + build script
-  systemd/                unit files
+  systemd/                unit files + the runner restart drop-in
   sudoers.d/              narrow privilege drop-ins
   udev/                   stable device naming
 docs/          every documentation file
-configs/       per-ECU YAML
-docker/        firmware build toolchain
+configs/       benches/ (bench descriptors), firmware/ (CI build
+               recipes), suites.yaml (named suites); ecu_*.yaml legacy
+docker/        firmware build image of the dead /hil-build chain
 scripts/       bench_setup.sh (new bench, start here), sync_to_pi.sh,
                build_stm32_binaries.sh
+.github/workflows/  hil-test.yml + hil-fw-build.yml (firmware-PR
+               chain), host-tests.yml, bench-inventory.yml;
+               hil-build-*.yml / hil-flash.yml are the dead legacy chain
 ```
 
 For deeper detail see the README's repo layout section and the

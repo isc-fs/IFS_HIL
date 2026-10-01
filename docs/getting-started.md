@@ -8,6 +8,20 @@ ahead is an easy way to burn an afternoon debugging.
 Plan on **45 minutes** end-to-end if nothing goes sideways, plus one
 reboot.
 
+> **The automated path is [`scripts/bench_setup.sh`](../scripts/bench_setup.sh).**
+> It performs sections 1–10 and 14 of this guide for you — resumably,
+> stopping at the reboot and at the descriptor it needs you to fill in:
+>
+> ```sh
+> pi$ scripts/bench_setup.sh --bench bench-02 --dry-run   # report only
+> pi$ scripts/bench_setup.sh --bench bench-02             # do it; re-run after the reboot
+> ```
+>
+> This guide is the explain-every-step version. Read it once, so you can
+> debug the script when it stops. What neither covers (CI credentials,
+> stimulus hardware, network) is listed in
+> [`HANDOVER.md`](../HANDOVER.md) §4.
+
 ---
 
 ## 0. Prerequisites
@@ -46,19 +60,33 @@ Commands prefixed with `$` run on your workstation. Commands prefixed
 with `pi$` run on the Pi over SSH. Commands without a prefix can run
 anywhere that context is obvious from the surrounding prose.
 
-The default Pi user in this guide is `isc`. If yours differs, adjust
-the sudoers file and systemd units accordingly.
+The default Pi user in this guide is `isc`, with the repo at
+`~/IFS_HIL`. The systemd units and the sudoers drop-in hardcode both
+(`User=isc`, `WorkingDirectory=/home/isc/IFS_HIL`) and `bench_setup.sh`
+checks neither — use them, or edit those files before installing.
 
 ---
 
 ## 1. Pi OS configuration
 
-Enable hardware interfaces:
+Enable I²C:
 
 ```sh
-pi$ sudo raspi-config nonint do_spi 0
 pi$ sudo raspi-config nonint do_i2c 0
 ```
+
+You don't need to enable SPI through `raspi-config`: the
+`mcp2515-triple` overlay (section 4) provides SPI0 itself. The
+known-good bench-01 runs without `dtparam=spi=on` — `raspi-config
+nonint get_spi` reports "disabled" there while every spidev node works —
+so leave it out rather than add a second claimant for SPI0.
+
+> ⚠️ Unverified on a fresh image: `bench_setup.sh` enables SPI with
+> `do_spi` when it finds neither the overlay nor `dtparam=spi=on` — which
+> is always the case on a fresh Pi, because it installs the overlay later
+> (section 4). A from-scratch run may therefore end with *both* lines in
+> `config.txt`. bench-01 was built by hand and never took that path; if you
+> are doing the first scripted bringup, check `config.txt` afterwards.
 
 Add your user to the hardware groups. `spi`, `i2c`, and `gpio` are
 required for direct device access; `dialout` is needed if you ever
@@ -84,6 +112,7 @@ pi$ sudo apt-get install -y \
       libudev-dev \
       pkg-config \
       linux-headers-$(uname -r) \
+      gcc-arm-none-eabi cmake \
       git curl
 ```
 
@@ -92,16 +121,29 @@ pi$ sudo apt-get install -y \
 - `device-tree-compiler` — needed once to compile our `.dts` overlay.
 - `xz-utils` + `linux-headers-$(uname -r)` — needed to build the
   patched `mcp251x` kernel module.
+- `gcc-arm-none-eabi` + `cmake` — for CI's artifact fallback: when a
+  cloud build can't hand its artifact to the bench (a full GitHub
+  artifact quota is the known case), `hil-test.yml` rebuilds the same
+  reviewed commit on the bench instead.
 
 ---
 
 ## 3. Clone the repo
+
+The repository is public, so this needs no credentials on the Pi:
 
 ```sh
 pi$ git clone https://github.com/isc-fs/IFS_HIL.git
 pi$ cd IFS_HIL
 pi$ git checkout dev
 ```
+
+This is the only time you touch git on the bench. From here on,
+update `~/IFS_HIL` — the tree the services run from — from a developer
+machine with `scripts/sync_to_pi.sh` (see
+[`CLAUDE.md`](../CLAUDE.md#pi-sync-workflow-read-before-pushing-code-to-the-bench)),
+which also lets you test uncommitted work. Don't mix in `git pull`
+there, and never sync with `--delete`.
 
 Install Python dependencies in editable mode so the `tools.*` and
 `broker.*` packages resolve from your working copy:
@@ -125,8 +167,9 @@ system-wide `pip install`. If you prefer a venv, create one in
 
 The BACKPLANE_HIL wires three MCP2515 CAN controllers onto a shared
 SPI0 bus with chip-selects on GPIO27 (CAN1), GPIO17 (CAN2), GPIO18
-(CAN3), and interrupts on GPIO4/5/6. No stock Raspberry Pi overlay
-covers this; we ship a custom one.
+(CAN3), and interrupts on GPIO4/5/6. The same bus carries the four
+DACs, three ADCs and the nRF24, each on its own chip-select. No stock
+Raspberry Pi overlay covers this; we ship a custom one.
 
 Compile and install the overlay:
 
@@ -156,9 +199,13 @@ gpio=8=ip,pd
 
 Why each entry:
 
-- `dtoverlay=mcp2515-triple` — wires the three MCP2515s and exposes a
-  spare `/dev/spidev0.3` the Python register-level driver uses for the
-  non-CAN chips (DACs, ADCs, nRF24).
+- `dtoverlay=mcp2515-triple` — wires the three MCP2515s and declares
+  **all twelve SPI0 chip-selects as `cs-gpios`**, so the kernel asserts
+  every one of them inside its transfer: the CAN chips on
+  `spi0.0`–`0.2`, the DACs on `/dev/spidev0.4`–`0.7`, the ADCs on
+  `0.8`–`0.10` and the nRF24 on `0.11`, plus the legacy shared
+  `/dev/spidev0.3`. Userspace-driven chip-selects raced the CAN driver
+  and wedged the DACs (#124); this is the fix.
 - `gpio=7=op,dl` — asserts `PS_ON#` LOW at firmware stage so the ATX
   main rails are stable before the kernel probes the CAN chips.
 - `gpio=8=ip,pd` — forces `PWR_OK` back to pulled-down input so it
@@ -166,6 +213,11 @@ Why each entry:
 
 Keep `/boot/firmware/config.txt.pre-hil` as your rollback image in
 case the next reboot doesn't come up.
+
+> **Refreshing an existing bench:** `bench_setup.sh` only checks that
+> *a* `mcp2515-triple.dtbo` is installed, and `bench doctor` only looks
+> for `/dev/spidev0.3` — neither notices an old overlay. Recompile and
+> copy the `.dtbo` by hand, reboot, and check section 8's spidev list.
 
 ---
 
@@ -224,29 +276,41 @@ Only `ip link set canN …` is allowed; no other escalation is granted.
 
 ## 7. Install systemd units
 
-Four units manage the bench at boot, in this order:
+These units manage the bench at boot, in this order:
 
 1. `hil-psu-on.service` — asserts `PS_ON#` in userspace (complements
    the firmware `gpio=7` directive; compensates for the Pi 4's GPIO
    output-state persistence across reboots).
 2. `hil-can-up.service` — brings `can0`, `can1`, `can2` up at
-   500 kbps with `txqueuelen=1000` and `restart-ms=200`.
+   500 kbps, sample point 0.6875, with `txqueuelen=1000` and
+   `restart-ms=200` — and fails if the sample point didn't take.
 3. `hil-broker.service` — starts the broker daemon; depends on both.
 4. `hil-dashboard.service` — Flask UI on `:8080`; broker client.
+5. `hil-bench-watchdog.timer` → `hil-bench-watchdog.service` — every
+   5 min, verifies the bench and recovers it if it has wedged (see the
+   [operator guide](operator-guide.md#self-healing-and-recovery)).
+   **Enable the timer**: the service on its own never fires, which
+   looks exactly like a bench that never wedges.
 
-Install all four:
+Install them:
 
 ```sh
 pi$ cd ~/IFS_HIL/infra/systemd
 pi$ sudo cp hil-psu-on.service hil-can-up.service \
             hil-broker.service hil-dashboard.service \
+            hil-bench-watchdog.service hil-bench-watchdog.timer \
             /etc/systemd/system/
 pi$ sudo systemctl daemon-reload
 pi$ sudo systemctl enable hil-psu-on.service \
                           hil-can-up.service \
                           hil-broker.service \
-                          hil-dashboard.service
+                          hil-dashboard.service \
+                          hil-bench-watchdog.timer
 ```
+
+`hil-agent.service` also ships in that directory; leave it — it belongs
+to a retired design and is deliberately not installed (see
+[`infra/systemd/README.md`](../infra/systemd/README.md)).
 
 Do **not** `systemctl start` them yet — they need the patched kernel
 module and overlay active, which only happens after reboot.
@@ -274,9 +338,11 @@ pi$ # canN interfaces up at 500 kbps
 pi$ ip -br link | grep can
 # Expected: can0 UP, can1 UP, can2 UP
 
-pi$ # spidev0.3 exists for the non-CAN chips
-pi$ ls /dev/spidev0.3
-# Expected: /dev/spidev0.3
+pi$ # the spidev nodes for the non-CAN chips — all nine of them
+pi$ ls /dev/spidev0.{3..11}
+# Expected: /dev/spidev0.3 … /dev/spidev0.11. Only spidev0.3 means the
+# old overlay is installed (section 4) — the DACs and ADCs would fall
+# back to userspace chip-selects.
 
 pi$ # PSU_ON (GPIO7) driven LOW, PWR_OK (GPIO8) reads HIGH
 pi$ pinctrl get 7,8
@@ -294,6 +360,10 @@ pi$ # dashboard service up and listening on 8080
 pi$ systemctl status hil-dashboard --no-pager | head
 pi$ curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/api/status
 # Expected: dashboard "active (running)", HTTP 200
+
+pi$ # watchdog timer scheduled
+pi$ systemctl list-timers hil-bench-watchdog.timer --no-pager
+# Expected: one row, with a NEXT time a few minutes out
 ```
 
 Or check the whole build in one go — this runs every assertion in this
@@ -305,6 +375,9 @@ pi$ cd ~/IFS_HIL && python3 -m tools.bench doctor
 #   ...
 #   this bench matches the documented build
 ```
+
+(`doctor` looks for `/dev/spidev0.3` only — keep the `ls` above for the
+per-device nodes.)
 
 If any check fails, go to
 [`docs/troubleshooting.md`](troubleshooting.md) before proceeding.
@@ -366,7 +439,7 @@ pi$ tar -xzf can-flasher-*-aarch64-unknown-linux-gnu.tar.gz
 pi$ sudo install -m 0755 \
        can-flasher-*-aarch64-unknown-linux-gnu/can-flasher \
        /usr/local/bin/
-pi$ can-flasher --version     # bench-01 runs 2.5.5 as of 2026-08-30
+pi$ can-flasher --version     # must be >= 2.8.0 (bench-01 runs 2.14.0)
 pi$ can-flasher adapters      # expect: SocketCAN interfaces: can0 can1 can2
 ```
 
@@ -419,10 +492,11 @@ Node  Proto  FW Version        Git Hash  Product  WRP  Reset Cause
 0x01  0.1    no app installed  —         —        ✗    PIN
 ```
 
-If multiple carriers have power and each bootloader reports node
-`0x01` (factory default), you'll see collisions in the ISO-TP
-reassembler output. Power one carrier at a time for first runs, or
-provision distinct node IDs via `can-flasher config`.
+Node ids are provisioned into each carrier's bootloader: the scheme is
+ECU `0x01`, AMS `0x02`, uDV `0x03`, and a fresh bootloader starts at
+`0x01`. If two powered carriers answer on the same id you'll see
+collisions in the ISO-TP reassembler output. Power one carrier at a time
+for first runs, or provision distinct node IDs via `can-flasher config`.
 
 ---
 
@@ -459,6 +533,12 @@ Running `can-flasher discover -i socketcan -c can2` after the jump
 should return **no** bootloaders — the app has control and is not
 listening on the BL CAN IDs. That's success.
 
+For the real ECU and AMS images, use the wrapper once the bench has a
+descriptor (section 14): `python3 -m tools.flash_dut --dut ecu --bin
+<ECU08.bin>` powers only that carrier, gates on the bootloader's
+identity, and is what CI runs — see the
+[operator guide](operator-guide.md#flashing-an-ecu).
+
 ---
 
 ## 13. Verification checklist
@@ -467,10 +547,12 @@ At this point you have:
 
 - [x] Kernel `mcp251x` driver binding all three MCP2515s.
 - [x] `can0`/`can1`/`can2` up at 500 kbps, `txqueuelen=1000`.
+- [x] `/dev/spidev0.3`–`0.11` present — every chip-select kernel-owned.
 - [x] `hil-broker` running as a systemd service with the socket at
       `/run/hil-broker/broker.sock`.
 - [x] Dashboard serving at `http://<pi-ip>:8080/`.
-- [x] `can-flasher` installed and able to discover + flash an ECU.
+- [x] `hil-bench-watchdog.timer` scheduled.
+- [x] `can-flasher` ≥ 2.8.0 installed and able to discover + flash an ECU.
 
 You're done. Anything else — regression tests, multi-ECU flashing,
 CI wiring — is the operator guide's territory.
@@ -516,6 +598,26 @@ sudo ./svc.sh install "$(id -un)"   # svc.sh only exists after config.sh
 sudo ./svc.sh start
 ```
 
+Then give the runner service a restart policy. The unit `svc.sh`
+generates has none, so a runner that *exits* never comes back — and
+they do exit: on 2026-09-18 GitHub told bench-01's runner its
+registration had been deleted (it hadn't), the runner quit cleanly, and
+every dispatched run queued against it for a week.
+
+```sh
+U=$(systemctl list-unit-files 'actions.runner.*.service' --no-legend | awk '{print $1}')
+sudo mkdir -p /etc/systemd/system/$U.d
+sudo cp ~/IFS_HIL/infra/systemd/actions.runner.restart.conf /etc/systemd/system/$U.d/restart.conf
+sudo systemctl daemon-reload
+sudo systemctl enable "$U"                  # comes back after a power cut
+systemctl show -p Restart --value "$U"      # expect: always
+```
+
+`bench_setup.sh` does this in its runner phase — on the pass *after* the
+one that registers the runner, so re-run it once more. `bench doctor`
+checks both the enablement and the effective restart policy, and the
+watchdog logs `RUNNER DOWN` if the runner is ever not active.
+
 The labels **are** the routing table: a dispatch asks for capabilities, the
 resolve job turns those into labels, and GitHub picks a bench that carries
 them. If you rewire a bench, update its descriptor *and* re-run `config.sh`
@@ -530,6 +632,7 @@ with the new label set, or it will keep attracting runs it can no longer serve.
 
 ## Where to go next
 
+- **Taking the project over** — [`HANDOVER.md`](../HANDOVER.md).
 - **Operating the bench day-to-day** —
   [`docs/operator-guide.md`](operator-guide.md).
 - **Something broke** —

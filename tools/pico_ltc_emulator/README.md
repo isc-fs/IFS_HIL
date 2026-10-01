@@ -14,7 +14,6 @@ the architecture, protocol notes, and AMS-side context.
 ```
 firmware/        Pico SDK C project (UF2 output)
   src/           main + SPI-slave + LTC protocol handler + USB-CDC cmd
-  include/       tusb_config.h
   CMakeLists.txt
 host/            Pi-side helpers
   pico_ltc_client.py  serial command client (set cell mV, set tempC, etc.)
@@ -42,12 +41,12 @@ doesn't expose 3V3 anyway).
 
 | Option | Wiring | Trade-off |
 |---|---|---|
-| A. **Tie Pico GP17 LOW** | Pico SPI0 CSn → Pico GND | Slave is always selected. Works because the AMS firmware initialises SPI1 only for LTC (no nRF24 driver in the build), so all SPI1 traffic IS LTC traffic. Frame boundaries are inferred from idle gaps + PEC15 validity. |
+| A. ~~**Tie Pico GP17 LOW**~~ — **no longer works** | Pico SPI0 CSn → Pico GND | The first-cut firmware framed on idle gaps. The current PIO slave frames every transaction on CS edges and services USB only while CS is high (`firmware/src/main.c`), so with CS tied low it decodes one command and then never answers on USB. |
 | B. **Wire MLC2 PA4 → Pico GP17** | Tap `LTC6820_CS` (STM32 PA4, per firmware `Core/Inc/main.h:68`) → Pico CSn | Proper protocol semantics. PA4 isn't broken out on J8; would need a magnet-wire tap on the MLC2 carrier daughterboard's CS net, then route to Pico. |
 
-Default firmware assumes option A. Option B becomes mandatory if a
-future firmware build also enables nRF24 on SPI1 (then we need CS to
-disambiguate LTC frames from nRF24 frames).
+Use option B: the current firmware needs a real CS on GP17 (see
+[`docs/pico_ltc_emulator.md`](../../docs/pico_ltc_emulator.md)). How
+bench-01's CS is tapped is not recorded in this repo.
 
 ### Other slots
 

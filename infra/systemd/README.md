@@ -46,7 +46,7 @@ sudo systemctl enable --now hil-can-up.service
 
 ## `hil-broker.service`
 
-The broker daemon (see `docs/broker_migration_plan.md`). Starts after
+The broker daemon (see `docs/design/broker-migration.md`). Starts after
 `hil-psu-on.service` and `hil-can-up.service` so the PSU is stable and
 the canN interfaces are already up before the broker opens
 `/dev/spidev0.3` and binds SocketCAN sockets. Expects the

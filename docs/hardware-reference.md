@@ -18,15 +18,15 @@ All GPIO numbers are **BCM** numbering throughout.
 
 | Ref | Part | Qty | Role | Bus |
 |---|---|---:|---|---|
-| U9–U11 | MCP3208 | 3 | 8-channel 12-bit ADC | SPI0 (register-level) |
-| U12–U15 | DAC80504 | 4 | 4-channel 16-bit DAC | SPI0 (register-level) |
+| U9–U11 | MCP3208 | 3 | 8-channel 12-bit ADC | SPI0 (`spidev0.8`–`0.10`) |
+| U12–U15 | DAC80504 | 4 | 4-channel 16-bit DAC | SPI0 (`spidev0.4`–`0.7`) |
 | U17, U19, U21 | MCP2515 | 3 | CAN 2.0B controller | SPI0 (kernel `mcp251x`) |
 | U16, U18, U20 | SN65HVD230 | 3 | CAN transceiver | paired with each MCP2515 |
 | U1, U2, U4 (+ standby) | INA226 | 4 | Power monitor per MLC carrier | I²C1 |
 | U3, U6, U8 | TCA9555 | 3 | 16-bit GPIO expander | I²C1 |
 | U5 | TLV75533 | 1 | LDO: +5VSBY → +3V3SBY | — |
 | IC1 | SN74LVC125A | 1 | Quad tri-state buffer on MOSI/MISO/SCK | enabled by Q5 via `PWR_OK` |
-| U23 | nRF24L01+ | 1 | 2.4 GHz transceiver (not populated on current boards) | SPI0 (register-level) |
+| U23 | nRF24L01+ | 1 | 2.4 GHz transceiver (not populated on current boards) | SPI0 (`spidev0.11`) |
 | Q1–Q4 | DMN6075S | 4 | Relay driver NMOS for K1–K4 | TCA9555 port 0 bits 0–3 |
 | Q5 | DMN6075S | 1 | Enables IC1 `~OE` from `PWR_OK` | GPIO8 (PWR_OK) |
 | K1–K4 | RT314A12 | 4 | +12 V SPDT relay per MLC carrier | driven by Q1–Q4 |
@@ -36,19 +36,31 @@ All GPIO numbers are **BCM** numbering throughout.
 
 ## SPI0 bus
 
-Single hardware SPI0 master; three chip-select "identities":
+Single hardware SPI0 master. **The kernel owns all twelve
+chip-selects**: they are declared as `cs-gpios` in the
+[`mcp2515-triple`](../infra/devicetree/mcp2515-triple.dts) overlay, so
+the SPI core asserts each one *inside* its transfer, under the
+controller lock.
 
-- **Kernel `mcp251x` driver** owns `spi0.0`, `spi0.1`, `spi0.2` via the
-  `mcp2515-triple` device-tree overlay. Each SPI device maps to one
-  MCP2515, and each MCP2515 appears to userspace as a SocketCAN
-  netdev (`canN`). See the [CAN netdev ↔ PCB label
-  mapping](#can-netdev--pcb-label-mapping-crucial) section below.
-- **`/dev/spidev0.3`** is a userspace spidev node the broker uses for
-  the non-CAN SPI chips. It is configured with `no_cs=True` so the
-  hardware never drives any CS during transfers — the broker pulses
-  the real CS GPIOs manually, one at a time. This avoids any
-  interaction with the kernel's `cs-gpios` mechanism, which would
-  otherwise try to assert an extra CS around every transaction.
+- **Kernel `mcp251x` driver** owns `spi0.0`, `spi0.1`, `spi0.2`. Each
+  SPI device maps to one MCP2515, and each MCP2515 appears to
+  userspace as a SocketCAN netdev (`canN`). See the [CAN netdev ↔ PCB
+  label mapping](#can-netdev--pcb-label-mapping-crucial) section below.
+- **Per-device spidev nodes** — `/dev/spidev0.4`–`0.7` (DACs),
+  `0.8`–`0.10` (ADCs), `0.11` (nRF24) — are what the broker opens for
+  the non-CAN chips. Each node carries its own SPI mode, so nothing
+  switches modes between users.
+- **`/dev/spidev0.3`** is the legacy shared node, its nominal CS on
+  the unwired GPIO16. The broker falls back to it — with `no_cs=True`,
+  pulsing the real CS GPIOs by hand, and a logged warning — only when
+  the per-device nodes are missing, i.e. an old overlay is installed.
+
+Why the kernel has to own them: while the broker asserted a DAC's CS
+from userspace, the gap between "CS low" and the transfer starting was
+open to the kernel, which could clock out an MCP2515 message while the
+DAC was selected. The DAC shifted in the stray edges and latched a bad
+state — the DAC wedges of #124 (one read back `0x082E`, which is
+`0x0417 << 1`). With kernel-owned chip-selects that gap is gone.
 
 ### SPI physical pins
 
@@ -63,22 +75,27 @@ the on-board ICs. IC1's `~OE` is pulled low by Q5 only when ATX
 `PWR_OK` is high — that is, the SPI bus to the peripherals is
 **gated by the PSU being alive**.
 
-### SPI chip-selects (all active-low, software-driven)
+### SPI chip-selects (all active-low, kernel-driven)
 
-| BCM GPIO | Header pin | CS for | Managed by |
-|---:|---:|---|---|
-| 27 | 13 | MCP2515 U17 (PCB **CAN1**) | kernel `mcp251x` (via `cs-gpios`) |
-| 17 | 11 | MCP2515 U19 (PCB **CAN2**) | kernel `mcp251x` (via `cs-gpios`) |
-| 18 | 12 | MCP2515 U21 (PCB **CAN3**) | kernel `mcp251x` (via `cs-gpios`) |
-| 16 | 36 | **unused** (dummy CS for `spidev0.3`) | – |
-| 19 | 35 | MCP3208 U9  (ADC1) | broker, `RPi.GPIO.output()` |
-| 20 | 38 | MCP3208 U10 (ADC2) | broker |
-| 21 | 40 | MCP3208 U11 (ADC3) | broker |
-| 22 | 15 | DAC80504 U12 (DAC1) | broker |
-| 23 | 16 | DAC80504 U13 (DAC2) | broker |
-| 24 | 18 | DAC80504 U14 (DAC3) | broker |
-| 25 | 22 | DAC80504 U15 (DAC4) | broker |
-| 26 | 37 | nRF24L01+ (U23, unpopulated) | broker |
+In the overlay's `cs-gpios` order, which is also the spidev index:
+
+| BCM GPIO | Header pin | CS for | Kernel device | SPI mode |
+|---:|---:|---|---|---:|
+| 27 | 13 | MCP2515 U17 (PCB **CAN1**) | `spi0.0` → `mcp251x` (`can2`) | 3 |
+| 17 | 11 | MCP2515 U19 (PCB **CAN2**) | `spi0.1` → `mcp251x` (`can1`) | 3 |
+| 18 | 12 | MCP2515 U21 (PCB **CAN3**) | `spi0.2` → `mcp251x` (`can0`) | 3 |
+| 16 | 36 | **unused** (nominal CS of the legacy node) | `spidev0.3` | 0 |
+| 22 | 15 | DAC80504 U12 (DAC1) | `spidev0.4` | 1 |
+| 23 | 16 | DAC80504 U13 (DAC2) | `spidev0.5` | 1 |
+| 24 | 18 | DAC80504 U14 (DAC3) | `spidev0.6` | 1 |
+| 25 | 22 | DAC80504 U15 (DAC4) | `spidev0.7` | 1 |
+| 19 | 35 | MCP3208 U9  (ADC1) | `spidev0.8` | 0 |
+| 20 | 38 | MCP3208 U10 (ADC2) | `spidev0.9` | 0 |
+| 21 | 40 | MCP3208 U11 (ADC3) | `spidev0.10` | 0 |
+| 26 | 37 | nRF24L01+ (U23, unpopulated) | `spidev0.11` | 0 |
+
+The nRF24's CE (GPIO13) and IRQ (GPIO12) stay plain GPIOs — CE gates
+the radio, not the bus.
 
 ---
 
@@ -321,7 +338,9 @@ Important consequences:
 
 - **Pin assignments, I²C addresses, constants** →
   [`tools/hw_config.py`](../tools/hw_config.py)
-- **Device-tree overlay** (SPI bus layout for the kernel) →
+- **Device-tree overlay** (SPI bus layout for the kernel, including the
+  chip-select → spidev mapping; its `cs-gpios` must agree with the
+  `CS_*` GPIOs in `hw_config.py`) →
   [`infra/devicetree/mcp2515-triple.dts`](../infra/devicetree/mcp2515-triple.dts)
 - **Kernel module (patched)** →
   [`infra/kernel-module/mcp251x-patched/`](../infra/kernel-module/mcp251x-patched/)
