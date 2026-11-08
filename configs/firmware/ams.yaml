@@ -5,11 +5,13 @@
 # to a real carrier. A PR must not be able to change how its own firmware is
 # built and then have that firmware flashed to shared hardware.
 #
-# Mirrors the repo's own `Firmware cross-compile` job in build-tests.yml, so a
-# HIL build and a CI build are the same build.
+# Supports both Season 8 (IFS08-CE-AMS) and Season 9 (IFS09-CE-AMS).
 
 dut: ams
 repo: isc-fs/IFS08-CE-AMS
+allowed_repos:
+  - isc-fs/IFS08-CE-AMS
+  - isc-fs/IFS09-CE-AMS
 submodules: false
 toolchain_release: '14.2.Rel1'          # carlosperate/arm-none-eabi-gcc-action
 
