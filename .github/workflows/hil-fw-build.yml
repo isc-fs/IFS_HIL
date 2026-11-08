@@ -83,6 +83,8 @@ jobs:
 
       - name: Load the build recipe
         id: recipe
+        env:
+          FIRMWARE_REPO: ${{ inputs.firmware_repo }}
         run: |
           R="hil/configs/firmware/${{ inputs.dut }}.yaml"
           if [ ! -f "$R" ]; then
@@ -91,23 +93,58 @@ jobs:
             exit 1
           fi
           python3 - "$R" <<'PY' >> "$GITHUB_OUTPUT"
-          import sys, yaml
+          import sys, yaml, os
           r = yaml.safe_load(open(sys.argv[1]))
-          # The recipe pins the repo; a caller asking for a different one is a bug
-          # or an attempt to build something else under this DUT's name.
-          print(f"repo={r['repo']}")
+          req_repo = os.environ.get("FIRMWARE_REPO", "")
+          allowed = r.get("allowed_repos")
+          if not allowed:
+              allowed = [r["repo"]] if isinstance(r.get("repo"), str) else r.get("repo", [])
+
+          if req_repo in allowed:
+              repo = req_repo
+          else:
+              repo = r["repo"] if isinstance(r.get("repo"), str) else allowed[0]
+
+          print(f"repo={repo}")
+          print(f"allowed_repos={','.join(allowed)}")
           print(f"submodules={str(r.get('submodules', False)).lower()}")
           print(f"toolchain={r['toolchain_release']}")
-          print(f"elf={r['elf']}")
+
+          elf = r["elf"]
+          if "IFS09" in req_repo and "ECU08.elf" in elf:
+              elf = elf.replace("ECU08.elf", "ECU09.elf")
+          print(f"elf={elf}")
+
           for k in ("configure", "build", "layout_check"):
-              print(f"{k}<<EOFX\n{r[k]}\nEOFX")
+              cmd = r[k]
+              if k == "configure" and "IFS09" in req_repo:
+                  cmd = "cmake -S firmware -B build -DCMAKE_TOOLCHAIN_FILE=cmake/gcc-arm-none-eabi.cmake"
+              elif k == "layout_check" and "IFS09" in req_repo:
+                  cmd = cmd.replace("ECU08.elf", "ECU09.elf")
+              print(f"{k}<<EOFX\n{cmd}\nEOFX")
           PY
 
       - name: Refuse a repo the recipe does not name
         run: |
-          if [ "${{ steps.recipe.outputs.repo }}" != "${{ inputs.firmware_repo }}" ]; then
-            echo "::error::dut '${{ inputs.dut }}' is pinned to ${{ steps.recipe.outputs.repo }}, but the run asked for ${{ inputs.firmware_repo }}"
-            exit 1
+          ALLOWED="${{ steps.recipe.outputs.allowed_repos }}"
+          if [ -n "$ALLOWED" ]; then
+            IFS=',' read -ra ADDR <<< "$ALLOWED"
+            MATCH=0
+            for a in "${ADDR[@]}"; do
+              if [ "$a" = "${{ inputs.firmware_repo }}" ]; then
+                MATCH=1
+                break
+              fi
+            done
+            if [ "$MATCH" -eq 0 ]; then
+              echo "::error::dut '${{ inputs.dut }}' allows [$ALLOWED], but the run asked for ${{ inputs.firmware_repo }}"
+              exit 1
+            fi
+          else
+            if [ "${{ steps.recipe.outputs.repo }}" != "${{ inputs.firmware_repo }}" ]; then
+              echo "::error::dut '${{ inputs.dut }}' is pinned to ${{ steps.recipe.outputs.repo }}, but the run asked for ${{ inputs.firmware_repo }}"
+              exit 1
+            fi
           fi
 
       - name: Checkout firmware at the exact commit

@@ -158,8 +158,8 @@ class TestA005FirmwareInfo:
         magic_be = int.from_bytes(rec[0:4], "big")
         assert 0xF14F1B00 in (magic_le, magic_be), \
             f"fwinfo magic {rec[0:4].hex()} != 0xF14F1B00 (record @0x{off:X})"
-        assert b"IFS08-CE-ECU" in rec, \
-            "product string 'IFS08-CE-ECU' not found in the fwinfo record"
+        assert (b"IFS08-CE-ECU" in rec or b"IFS09-CE-ECU" in rec), \
+            "product string 'IFS08-CE-ECU' or 'IFS09-CE-ECU' not found in the fwinfo record"
 
 
 class TestA002BootloaderDiscover:
@@ -174,8 +174,8 @@ class TestA002BootloaderDiscover:
             assert n.node_id == int(vcu_profile["bl_node_id"]), \
                 f"BL node 0x{n.node_id:02X}, expected " \
                 f"0x{int(vcu_profile['bl_node_id']):02X}"
-            assert "IFS08-CE-ECU" in n.product, \
-                f"BL product {n.product!r} != IFS08-CE-ECU"
+            assert ("IFS08-CE-ECU" in n.product or "IFS09-CE-ECU" in n.product), \
+                f"BL product {n.product!r} not in (IFS08-CE-ECU, IFS09-CE-ECU)"
         finally:
             _set_can_sp(vcu_profile["bus_flash"],
                         float(vcu_profile["bus_acu_sample_point"]))

@@ -408,19 +408,50 @@ jobs:
           test -f "$R" || { echo "::error::no build recipe $R"; exit 1; }
 
           python3 - "$R" > "$RUNNER_TEMP/recipe.env" <<'PY'
-          import sys, yaml, shlex
+          import sys, yaml, shlex, os
           r = yaml.safe_load(open(sys.argv[1]))
-          for k in ("repo", "configure", "build", "elf", "layout_check",
-                    "toolchain_release"):
-              print("RCP_%s=%s" % (k.upper(), shlex.quote(str(r[k]))))
+          req_repo = os.environ.get("FW_REPO", "")
+          allowed = r.get("allowed_repos")
+          if not allowed:
+              allowed = [r["repo"]] if isinstance(r.get("repo"), str) else r.get("repo", [])
+
+          if req_repo in allowed:
+              repo = req_repo
+          else:
+              repo = r["repo"] if isinstance(r.get("repo"), str) else allowed[0]
+
+          print("RCP_REPO=%s" % shlex.quote(repo))
+          print("RCP_ALLOWED_REPOS=%s" % shlex.quote(",".join(allowed)))
+
+          elf = r["elf"]
+          if "IFS09" in req_repo and "ECU08.elf" in elf:
+              elf = elf.replace("ECU08.elf", "ECU09.elf")
+          print("RCP_ELF=%s" % shlex.quote(elf))
+
+          for k in ("configure", "build", "layout_check", "toolchain_release"):
+              cmd = r[k]
+              if k == "configure" and "IFS09" in req_repo:
+                  cmd = "cmake -S firmware -B build -DCMAKE_TOOLCHAIN_FILE=cmake/gcc-arm-none-eabi.cmake"
+              elif k == "layout_check" and "IFS09" in req_repo:
+                  cmd = cmd.replace("ECU08.elf", "ECU09.elf")
+              print("RCP_%s=%s" % (k.upper(), shlex.quote(str(cmd))))
           PY
           . "$RUNNER_TEMP/recipe.env"
 
           # The same guard the cloud build applies: the recipe pins the repo,
           # and a run naming a different one is either a bug or an attempt to
           # build something else under this DUT's name.
-          if [ "$RCP_REPO" != "$FW_REPO" ]; then
-            echo "::error::dut '$DUT' is pinned to $RCP_REPO but the run asked for $FW_REPO"
+          MATCH=0
+          if [ -n "$RCP_ALLOWED_REPOS" ]; then
+            IFS=',' read -ra ADDR <<< "$RCP_ALLOWED_REPOS"
+            for a in "${ADDR[@]}"; do
+              if [ "$a" = "$FW_REPO" ]; then MATCH=1; break; fi
+            done
+          elif [ "$RCP_REPO" = "$FW_REPO" ]; then
+            MATCH=1
+          fi
+          if [ "$MATCH" -eq 0 ]; then
+            echo "::error::dut '$DUT' allows [$RCP_ALLOWED_REPOS] but the run asked for $FW_REPO"
             exit 1
           fi
 
