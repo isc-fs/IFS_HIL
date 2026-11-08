@@ -441,18 +441,18 @@ jobs:
           # The same guard the cloud build applies: the recipe pins the repo,
           # and a run naming a different one is either a bug or an attempt to
           # build something else under this DUT's name.
-          MATCH=0
-          if [ -n "$RCP_ALLOWED_REPOS" ]; then
-            IFS=',' read -ra ADDR <<< "$RCP_ALLOWED_REPOS"
-            for a in "${ADDR[@]}"; do
-              if [ "$a" = "$FW_REPO" ]; then MATCH=1; break; fi
-            done
-          elif [ "$RCP_REPO" = "$FW_REPO" ]; then
-            MATCH=1
-          fi
-          if [ "$MATCH" -eq 0 ]; then
-            echo "::error::dut '$DUT' allows [$RCP_ALLOWED_REPOS] but the run asked for $FW_REPO"
-            exit 1
+          if [ "$RCP_REPO" != "$FW_REPO" ]; then
+            MATCH=0
+            if [ -n "$RCP_ALLOWED_REPOS" ]; then
+              IFS=',' read -ra ADDR <<< "$RCP_ALLOWED_REPOS"
+              for a in "${ADDR[@]}"; do
+                if [ "$a" = "$FW_REPO" ]; then MATCH=1; break; fi
+              done
+            fi
+            if [ "$MATCH" -eq 0 ]; then
+              echo "::error::dut '$DUT' is pinned to $RCP_REPO but the run asked for $FW_REPO"
+              exit 1
+            fi
           fi
 
           # A bench provisioned before this fallback existed will not have the
