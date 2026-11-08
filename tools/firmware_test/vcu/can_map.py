@@ -44,6 +44,17 @@ ID_DV_R2D_CONFIRM = 0x511   # VCU->uDV: DV R2D confirm (1B, byte0!=0 while the D
 ID_UDV_TORQUE     = 0x507   # uDV->VCU: torque cmd (s32 LE integer %, stale >100ms)
 ID_UDV_R2D_REQ    = 0x510   # uDV->VCU: R2D request (1B bool, stale >200ms)
 
+# -- Electronic Differential & Torque Vectoring -----------------------
+ID_LWS_STANDARD           = 0x2B0   # Bosch Motorsport LWS (can2/ACU, F02U.V02.894-01): Angle LE s16, Speed u8, Status
+ID_LWS_CONFIG             = 0x7C0   # Bosch LWS Config / Calibration
+ID_XSENS_IMU              = 0x201   # Xsens MTi IMU (can2/ACU): Yaw rate BE s16, Lat accel BE s16
+ID_DTI_SET_CURRENT_LEFT   = 0x021   # DTI Packet 0x01 Node 1: Set AC Current (BE s16 0.1 Apk)
+ID_DTI_SET_CURRENT_RIGHT  = 0x022   # DTI Packet 0x01 Node 2: Set AC Current (BE s16 0.1 Apk)
+ID_DTI_DRIVE_ENABLE_LEFT  = 0x181   # DTI Packet 0x0C Node 1: Drive Enable (byte0 bool)
+ID_DTI_DRIVE_ENABLE_RIGHT = 0x182   # DTI Packet 0x0C Node 2: Drive Enable (byte0 bool)
+ID_DTI_ERPM_LEFT          = 0x401   # DTI Packet 0x20 Node 1: Telemetry ERPM (BE s32), Duty, Vdc
+ID_DTI_ERPM_RIGHT         = 0x402   # DTI Packet 0x20 Node 2: Telemetry ERPM (BE s32), Duty, Vdc
+
 # -- Inverter (NX0001-STS04, node EMC, on INV/can0) -------------------
 ID_INV_CMD    = 0x360   # EMC_RX_SETPOINT_1 (VCU→inv): App_State_Req, Flt_Clear
 ID_INV_TORQUE = 0x362   # EMC_RX_SETPOINT_3 (VCU→inv): Torque_Nm_Req
@@ -366,3 +377,105 @@ def dv_torque_nm(pct: int) -> int:
     if pct < DV_TORQUE_DEADBAND_PCT:
         return 0
     return -(pct * 240 // 90 - 2400 // 90)
+
+
+# -- Electronic Differential Codecs -----------------------------------
+def encode_lws_standard(angle_deg: float, speed_deg_s: float = 0.0,
+                        ok: bool = True, cal: bool = True, trim: bool = True) -> bytes:
+    """Bosch Motorsport LWS_Standard (0x2B0, 5 B, Intel / Little-Endian):
+    Bytes 0-1: Angle signed int16 LE, 0.1 deg/LSB (+/-780 deg, 0x7FFF = uncalibrated)
+    Byte 2:    Speed uint8, 4.0 deg/s/LSB (0 to 1,016 deg/s)
+    Byte 3:    bits 0: OK, 1: CAL, 2: TRIM (0x07 = calibrated & valid)
+    Byte 4:    Reserved (0x00)
+    """
+    raw_angle = 0x7FFF if not cal else int(round(angle_deg / 0.1)) & 0xFFFF
+    raw_speed = 0xFF if (not ok or not trim) else min(254, max(0, int(round(speed_deg_s / 4.0))))
+    status = (1 if ok else 0) | ((1 if cal else 0) << 1) | ((1 if trim else 0) << 2)
+    return bytes([
+        raw_angle & 0xFF,
+        (raw_angle >> 8) & 0xFF,
+        raw_speed & 0xFF,
+        status & 0xFF,
+        0x00,
+    ])
+
+
+def decode_lws_standard(data: bytes) -> dict:
+    raw_angle = int.from_bytes(data[0:2], "little", signed=True)
+    raw_speed = data[2] if len(data) > 2 else 0
+    status = data[3] if len(data) > 3 else 0
+    ok = bool(status & 0x01)
+    cal = bool(status & 0x02)
+    trim = bool(status & 0x04)
+    valid = ok and cal and trim and (raw_angle != 0x7FFF)
+    return {
+        "angle_deg": raw_angle * 0.1 if valid else None,
+        "speed_deg_s": raw_speed * 4.0,
+        "ok": ok,
+        "cal": cal,
+        "trim": trim,
+        "valid": valid,
+    }
+
+
+def encode_xsens_imu(yaw_rate_rads: float = 0.0, lateral_accel_mps2: float = 0.0,
+                     longitudinal_accel_mps2: float = 0.0) -> bytes:
+    """Xsens MTi IMU (0x201, 8 B, Big-Endian):
+    Bytes 0-1: Yaw Rate signed int16 BE, 0.001 rad/s/LSB
+    Bytes 2-3: Lateral Acceleration a_y signed int16 BE, 0.01 m/s^2/LSB
+    Bytes 4-5: Longitudinal Acceleration a_x signed int16 BE, 0.01 m/s^2/LSB
+    Bytes 6-7: Reserved (0x00)
+    """
+    raw_yaw = int(round(yaw_rate_rads / 0.001)) & 0xFFFF
+    raw_ay  = int(round(lateral_accel_mps2 / 0.01)) & 0xFFFF
+    raw_ax  = int(round(longitudinal_accel_mps2 / 0.01)) & 0xFFFF
+    return bytes([
+        (raw_yaw >> 8) & 0xFF, raw_yaw & 0xFF,
+        (raw_ay >> 8) & 0xFF,  raw_ay & 0xFF,
+        (raw_ax >> 8) & 0xFF,  raw_ax & 0xFF,
+        0x00, 0x00,
+    ])
+
+
+def decode_xsens_imu(data: bytes) -> dict:
+    raw_yaw = int.from_bytes(data[0:2], "big", signed=True)
+    raw_ay  = int.from_bytes(data[2:4], "big", signed=True)
+    raw_ax  = int.from_bytes(data[4:6], "big", signed=True) if len(data) >= 6 else 0
+    return {
+        "yaw_rate_rads": raw_yaw * 0.001,
+        "lateral_accel_mps2": raw_ay * 0.01,
+        "longitudinal_accel_mps2": raw_ax * 0.01,
+    }
+
+
+def decode_dti_set_current(data: bytes) -> dict:
+    """DTI Inverter Packet 0x01 Set Current: signed int16 BE @ bytes 0-1, scaled by 10 (0.1 Apk/LSB)."""
+    raw = int.from_bytes(data[0:2], "big", signed=True)
+    current_apk = raw * 0.1
+    # Dual DTI F-MOT Kt = 0.696 Nm/A peak
+    torque_nm = current_apk * 0.696
+    return {
+        "current_apk": current_apk,
+        "torque_nm":   torque_nm,
+    }
+
+
+def decode_dti_drive_enable(data: bytes) -> dict:
+    """DTI Inverter Packet 0x0C Drive Enable: byte 0 (0 or 1)."""
+    return {"drive_enabled": bool(data[0])}
+
+
+def encode_dti_erpm(erpm: int, duty_pct: float = 0.0, input_voltage_v: float = 500.0) -> bytes:
+    """DTI Inverter Packet 0x20 Telemetry:
+    Bytes 0-3: ERPM signed int32 BE
+    Bytes 4-5: Duty cycle signed int16 BE * 10
+    Bytes 6-7: Input voltage signed int16 BE (Volts)
+    """
+    raw_erpm = int(erpm) & 0xFFFFFFFF
+    raw_duty = int(round(duty_pct * 10.0)) & 0xFFFF
+    raw_vdc  = int(round(input_voltage_v)) & 0xFFFF
+    return bytes([
+        (raw_erpm >> 24) & 0xFF, (raw_erpm >> 16) & 0xFF, (raw_erpm >> 8) & 0xFF, raw_erpm & 0xFF,
+        (raw_duty >> 8) & 0xFF,  raw_duty & 0xFF,
+        (raw_vdc >> 8) & 0xFF,   raw_vdc & 0xFF,
+    ])

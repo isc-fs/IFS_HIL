@@ -123,3 +123,16 @@ precharge_timeout_ms:     10000      # PRECHARGE 10 s -> retry (ecu-rework)
 
 # -- Soak (Block H) --------------------------------------------------
 soak_active_minutes:      30
+
+# -- Electronic Differential / Torque Vectoring ----------------------
+diff_lws_id:              0x2B0      # Bosch Motorsport LWS Standard CAN ID (F02U.V02.894-01)
+diff_imu_id:              0x201      # Xsens MTi IMU CAN ID
+diff_dti_left_id:         1          # Left rear DTI inverter Node ID (Packet << 5 | Node)
+diff_dti_right_id:        2          # Right rear DTI inverter Node ID
+diff_kt_nm_per_a:         0.696      # Dual DTI F-MOT torque constant (Nm/Apk)
+diff_motor_max_torque_nm: 31.6       # Peak torque per motor (Nm)
+diff_gear_ratio:          13.0       # Gear reduction ratio
+diff_wheel_radius_m:      0.203      # Tire radius (m)
+diff_track_width_m:       1.200      # Rear track width (m)
+diff_wheelbase_m:         1.530      # Wheelbase (m)
+diff_steer_ratio:         4.50       # Steering rack ratio (steering deg / wheel deg)

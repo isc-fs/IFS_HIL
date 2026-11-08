@@ -50,6 +50,8 @@ ecu:
   telemetry:
     - tests/hil/vcu/test_block_j_telemetry.py
     - tests/hil/vcu/test_block_h_pitdiag.py
+  diff:
+    - tests/hil/vcu/test_block_d_diff.py
 
 ams:
   # A-005/A-006/A-014 used to fail here on IFS_HIL#116 (3 of 95 cells read the

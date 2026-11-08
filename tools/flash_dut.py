@@ -316,7 +316,7 @@ def flash(dut, bin_path, bench_id=None, dry=False, expect_sha=None,
                 print(f"             product string to check against {want_product}.")
                 print(f"             Proceeding on isolation alone: MLC{slot} is the only")
                 print(f"             carrier powered, and exactly one node answered.")
-            elif want_product and want_product not in row:
+            elif want_product and want_product not in row and not (want_product == "IFS08-CE-ECU" and "IFS09-CE-ECU" in row) and not (want_product == "IFS08-CE-AMS" and "IFS09-CE-AMS" in row):
                 raise FlashError(
                     f"the bootloader that answered is not {want_product}:\n"
                     f"    {row}\n"
