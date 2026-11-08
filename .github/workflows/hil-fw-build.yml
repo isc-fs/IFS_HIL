@@ -117,9 +117,9 @@ jobs:
 
           for k in ("configure", "build", "layout_check"):
               cmd = r[k]
-              if k == "configure" and "IFS09" in req_repo:
-                  cmd = "cmake -S firmware -B build -DCMAKE_TOOLCHAIN_FILE=cmake/gcc-arm-none-eabi.cmake"
-              elif k == "layout_check" and "IFS09" in req_repo:
+              if k == "configure" and "IFS09" in req_repo and r.get("dut") == "ecu":
+                  cmd = 'cmake -S firmware -B build -DCMAKE_TOOLCHAIN_FILE="$PWD/cmake/gcc-arm-none-eabi.cmake"'
+              elif k == "layout_check" and "IFS09" in req_repo and r.get("dut") == "ecu":
                   cmd = cmd.replace("ECU08.elf", "ECU09.elf")
               print(f"{k}<<EOFX\n{cmd}\nEOFX")
           PY
