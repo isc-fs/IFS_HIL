@@ -12,6 +12,7 @@ accelerations using bench DACs and simulated CAN telemetry:
   D-007 EV.2.3 brake plausibility cut: brake via DAC zeroes dual inverter currents
   D-008 Steering sensor dropout: LWS timeout (>100 ms) falls back to passive 50/50
   D-009 Bosch LWS failure mode: uncalibrated/fault state (OK=0/0x7FFF) falls back to 50/50
+  D-010 IMU sensor dropout: IMU timeout (>50 ms) falls back to MingoMode feedforward
 
 Hardware interfacing:
   - DUT: IFS09-CE-ECU seated in MLC4 carrier slot.
@@ -490,4 +491,39 @@ class TestD009BoschLwsFailureModeFailsafe:
         assert cur_l_flt is not None and cur_r_flt is not None
         assert abs(cur_l_flt - cur_r_flt) < 1.0, (
             f"Sensor failure mode failed to fall back to 50/50: L={cur_l_flt} A, R={cur_r_flt} A"
+        )
+
+
+class TestD010ImuTimeoutFallback:
+    def test_d010_imu_timeout_fallback(self, fresh_boot, inv_heartbeat, acu_inject,
+                                        diff_stim, pedals, start_button, pit_diag,
+                                        observe_inv, vcu_profile):
+        """D-010: If the IMU stream goes quiet (>50 ms timeout) mid-corner, the differential must
+        seamlessly fall back to MingoMode (kinematic feedforward) preserving steer assist without torque drop."""
+        if _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag,
+                      vcu_profile) != S.ACTIVE:
+            pytest.skip("FSM never reached Active -- check DAC/gates")
+
+        diff_stim["set_speed_mps"](15.0)
+        diff_stim["set_steering"](30.0, ok=True, cal=True, trim=True)
+        diff_stim["set_imu"](yaw=0.20, ay=3.0)
+        _apps(pedals, vcu_profile, 50, 50)
+        time.sleep(0.3)
+
+        cur_l, cur_r = _read_dti_currents(observe_inv)
+        assert cur_r > cur_l and cur_r > 10.0
+
+        # Silence IMU stream
+        diff_stim["stop_imu"]()
+        time.sleep(0.20)  # > 50 ms imu_timeout_ms
+
+        cur_l_fb, cur_r_fb = _read_dti_currents(observe_inv)
+        assert cur_l_fb is not None and cur_r_fb is not None
+        # MingoMode still biases outside wheel on steering input
+        assert cur_r_fb > cur_l_fb, (
+            f"Fallback to MingoMode lost outside bias: L={cur_l_fb} A, R={cur_r_fb} A"
+        )
+        # Drive must NOT cut to 0
+        assert cur_r_fb > 5.0 and cur_l_fb > 5.0, (
+            f"IMU fallback erroneously cut drive torque: L={cur_l_fb} A, R={cur_r_fb} A"
         )
