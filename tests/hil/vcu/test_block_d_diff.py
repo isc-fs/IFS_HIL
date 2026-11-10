@@ -9,7 +9,7 @@ accelerations using bench DACs and simulated CAN telemetry:
   D-004 Right cornering torque vectoring: outside (left) wheel biased (+delta_T)
   D-005 Throttle pedal sweep via DACs: monotonic current scaling with cornering bias
   D-006 Pedal lift-off: zero throttle via DACs clears torque immediately
-  D-007 EV.2.3 brake plausibility cut: brake via DAC zeroes dual inverter currents
+  D-007 Simultaneous brake + throttle: EV.2.3 retired, trail-braking permitted without current cut
   D-008 Steering sensor dropout: LWS timeout (>100 ms) falls back to passive 50/50
   D-009 Bosch LWS failure mode: uncalibrated/fault state (OK=0/0x7FFF) falls back to 50/50
   D-010 IMU sensor dropout: IMU timeout (>50 ms) falls back to MingoMode feedforward
@@ -415,8 +415,8 @@ class TestD007BrakeImplausibilityCut:
     def test_d007_ev_2_3_brake_implausibility_cut(self, fresh_boot, inv_heartbeat, acu_inject,
                                                   diff_stim, pedals, start_button, pit_diag,
                                                   observe_inv, vcu_profile):
-        """D-007: Pressing brake (> BrakePressedRaw) during active cornering throttle immediately cuts
-        both inverter currents to 0 per FS EV.2.3 rules."""
+        """D-007: EV 2.3 brake limitation removed: Pressing brake during active cornering throttle
+        permits trail-braking and does NOT cut inverter currents."""
         if _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag,
                       vcu_profile) != S.ACTIVE:
             pytest.skip("FSM never reached Active -- check DAC/gates")
@@ -429,13 +429,13 @@ class TestD007BrakeImplausibilityCut:
         cur_l, cur_r = _read_dti_currents(observe_inv)
         assert cur_r > cur_l and cur_r > 10.0
 
-        # Press brake hard via DAC0 channel 0
+        # Press brake hard via DAC0 channel 0 (simultaneous brake + throttle / trail-braking)
         pedals["set_brake"](int(vcu_profile["brake_apps_raw"]) + 400)
         time.sleep(0.2)
 
-        cur_l_cut, cur_r_cut = _read_dti_currents(observe_inv)
-        assert cur_l_cut == 0.0 and cur_r_cut == 0.0, (
-            f"EV.2.3 failed to cut motor currents: L={cur_l_cut}, R={cur_r_cut}"
+        cur_l_trail, cur_r_trail = _read_dti_currents(observe_inv)
+        assert cur_r_trail > cur_l_trail and cur_r_trail > 10.0, (
+            f"EV.2.3 unexpectedly cut motor currents on brake: L={cur_l_trail}, R={cur_r_trail}"
         )
 
 
