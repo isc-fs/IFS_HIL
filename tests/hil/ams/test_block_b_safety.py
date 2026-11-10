@@ -299,7 +299,7 @@ class TestB028CellFaultDebounce:
     *sustained* breach. This is the regression net for the idle-CUV latch
     (#279/#290) where a torn/transient read tripped the FSM at idle."""
 
-    def test_b028_transient_dip_does_not_latch(self, pico_emu, fresh_boot,
+    def test_b028_transient_dip_does_not_latch(self, fresh_boot, pico_emu,
                                                observe_acu, wait_for_settled,
                                                ams_profile):
         assert fresh_boot["first_frame"]["state"] == M.FsmState.START
@@ -324,7 +324,7 @@ class TestB028CellFaultDebounce:
                     "torn/transient read must not trip the FSM (#279).")
             time.sleep(0.05)
 
-    def test_b028_sustained_dip_latches(self, pico_emu, fresh_boot,
+    def test_b028_sustained_dip_latches(self, fresh_boot, pico_emu,
                                         wait_for_state, wait_for_settled,
                                         ams_profile):
         assert fresh_boot["first_frame"]["state"] == M.FsmState.START
@@ -336,7 +336,7 @@ class TestB028CellFaultDebounce:
             M.FsmState.ERROR,
             timeout_ms=int(ams_profile["tx_telemetry_period_ms"]) * 2 + 800)
 
-    def test_b028_open_wire_transient_glitch_rejection(self, pico_emu, fresh_boot,
+    def test_b028_open_wire_transient_glitch_rejection(self, fresh_boot, pico_emu,
                                                       observe_acu, wait_for_settled,
                                                       ams_profile):
         """A transient open-wire condition (< 50 ms / single ADOW sample) must be
@@ -373,7 +373,7 @@ class TestB028CellFaultDebounce:
                     "AMS_OK line dropped during transient open-wire glitch!")
             time.sleep(0.05)
 
-    def test_b028_open_wire_confirmed_trip_timing(self, pico_emu, fresh_boot,
+    def test_b028_open_wire_confirmed_trip_timing(self, fresh_boot, pico_emu,
                                                   observe_acu, pit_diag,
                                                   wait_for_settled, relays_readback,
                                                   ams_profile):
