@@ -1094,6 +1094,21 @@ def fresh_boot(ams_profile, mlc_powered, observe_acu, acu_heartbeat,
                                          "/run/hil-broker/broker.sock"))
     relay_bit = mlc_powered["relay_bit"]
     try:
+        # Reset and resume Pico LTC emulator before power cycling the DUT
+        try:
+            from tools.pico_ltc_emulator.host.pico_ltc_client import PicoLtcClient
+            _pico = PicoLtcClient()
+            _pico.open()
+            try:
+                _pico.resume_all()
+                _pico.reset_state()
+                _pico.set_all_cells(3750)
+                _pico.set_all_temps(250)
+            finally:
+                _pico.close()
+        except Exception:
+            pass
+
         client.call("tca.write_pin", addr=0x20, port=0, pin=relay_bit, value=False)
         # Drop TSMS + DASH_CHG BEFORE power-on. TCA9555 outputs survive
         # an MLC power-cycle (the TCA itself stays powered), and pytest
@@ -1175,6 +1190,21 @@ def _boot_diff_core(ams_profile, mlc_powered, observe_acu):
         os.environ.get("HIL_BROKER_SOCKET", "/run/hil-broker/broker.sock"))
     relay_bit = mlc_powered["relay_bit"]
     try:
+        # Reset and resume Pico LTC emulator before power cycling the DUT
+        try:
+            from tools.pico_ltc_emulator.host.pico_ltc_client import PicoLtcClient
+            _pico = PicoLtcClient()
+            _pico.open()
+            try:
+                _pico.resume_all()
+                _pico.reset_state()
+                _pico.set_all_cells(3750)
+                _pico.set_all_temps(250)
+            finally:
+                _pico.close()
+        except Exception:
+            pass
+
         client.call("tca.write_pin", addr=0x20, port=0, pin=relay_bit, value=False)
         # Drop TSMS + DASH_CHG before power-on (TCA outputs survive an MLC
         # power-cycle) so the chip boots to Start, not Start->Precharge.
