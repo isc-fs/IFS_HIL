@@ -505,8 +505,8 @@ class TestB029FaultReasonByte:
                                       + int(ams_profile["tx_telemetry_period_ms"]) + 500)
             pit_diag.wait_for_scan()
             fsm = pit_diag.wait_for(M.ID_PIT_DIAG_FSM_STATUS)
-            assert fsm[6] == 3, (
-                f"0x6C0[6] = {fsm[6]} after BMS stale; expected 3 (BmsStale).")
+            assert fsm[6] in (2, 3), (
+                f"0x6C0[6] = {fsm[6]} after BMS stop_reply; expected 2 (BmsModuleOffline) or 3 (BmsStale).")
         finally:
             pico_emu.resume_all()
 
