@@ -131,8 +131,8 @@ diff_dti_left_id:         1          # Left rear DTI inverter Node ID (Packet <<
 diff_dti_right_id:        2          # Right rear DTI inverter Node ID
 diff_kt_nm_per_a:         0.696      # Dual DTI F-MOT torque constant (Nm/Apk)
 diff_motor_max_torque_nm: 31.6       # Peak torque per motor (Nm)
-diff_gear_ratio:          13.0       # Gear reduction ratio
-diff_wheel_radius_m:      0.203      # Tire radius (m)
+diff_gear_ratio:          12.48      # Planetary gear reduction ratio
+diff_wheel_radius_m:      0.204      # Dynamic rolling tire radius (m)
 diff_track_width_m:       1.200      # Rear track width (m)
-diff_wheelbase_m:         1.530      # Wheelbase (m)
-diff_steer_ratio:         4.50       # Steering rack ratio (steering deg / wheel deg)
+diff_wheelbase_m:         1.575      # Wheelbase (m)
+diff_steer_ratio:         4.6418     # Steering rack ratio (steering deg / wheel deg from C-factor 101.52)

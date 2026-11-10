@@ -12,6 +12,11 @@ accelerations using bench DACs and simulated CAN telemetry:
   D-007 EV.2.3 brake plausibility cut: brake via DAC zeroes dual inverter currents
   D-008 Steering sensor dropout: LWS timeout (>100 ms) falls back to passive 50/50
   D-009 Bosch LWS failure mode: uncalibrated/fault state (OK=0/0x7FFF) falls back to 50/50
+  D-010 IMU sensor dropout: IMU timeout (>50 ms) falls back to MingoMode feedforward
+  D-011 Steering velocity dynamic feedforward: positive d_delta boosts outside turn-in torque
+  D-012 Rapid slalom reversal: dynamic transitions smoothly invert bias without torque spikes
+  D-013 Full lock saturation: high speed full lock adheres to physical current limit (<= 45.4 A)
+  D-014 Virtual LSD anti-spin: differential wheel slip reduces torque on spinning wheel
 
 Hardware interfacing:
   - DUT: IFS09-CE-ECU seated in MLC4 carrier slot.
@@ -490,4 +495,175 @@ class TestD009BoschLwsFailureModeFailsafe:
         assert cur_l_flt is not None and cur_r_flt is not None
         assert abs(cur_l_flt - cur_r_flt) < 1.0, (
             f"Sensor failure mode failed to fall back to 50/50: L={cur_l_flt} A, R={cur_r_flt} A"
+        )
+
+
+class TestD010ImuTimeoutFallback:
+    def test_d010_imu_timeout_fallback(self, fresh_boot, inv_heartbeat, acu_inject,
+                                        diff_stim, pedals, start_button, pit_diag,
+                                        observe_inv, vcu_profile):
+        """D-010: If the IMU stream goes quiet (>50 ms timeout) mid-corner, the differential must
+        seamlessly fall back to MingoMode (kinematic feedforward) preserving steer assist without torque drop."""
+        if _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag,
+                      vcu_profile) != S.ACTIVE:
+            pytest.skip("FSM never reached Active -- check DAC/gates")
+
+        diff_stim["set_speed_mps"](15.0)
+        diff_stim["set_steering"](30.0, ok=True, cal=True, trim=True)
+        diff_stim["set_imu"](yaw=0.20, ay=3.0)
+        _apps(pedals, vcu_profile, 50, 50)
+        time.sleep(0.3)
+
+        cur_l, cur_r = _read_dti_currents(observe_inv)
+        assert cur_r > cur_l and cur_r > 10.0
+
+        # Silence IMU stream
+        diff_stim["stop_imu"]()
+        time.sleep(0.20)  # > 50 ms imu_timeout_ms
+
+        cur_l_fb, cur_r_fb = _read_dti_currents(observe_inv)
+        assert cur_l_fb is not None and cur_r_fb is not None
+        # MingoMode still biases outside wheel on steering input
+        assert cur_r_fb > cur_l_fb, (
+            f"Fallback to MingoMode lost outside bias: L={cur_l_fb} A, R={cur_r_fb} A"
+        )
+        # Drive must NOT cut to 0
+        assert cur_r_fb > 5.0 and cur_l_fb > 5.0, (
+            f"IMU fallback erroneously cut drive torque: L={cur_l_fb} A, R={cur_r_fb} A"
+        )
+
+
+class TestD011SteeringSpeedDynamicFeedforward:
+    def test_d011_steering_speed_dynamic_feedforward(self, fresh_boot, inv_heartbeat, acu_inject,
+                                                     diff_stim, pedals, start_button, pit_diag,
+                                                     observe_inv, vcu_profile):
+        """D-011: When the driver turns rapidly into a corner (positive steering wheel angular
+        velocity), dynamic feedforward adds transient outside wheel torque beyond the static split."""
+        if _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag,
+                      vcu_profile) != S.ACTIVE:
+            pytest.skip("FSM never reached Active -- check DAC/gates")
+
+        diff_stim["set_speed_mps"](15.0)
+        # Static turn left at 20 deg, 0 deg/s steering rate
+        diff_stim["set_steering"](20.0, speed=0.0, ok=True, cal=True, trim=True)
+        _apps(pedals, vcu_profile, 50, 50)
+        time.sleep(0.3)
+
+        cur_l_static, cur_r_static = _read_dti_currents(observe_inv)
+        assert cur_l_static is not None and cur_r_static is not None
+        assert cur_r_static > cur_l_static
+
+        # Driver applies fast turn-in steering velocity: +150 deg/s
+        diff_stim["set_steering"](20.0, speed=150.0, ok=True, cal=True, trim=True)
+        time.sleep(0.15)
+
+        cur_l_dyn, cur_r_dyn = _read_dti_currents(observe_inv)
+        assert cur_l_dyn is not None and cur_r_dyn is not None
+        # Outside wheel must receive higher torque during dynamic turn-in transient
+        assert cur_r_dyn > cur_r_static + 0.3, (
+            f"Dynamic feedforward failed to boost outside wheel: static={cur_r_static:.2f} A, dynamic={cur_r_dyn:.2f} A"
+        )
+
+        # Net torque invariant must strictly hold
+        kt = float(vcu_profile.get("diff_kt_nm_per_a", 0.696))
+        total_torque = (cur_l_dyn + cur_r_dyn) * kt
+        assert total_torque <= 31.6 + 1.0, (
+            f"Net torque exceeded driver demand: {total_torque:.2f} Nm > 31.6 Nm"
+        )
+
+
+class TestD012SlalomRapidReversal:
+    def test_d012_slalom_rapid_reversal(self, fresh_boot, inv_heartbeat, acu_inject,
+                                        diff_stim, pedals, start_button, pit_diag,
+                                        observe_inv, vcu_profile):
+        """D-012: In dynamic slalom maneuvers (+30 deg -> -30 deg), the differential smoothly
+        inverts the outside torque bias without torque glitch, deadlock or overshoot."""
+        if _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag,
+                      vcu_profile) != S.ACTIVE:
+            pytest.skip("FSM never reached Active -- check DAC/gates")
+
+        diff_stim["set_speed_mps"](15.0)
+        # Phase 1: Left turn (+30 deg)
+        diff_stim["set_steering"](30.0, speed=0.0, ok=True, cal=True, trim=True)
+        _apps(pedals, vcu_profile, 50, 50)
+        time.sleep(0.3)
+
+        cur_l_left, cur_r_left = _read_dti_currents(observe_inv)
+        assert cur_r_left > cur_l_left + 3.0, (
+            f"Left turn baseline bias missing: L={cur_l_left}, R={cur_r_left}"
+        )
+
+        # Phase 2: Rapid reversal to Right turn (-30 deg)
+        diff_stim["set_steering"](-30.0, speed=-150.0, ok=True, cal=True, trim=True)
+        time.sleep(0.35)
+
+        cur_l_right, cur_r_right = _read_dti_currents(observe_inv)
+        assert cur_l_right > cur_r_right + 3.0, (
+            f"Slalom reversal failed to smoothly invert bias: L={cur_l_right}, R={cur_r_right}"
+        )
+
+        # Inverter currents must remain positive and non-zero
+        assert cur_l_right > 5.0 and cur_r_right > 5.0, (
+            f"Inverter currents dropped during slalom transition: L={cur_l_right}, R={cur_r_right}"
+        )
+
+
+class TestD013ExtremeSteeringLockClamping:
+    def test_d013_extreme_steering_lock_clamping(self, fresh_boot, inv_heartbeat, acu_inject,
+                                                 diff_stim, pedals, start_button, pit_diag,
+                                                 observe_inv, vcu_profile):
+        """D-013: High-speed full lock (22 m/s, 40 deg steer, 100% APPS) strictly clamps both
+        motor currents to the physical ceiling (31.6 Nm / 0.696 Nm/A ≈ 45.4 A) with zero negative values."""
+        if _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag,
+                      vcu_profile) != S.ACTIVE:
+            pytest.skip("FSM never reached Active -- check DAC/gates")
+
+        diff_stim["set_speed_mps"](22.0)
+        diff_stim["set_steering"](40.0, speed=0.0, ok=True, cal=True, trim=True)
+        # 100% full throttle
+        _apps(pedals, vcu_profile, 100, 100)
+        time.sleep(0.35)
+
+        cur_l, cur_r = _read_dti_currents(observe_inv)
+        assert cur_l is not None and cur_r is not None
+
+        # Neither motor must exceed physical peak ceiling: 45.4 A
+        max_cur = float(vcu_profile.get("diff_motor_max_torque_nm", 31.6)) / float(vcu_profile.get("diff_kt_nm_per_a", 0.696))
+        assert cur_r <= max_cur + 0.5, f"Outside motor exceeded physical peak current: {cur_r:.2f} A > {max_cur:.2f} A"
+        assert cur_l <= max_cur + 0.5, f"Inside motor exceeded physical peak current: {cur_l:.2f} A > {max_cur:.2f} A"
+        assert cur_l >= 0.0 and cur_r >= 0.0, f"Negative current detected: L={cur_l}, R={cur_r}"
+        assert cur_r > cur_l, f"Cornering bias missing at full lock: L={cur_l}, R={cur_r}"
+
+
+class TestD014VirtualLsdAntiSpin:
+    def test_d014_virtual_lsd_anti_spin(self, fresh_boot, inv_heartbeat, acu_inject,
+                                        diff_stim, pedals, start_button, pit_diag,
+                                        observe_inv, vcu_profile):
+        """D-014: When one driven wheel breaks traction and spins excessively (>15% expected differential ERPM),
+        the Virtual LSD reduces torque on the spinning wheel to regain traction."""
+        if _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag,
+                      vcu_profile) != S.ACTIVE:
+            pytest.skip("FSM never reached Active -- check DAC/gates")
+
+        # Baseline: 12 m/s straight line with normal grip
+        diff_stim["set_speed_mps"](12.0)
+        diff_stim["set_steering"](0.0)
+        _apps(pedals, vcu_profile, 50, 50)
+        time.sleep(0.3)
+
+        cur_l_norm, cur_r_norm = _read_dti_currents(observe_inv)
+        assert cur_l_norm is not None and cur_r_norm is not None
+        assert abs(cur_l_norm - cur_r_norm) < 1.0
+
+        # Simulate right wheel sudden wheelspin: ERPM_R jumps by 35%
+        base_erpm = _speed_to_erpm(12.0, vcu_profile)
+        spin_erpm = int(base_erpm * 1.35)
+        diff_stim["set_erpm"](base_erpm, spin_erpm)
+        time.sleep(0.25)
+
+        cur_l_spin, cur_r_spin = _read_dti_currents(observe_inv)
+        assert cur_l_spin is not None and cur_r_spin is not None
+        # Virtual LSD must cut current to the spinning right wheel
+        assert cur_r_spin < cur_l_spin, (
+            f"Virtual LSD failed to reduce torque to spinning wheel: L={cur_l_spin:.2f} A, R={cur_r_spin:.2f} A"
         )
