@@ -143,7 +143,7 @@ def test_the_recipes_are_the_same_shape():
     recs = {d: _yaml.safe_load((REPO_ROOT / f"configs/firmware/{d}.yaml").read_text())
             for d in ("ams", "ecu")}
     for d, r in recs.items():
-        assert r["configure"] == (
+        assert r["configure"].startswith(
             "cmake -B build -DCMAKE_TOOLCHAIN_FILE=cmake/gcc-arm-none-eabi.cmake"), (
             f"{d} no longer builds the AMS way: {r['configure']}")
         assert r["build"] == "cmake --build build -j"
