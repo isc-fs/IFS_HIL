@@ -350,10 +350,9 @@ class TestB028CellFaultDebounce:
             assert M.decode_relay_status(f_rel.data)["ams_ok"] is True, \
                 "Pre-condition: AMS_OK must be closed before fault injection."
 
-        # Inject simulated open tap: cell 2 reads low, cell 1 reads high, sum conserved.
+        # Inject simulated open tap on conductor C(0): cell 0 reads 0 mV.
         # Duration: ~40 ms (< 50 ms), representing a single spurious sample.
-        pico_emu.inject_cell_v(module=0, cell=2, mV=1200)
-        pico_emu.inject_cell_v(module=0, cell=1, mV=5200)
+        pico_emu.inject_cell_v(module=0, cell=0, mV=0)
         time.sleep(0.040)
 
         # Restore nominal healthy cells
@@ -388,9 +387,8 @@ class TestB028CellFaultDebounce:
         # Mark injection start time with high-precision counter
         t_inject = time.perf_counter()
 
-        # Inject sustained open wire on Module 0 (cells 1 & 2)
-        pico_emu.inject_cell_v(module=0, cell=2, mV=1200)
-        pico_emu.inject_cell_v(module=0, cell=1, mV=5200)
+        # Inject sustained open wire on Module 0 conductor C(0)
+        pico_emu.inject_cell_v(module=0, cell=0, mV=0)
 
         # Poll tightly to measure exact moment AMS_OK drops or state enters Error
         t_trip_ms = None
@@ -432,7 +430,7 @@ class TestB028CellFaultDebounce:
         pit_diag.wait_for_scan()
         fsm = pit_diag.wait_for(M.ID_PIT_DIAG_FSM_STATUS)
         assert fsm[6] == 16, f"Expected FaultReason 16 (CellOpenWire), got {fsm[6]}"
-        assert fsm[7] == 0, f"Expected offending module 0, got {fsm[7]}"
+        assert (fsm[7] & 0x01) != 0, f"Expected offending module 0 mask set in 0x6C0[7], got {fsm[7]}"
 
 
 # ---------------------------------------------------------------------------

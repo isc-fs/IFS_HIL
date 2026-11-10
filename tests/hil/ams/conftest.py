@@ -969,6 +969,16 @@ def pico_emu():
         except Exception as e:
             client.close()
             pytest.skip(f"Pico LTC emulator did not respond to PING: {e}")
+        # Ensure a clean slate before test runs (drop any leftover stop_reply mask
+        # and seed all cells/temps to nominal healthy values)
+        try: client.resume_all()
+        except Exception: pass
+        try: client.reset_state()
+        except Exception: pass
+        try: client.set_all_cells(3750)
+        except Exception: pass
+        try: client.set_all_temps(250)
+        except Exception: pass
     except Exception as e:
         pytest.skip(f"Pico LTC emulator unreachable: {e}")
     try:

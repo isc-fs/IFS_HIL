@@ -553,6 +553,7 @@ static void parse_ltc_cmd(uint16_t cmd, int *is_wrcomm) {
         default:
             if ((cmd & 0x7C0u) == 0x260u || (cmd & 0x7C0u) == 0x340u) is_known = 1;
             if ((cmd & 0x7C0u) == 0x460u || (cmd & 0x7C0u) == 0x540u) is_known = 1;
+            if ((cmd & 0x728u) == 0x228u || (cmd & 0x728u) == 0x328u) is_known = 1;  // ADOW (PUP=0 / PUP=1)
             break;
     }
     if (is_known) {
