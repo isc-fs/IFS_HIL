@@ -942,21 +942,6 @@ def relays_readback(ams_profile, mlc_powered):
 # Pico LTC emulator client (v0.3.0+ for STOP_REPLY / inject_*)
 # ---------------------------------------------------------------------------
 
-@pytest.fixture(scope="session", autouse=True)
-def ensure_pico_emulator_clean_at_session_start():
-    """At test session start, ensure the Pi Pico emulator has no stale
-    STOP_REPLY mask and has all cells/temps set to nominal healthy seed."""
-    try:
-        from tools.pico_ltc_emulator.host.pico_ltc_client import PicoLtcClient
-        with PicoLtcClient() as client:
-            client.resume_all()
-            client.reset_state()
-            client.set_all_cells(3750)
-            client.set_all_temps(250)
-    except Exception as exc:
-        print(f"::warning::Could not clean Pico emulator at session start: {exc}")
-
-
 @pytest.fixture
 def pico_emu():
     """USB-CDC client for the Pi Pico LTC6811 emulator on MLC2 J8.
@@ -1135,7 +1120,7 @@ def fresh_boot(ams_profile, mlc_powered, observe_acu, acu_heartbeat,
                 client.call("tca.set_direction", addr=addr, port=port, mask=mask)
                 client.call("tca.write_pin", addr=addr, port=port,
                             pin=pin, value=False)
-        time.sleep(2.0)
+        time.sleep(4.0)
         t_power_on = _robust_power_on(
             client, relay_bit, mlc_powered["ina_addr"],
             float(ams_profile["mlc_boot_current_mA"]), observe_acu)
@@ -1202,7 +1187,7 @@ def _boot_diff_core(ams_profile, mlc_powered, observe_acu):
                 mask = _combined_output_mask(ams_profile, addr, port)
                 client.call("tca.set_direction", addr=addr, port=port, mask=mask)
                 client.call("tca.write_pin", addr=addr, port=port, pin=pin, value=False)
-        time.sleep(2.0)
+        time.sleep(4.0)
         t_power_on = _robust_power_on(
             client, relay_bit, mlc_powered["ina_addr"],
             float(ams_profile["mlc_boot_current_mA"]), observe_acu)
