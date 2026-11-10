@@ -950,10 +950,11 @@ def ensure_pico_emulator_clean_at_session_start():
         from tools.pico_ltc_emulator.host.pico_ltc_client import PicoLtcClient
         with PicoLtcClient() as client:
             client.resume_all()
+            client.reset_state()
             client.set_all_cells(3750)
             client.set_all_temps(250)
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"::warning::Could not clean Pico emulator at session start: {exc}")
 
 
 @pytest.fixture

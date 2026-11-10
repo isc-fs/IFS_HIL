@@ -16,7 +16,7 @@ submodules: false
 toolchain_release: '14.2.Rel1'          # carlosperate/arm-none-eabi-gcc-action
 
 # CMakeLists.txt is at the repo root for the AMS.
-configure: cmake -B build -DCMAKE_TOOLCHAIN_FILE=cmake/gcc-arm-none-eabi.cmake -DAMS_HIL_CLEAR_ERROR_LATCH=ON
+configure: cmake -B build -DCMAKE_TOOLCHAIN_FILE=cmake/gcc-arm-none-eabi.cmake
 build: cmake --build build -j
 elf: build/AMS.elf
 

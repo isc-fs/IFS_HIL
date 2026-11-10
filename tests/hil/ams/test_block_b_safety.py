@@ -330,11 +330,13 @@ class TestB028CellFaultDebounce:
         assert fresh_boot["first_frame"]["state"] == M.FsmState.START
         wait_for_settled()       # past grace + first full poll before inject
         # Sustained breach -> must latch Error after the confirm window.
-        # pico_emu teardown restores nominal cells for the next test.
-        pico_emu.inject_cell_v(module=0, cell=10, mV=2500)  # < 2800, held
-        wait_for_state(
-            M.FsmState.ERROR,
-            timeout_ms=int(ams_profile["tx_telemetry_period_ms"]) * 2 + 800)
+        try:
+            pico_emu.inject_cell_v(module=0, cell=10, mV=2500)  # < 2800, held
+            wait_for_state(
+                M.FsmState.ERROR,
+                timeout_ms=int(ams_profile["tx_telemetry_period_ms"]) * 2 + 800)
+        finally:
+            pico_emu.set_all_cells(3750)
 
     def test_b028_open_wire_transient_glitch_rejection(self, fresh_boot, pico_emu,
                                                       observe_acu, wait_for_settled,
@@ -387,50 +389,53 @@ class TestB028CellFaultDebounce:
         # Mark injection start time with high-precision counter
         t_inject = time.perf_counter()
 
-        # Inject sustained open wire on Module 0 conductor C(0)
-        pico_emu.inject_cell_v(module=0, cell=0, mV=0)
+        try:
+            # Inject sustained open wire on Module 0 conductor C(0)
+            pico_emu.inject_cell_v(module=0, cell=0, mV=0)
 
-        # Poll tightly to measure exact moment AMS_OK drops or state enters Error
-        t_trip_ms = None
-        deadline = time.monotonic() + 1.2
-        while time.monotonic() < deadline:
-            dropped = False
-            # Check physical hardware readback via MCP3208 if available
-            if relays_readback is not None:
-                try:
-                    dropped = not relays_readback.read()["ams_ok"]
-                except Exception:
-                    pass
+            # Poll tightly to measure exact moment AMS_OK drops or state enters Error
+            t_trip_ms = None
+            deadline = time.monotonic() + 1.2
+            while time.monotonic() < deadline:
+                dropped = False
+                # Check physical hardware readback via MCP3208 if available
+                if relays_readback is not None:
+                    try:
+                        dropped = not relays_readback.read()["ams_ok"]
+                    except Exception:
+                        pass
 
-            # Also verify via fast relay status (0x4A4) and FSM status
-            if not dropped:
-                f_rel = observe_acu.last(M.ID_RELAY_STATUS, extended=False)
-                if f_rel is not None and not M.decode_relay_status(f_rel.data)["ams_ok"]:
-                    dropped = True
-                else:
-                    f_fsm = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
-                    if f_fsm is not None and M.decode_telem_status(f_fsm.data)["state"] == M.FsmState.ERROR:
+                # Also verify via fast relay status (0x4A4) and FSM status
+                if not dropped:
+                    f_rel = observe_acu.last(M.ID_RELAY_STATUS, extended=False)
+                    if f_rel is not None and not M.decode_relay_status(f_rel.data)["ams_ok"]:
                         dropped = True
+                    else:
+                        f_fsm = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
+                        if f_fsm is not None and M.decode_telem_status(f_fsm.data)["state"] == M.FsmState.ERROR:
+                            dropped = True
 
-            if dropped:
-                t_trip_ms = (time.perf_counter() - t_inject) * 1000.0
-                break
-            time.sleep(0.002)
+                if dropped:
+                    t_trip_ms = (time.perf_counter() - t_inject) * 1000.0
+                    break
+                time.sleep(0.002)
 
-        assert t_trip_ms is not None, "SDC did not open within timeout after open-wire injection!"
+            assert t_trip_ms is not None, "SDC did not open within timeout after open-wire injection!"
 
-        # Formula Student rule compliance:
-        # t_trip must exceed 25 ms (proves debounce active, single sample rejected)
-        # t_trip must be < 450 ms (guarantees total < 500 ms with contactor opening time)
-        assert 25.0 < t_trip_ms < 450.0, (
-            f"Open-wire trip timing violation: {t_trip_ms:.1f} ms! "
-            f"Expected 25 ms < t_trip < 450 ms to guarantee FS 500 ms compliance.")
+            # Formula Student rule compliance:
+            # t_trip must exceed 25 ms (proves debounce active, single sample rejected)
+            # t_trip must be < 450 ms (guarantees total < 500 ms with contactor opening time)
+            assert 25.0 < t_trip_ms < 450.0, (
+                f"Open-wire trip timing violation: {t_trip_ms:.1f} ms! "
+                f"Expected 25 ms < t_trip < 450 ms to guarantee FS 500 ms compliance.")
 
-        # Confirm latched fault reason in pit-diag 0x6C0[6] == 16 (CellOpenWire)
-        pit_diag.wait_for_scan()
-        fsm = pit_diag.wait_for(M.ID_PIT_DIAG_FSM_STATUS)
-        assert fsm[6] == 16, f"Expected FaultReason 16 (CellOpenWire), got {fsm[6]}"
-        assert (fsm[7] & 0x01) != 0, f"Expected offending module 0 mask set in 0x6C0[7], got {fsm[7]}"
+            # Confirm latched fault reason in pit-diag 0x6C0[6] == 16 (CellOpenWire)
+            pit_diag.wait_for_scan()
+            fsm = pit_diag.wait_for(M.ID_PIT_DIAG_FSM_STATUS)
+            assert fsm[6] == 16, f"Expected FaultReason 16 (CellOpenWire), got {fsm[6]}"
+            assert (fsm[7] & 0x01) != 0, f"Expected offending module 0 mask set in 0x6C0[7], got {fsm[7]}"
+        finally:
+            pico_emu.set_all_cells(3750)
 
 
 # ---------------------------------------------------------------------------
