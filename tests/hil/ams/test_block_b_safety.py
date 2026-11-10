@@ -398,7 +398,7 @@ class TestB028CellFaultDebounce:
             # Check physical hardware readback via MCP3208 if available
             if relays_readback is not None:
                 try:
-                    dropped = not relays_readback.read_digital()["ams_ok"]
+                    dropped = not relays_readback.read()["ams_ok"]
                 except Exception:
                     pass
 
