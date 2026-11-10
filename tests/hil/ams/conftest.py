@@ -1120,7 +1120,7 @@ def fresh_boot(ams_profile, mlc_powered, observe_acu, acu_heartbeat,
                 client.call("tca.set_direction", addr=addr, port=port, mask=mask)
                 client.call("tca.write_pin", addr=addr, port=port,
                             pin=pin, value=False)
-        time.sleep(4.0)
+        time.sleep(2.0)
         t_power_on = _robust_power_on(
             client, relay_bit, mlc_powered["ina_addr"],
             float(ams_profile["mlc_boot_current_mA"]), observe_acu)
@@ -1187,7 +1187,7 @@ def _boot_diff_core(ams_profile, mlc_powered, observe_acu):
                 mask = _combined_output_mask(ams_profile, addr, port)
                 client.call("tca.set_direction", addr=addr, port=port, mask=mask)
                 client.call("tca.write_pin", addr=addr, port=port, pin=pin, value=False)
-        time.sleep(4.0)
+        time.sleep(2.0)
         t_power_on = _robust_power_on(
             client, relay_bit, mlc_powered["ina_addr"],
             float(ams_profile["mlc_boot_current_mA"]), observe_acu)
