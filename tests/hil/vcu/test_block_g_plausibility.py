@@ -93,24 +93,15 @@ class TestG002BrakeThrottle:
     def test_g002_ev_2_3_brake_and_throttle(self, fresh_boot, inv_heartbeat, acu_inject,
                                             pedals, start_button, pit_diag, observe_acu,
                                             observe_inv, vcu_profile):
-        """G-002: brake pressed (> BrakePressedRaw) + throttle -> ev_2_3 latched, no torque;
-        stays latched until APPS releases."""
+        """G-002: EV.2.3 retired: brake pressed (> BrakePressedRaw) + throttle does NOT latch or cut torque."""
         if _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag,
                       vcu_profile) != S.ACTIVE:
             pytest.skip("FSM never reached Active -- DAC/gates")
         _apps(pedals, vcu_profile, 80, 80)
         pedals["set_brake"](3500)                 # > BrakePressedRaw (3000)
         time.sleep(0.4)
-        assert _flags(observe_acu) & M.PIT_FLAG_EV_2_3, "ev_2_3 not set on brake+throttle"
-        assert abs(_torque(observe_inv) or 0) <= 2, f"torque {_torque(observe_inv)} not cut"
-        # EV.2.3 latches: releasing the brake alone must NOT re-enable torque
-        pedals["set_brake"](0)
-        time.sleep(0.3)
-        assert _flags(observe_acu) & M.PIT_FLAG_EV_2_3, "ev_2_3 cleared without APPS release"
-        # release APPS -> latch clears
-        _apps(pedals, vcu_profile, 0, 0)
-        time.sleep(0.4)
-        assert not (_flags(observe_acu) & M.PIT_FLAG_EV_2_3), "ev_2_3 stuck after APPS release"
+        assert not (_flags(observe_acu) & M.PIT_FLAG_EV_2_3), "ev_2_3 should not be set (EV 2.3 retired)"
+        assert _torque(observe_inv) and _torque(observe_inv) > 10, f"torque unexpectedly cut on brake: {_torque(observe_inv)}"
 
 
 class TestG003ImplausibleApps:
