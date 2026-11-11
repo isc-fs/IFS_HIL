@@ -17,6 +17,9 @@ accelerations using bench DACs and simulated CAN telemetry:
   D-012 Rapid slalom reversal: dynamic transitions smoothly invert bias without torque spikes
   D-013 Full lock saturation: high speed full lock adheres to physical current limit (<= 45.4 A)
   D-014 Virtual LSD anti-spin: differential wheel slip reduces torque on spinning wheel
+  D-015 Rollback / reverse motion: v_x < 1.0 m/s or v_x < 0 suppresses vectoring to 50/50 split
+  D-016 Asymmetric inverter trip: single inverter fault cuts both motor currents to 0
+  D-017 Extreme split-mu slip: inside wheel spin trims inside current while outside drives
 
 Hardware interfacing:
   - DUT: IFS09-CE-ECU seated in MLC4 carrier slot.
@@ -667,3 +670,94 @@ class TestD014VirtualLsdAntiSpin:
         assert cur_r_spin < cur_l_spin, (
             f"Virtual LSD failed to reduce torque to spinning wheel: L={cur_l_spin:.2f} A, R={cur_r_spin:.2f} A"
         )
+
+
+class TestD015RollbackReverseSuppression:
+    def test_d015_rollback_reverse_suppression(self, fresh_boot, inv_heartbeat, acu_inject,
+                                               diff_stim, pedals, start_button, pit_diag,
+                                               observe_inv, vcu_profile):
+        """D-015: When vehicle speed is negative or crawl (< 1.0 m/s), differential vectoring is
+        suppressed and motor current split remains strictly 50/50 symmetric despite steering angle."""
+        if _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag,
+                      vcu_profile) != S.ACTIVE:
+            pytest.skip("FSM never reached Active -- check DAC/gates")
+
+        # Rollback at -3.0 m/s with heavy steering lock (35 deg left)
+        diff_stim["set_speed_mps"](-3.0)
+        diff_stim["set_steering"](35.0)
+        _apps(pedals, vcu_profile, 50, 50)
+        time.sleep(0.3)
+
+        cur_l_rev, cur_r_rev = _read_dti_currents(observe_inv)
+        assert cur_l_rev is not None and cur_r_rev is not None
+        assert abs(cur_l_rev - cur_r_rev) < 1.0, (
+            f"Rollback failed to suppress torque vectoring: L={cur_l_rev:.2f} A, R={cur_r_rev:.2f} A"
+        )
+
+        # Transition forward to 15.0 m/s: cornering bias must engage smoothly
+        diff_stim["set_speed_mps"](15.0)
+        time.sleep(0.3)
+
+        cur_l_fwd, cur_r_fwd = _read_dti_currents(observe_inv)
+        assert cur_r_fwd > cur_l_fwd and (cur_r_fwd - cur_l_fwd) > 3.0, (
+            f"Forward cornering bias missing after rollback: L={cur_l_fwd:.2f} A, R={cur_r_fwd:.2f} A"
+        )
+
+
+class TestD016AsymmetricInverterCutout:
+    def test_d016_asymmetric_inverter_cutout(self, fresh_boot, inv_heartbeat, acu_inject,
+                                            diff_stim, pedals, start_button, pit_diag,
+                                            observe_inv, vcu_profile):
+        """D-016: Critical safety: Inverter trip or fault report immediately cuts both motor currents
+        to 0 to prevent catastrophic uncommanded yaw spin."""
+        if _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag,
+                      vcu_profile) != S.ACTIVE:
+            pytest.skip("FSM never reached Active -- check DAC/gates")
+
+        diff_stim["set_speed_mps"](15.0)
+        diff_stim["set_steering"](30.0)
+        _apps(pedals, vcu_profile, 50, 50)
+        time.sleep(0.3)
+
+        cur_l, cur_r = _read_dti_currents(observe_inv)
+        assert cur_r > cur_l and cur_r > 10.0
+
+        # Trip inverter via fault state (state 10 = Soft Fault / dem trip)
+        inv_heartbeat["set_state"](10)
+        time.sleep(0.2)
+
+        cur_l_flt, cur_r_flt = _read_dti_currents(observe_inv)
+        assert cur_l_flt == 0.0 and cur_r_flt == 0.0, (
+            f"Inverter trip failed to cut dual currents: L={cur_l_flt}, R={cur_r_flt}"
+        )
+
+
+class TestD017ExtremeSplitMuWheelSlip:
+    def test_d017_extreme_split_mu_wheel_slip(self, fresh_boot, inv_heartbeat, acu_inject,
+                                              diff_stim, pedals, start_button, pit_diag,
+                                              observe_inv, vcu_profile):
+        """D-017: Extreme split-mu surface in corner: inside wheel slips excessively on loose/wet surface.
+        Virtual LSD and TCS mitigate slip by transferring torque to outside gripping wheel."""
+        if _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag,
+                      vcu_profile) != S.ACTIVE:
+            pytest.skip("FSM never reached Active -- check DAC/gates")
+
+        # 12 m/s cornering left (30 deg): left wheel inside, right wheel outside
+        diff_stim["set_speed_mps"](12.0)
+        diff_stim["set_steering"](30.0)
+        _apps(pedals, vcu_profile, 60, 60)
+        time.sleep(0.3)
+
+        cur_l_norm, cur_r_norm = _read_dti_currents(observe_inv)
+        assert cur_r_norm > cur_l_norm and cur_r_norm > 15.0
+
+        # Inside left wheel hits wet paint line: ERPM_L spikes to 2.2x normal
+        base_erpm = _speed_to_erpm(12.0, vcu_profile)
+        diff_stim["set_erpm"](int(base_erpm * 2.2), base_erpm)
+        time.sleep(0.25)
+
+        cur_l_slip, cur_r_slip = _read_dti_currents(observe_inv)
+        assert cur_l_slip < cur_l_norm * 0.70, (
+            f"Slipping wheel current not sufficiently trimmed: before={cur_l_norm:.2f} A, after={cur_l_slip:.2f} A"
+        )
+        assert cur_r_slip > cur_l_slip, "Gripping outside wheel must maintain drive dominance"
