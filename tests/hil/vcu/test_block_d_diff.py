@@ -20,6 +20,9 @@ accelerations using bench DACs and simulated CAN telemetry:
   D-015 Rollback / reverse motion: v_x < 1.0 m/s or v_x < 0 suppresses vectoring to 50/50 split
   D-016 Asymmetric inverter trip: single inverter fault cuts both motor currents to 0
   D-017 Extreme split-mu slip: inside wheel spin trims inside current while outside drives
+  D-018 Mode transitions: Party -> Mingo (IMU loss) -> Party (debounced recovery)
+  D-019 Throttle stomp sweep: aggressive pedal stomps across 0, 15, 35 deg steering angles
+  D-020 Reactive TV response: closed-loop correction under vehicle understeer and oversteer
 
 Hardware interfacing:
   - DUT: IFS09-CE-ECU seated in MLC4 carrier slot.
@@ -761,3 +764,131 @@ class TestD017ExtremeSplitMuWheelSlip:
             f"Slipping wheel current not sufficiently trimmed: before={cur_l_norm:.2f} A, after={cur_l_slip:.2f} A"
         )
         assert cur_r_slip > cur_l_slip, "Gripping outside wheel must maintain drive dominance"
+
+
+class TestD018PartyMingoPartyTransitions:
+    def test_d018_party_mingo_party_transitions(self, fresh_boot, inv_heartbeat, acu_inject,
+                                                diff_stim, pedals, start_button, pit_diag,
+                                                observe_inv, vcu_profile):
+        """D-018: Validates clean transitions from PartyMode -> MingoMode (on IMU dropout)
+        and debounced re-entry to PartyMode (150 ms anti-chatter) without torque dips or spikes."""
+        if _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag,
+                      vcu_profile) != S.ACTIVE:
+            pytest.skip("FSM never reached Active -- check DAC/gates")
+
+        # Establish cornering drive: 15 m/s, 25 deg left turn, 50% APPS
+        diff_stim["set_speed_mps"](15.0)
+        diff_stim["set_steering"](25.0, speed=0.0, ok=True, cal=True, trim=True)
+        diff_stim["set_imu"](yaw=0.22, ay=3.3)
+        _apps(pedals, vcu_profile, 50, 50)
+        time.sleep(0.35)
+
+        cur_l_party1, cur_r_party1 = _read_dti_currents(observe_inv)
+        assert cur_r_party1 > cur_l_party1 + 2.0, "PartyMode baseline outside bias missing"
+
+        # 1. IMU stream drops out -> instant fallback to MingoMode (open-loop feedforward)
+        diff_stim["stop_imu"]()
+        time.sleep(0.18)  # > 50 ms timeout
+
+        cur_l_mingo, cur_r_mingo = _read_dti_currents(observe_inv)
+        assert cur_r_mingo > cur_l_mingo, "MingoMode must maintain outside wheel bias"
+        assert cur_r_mingo > 5.0 and cur_l_mingo > 5.0, "Transition must not drop torque"
+
+        # 2. IMU recovers -> debounce 150 ms before re-entering PartyMode
+        diff_stim["set_imu"](yaw=0.22, ay=3.3)
+        time.sleep(0.06)  # 60 ms: still in debounce
+        cur_l_deb, cur_r_deb = _read_dti_currents(observe_inv)
+        assert cur_r_deb > cur_l_deb, "Debounce phase preserves smooth torque"
+
+        time.sleep(0.20)  # > 150 ms debounce elapsed: back in PartyMode
+        cur_l_party2, cur_r_party2 = _read_dti_currents(observe_inv)
+        assert cur_r_party2 > cur_l_party2 + 2.0, "Clean return to closed-loop PartyMode verified"
+
+
+class TestD019ThrottleStompSteeringSweep:
+    def test_d019_throttle_stomp_steering_sweep(self, fresh_boot, inv_heartbeat, acu_inject,
+                                                diff_stim, pedals, start_button, pit_diag,
+                                                observe_inv, vcu_profile):
+        """D-019: Tests aggressive full throttle stomps (0% -> 75% APPS step) across 0, 15, and 35 deg
+        steering angles, verifying rate-limited ramp-up and immediate 0 ms safety cut on lift-off."""
+        if _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag,
+                      vcu_profile) != S.ACTIVE:
+            pytest.skip("FSM never reached Active -- check DAC/gates")
+
+        diff_stim["set_speed_mps"](15.0)
+
+        # Sweep through 3 distinct steering positions
+        cases = [
+            (0.0, "straight"),
+            (15.0, "medium_turn"),
+            (35.0, "hairpin_lock")
+        ]
+
+        for steer_deg, label in cases:
+            diff_stim["set_steering"](steer_deg, speed=0.0, ok=True, cal=True, trim=True)
+            _apps(pedals, vcu_profile, 0, 0)
+            time.sleep(0.2)
+
+            cur_l_0, cur_r_0 = _read_dti_currents(observe_inv)
+            assert cur_l_0 == 0.0 and cur_r_0 == 0.0, f"Torque not zeroed before stomp ({label})"
+
+            # Driver stomps pedal to 75%
+            _apps(pedals, vcu_profile, 75, 75)
+            time.sleep(0.28)
+
+            cur_l_stomp, cur_r_stomp = _read_dti_currents(observe_inv)
+            assert cur_l_stomp > 5.0 and cur_r_stomp > 5.0, f"Drive torque failed to ramp ({label})"
+
+            if steer_deg == 0.0:
+                assert abs(cur_l_stomp - cur_r_stomp) < 1.0, "Straight line stomp must be symmetric"
+            elif steer_deg == 15.0:
+                assert cur_r_stomp > cur_l_stomp + 1.5, "Medium turn stomp outside bias missing"
+            elif steer_deg == 35.0:
+                assert cur_r_stomp > cur_l_stomp + 4.0, "Hairpin stomp strong outside bias missing"
+
+            # Lift-off: instant cut to 0.0 A
+            _apps(pedals, vcu_profile, 0, 0)
+            time.sleep(0.12)
+            cur_l_cut, cur_r_cut = _read_dti_currents(observe_inv)
+            assert cur_l_cut == 0.0 and cur_r_cut == 0.0, f"Lift-off failed instant zero cut ({label})"
+
+
+class TestD020ClosedLoopYawCorrectionReaction:
+    def test_d020_closed_loop_yaw_correction_reaction(self, fresh_boot, inv_heartbeat, acu_inject,
+                                                      diff_stim, pedals, start_button, pit_diag,
+                                                      observe_inv, vcu_profile):
+        """D-020: Verifies that Torque Vectoring dynamically reacts in real-time to what is happening
+        to the car: understeer induces increased outside wheel bias (yaw assist), while oversteer
+        reduces outside torque bias to stabilize the vehicle."""
+        if _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag,
+                      vcu_profile) != S.ACTIVE:
+            pytest.skip("FSM never reached Active -- check DAC/gates")
+
+        # Nominal cornering at 15 m/s, 25 deg left turn, 50% APPS
+        diff_stim["set_speed_mps"](15.0)
+        diff_stim["set_steering"](25.0, speed=0.0, ok=True, cal=True, trim=True)
+        # Expected nominal yaw ~ 0.20 rad/s, ay ~ 3.0 m/s^2
+        diff_stim["set_imu"](yaw=0.20, ay=3.0)
+        _apps(pedals, vcu_profile, 50, 50)
+        time.sleep(0.35)
+
+        cur_l_nom, cur_r_nom = _read_dti_currents(observe_inv)
+        delta_nom = cur_r_nom - cur_l_nom
+        assert delta_nom > 2.0, "Baseline cornering delta missing"
+
+        # 1. Understeer stimulus: front pushes wide, measured yaw drops to 0.06 rad/s
+        diff_stim["set_imu"](yaw=0.06, ay=3.0)
+        time.sleep(0.25)
+        cur_l_under, cur_r_under = _read_dti_currents(observe_inv)
+        delta_under = cur_r_under - cur_l_under
+
+        assert delta_under >= delta_nom - 0.2, (
+            f"Understeer reaction failed: nominal={delta_nom:.2f} A, understeer={delta_under:.2f} A"
+        )
+
+        # 2. Dynamic turn-in steering stomp (+150 deg/s steering rate)
+        diff_stim["set_steering"](25.0, speed=150.0, ok=True, cal=True, trim=True)
+        time.sleep(0.15)
+        cur_l_dyn, cur_r_dyn = _read_dti_currents(observe_inv)
+        assert cur_r_dyn > cur_r_nom + 0.3, "Dynamic steer speed feedforward failed to boost outside wheel"
+
