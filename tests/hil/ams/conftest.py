@@ -942,6 +942,21 @@ def relays_readback(ams_profile, mlc_powered):
 # Pico LTC emulator client (v0.3.0+ for STOP_REPLY / inject_*)
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(scope="session", autouse=True)
+def ensure_pico_emulator_clean_at_session_start():
+    """At test session start, ensure the Pi Pico emulator has no stale
+    STOP_REPLY mask and has all cells/temps set to nominal healthy seed."""
+    try:
+        from tools.pico_ltc_emulator.host.pico_ltc_client import PicoLtcClient
+        with PicoLtcClient() as client:
+            client.resume_all()
+            client.reset_state()
+            client.set_all_cells(3750)
+            client.set_all_temps(250)
+    except Exception as exc:
+        print(f"::warning::Could not clean Pico emulator at session start: {exc}")
+
+
 @pytest.fixture
 def pico_emu():
     """USB-CDC client for the Pi Pico LTC6811 emulator on MLC2 J8.
@@ -969,6 +984,16 @@ def pico_emu():
         except Exception as e:
             client.close()
             pytest.skip(f"Pico LTC emulator did not respond to PING: {e}")
+        # Ensure a clean slate before test runs (drop any leftover stop_reply mask
+        # and seed all cells/temps to nominal healthy values)
+        try: client.resume_all()
+        except Exception: pass
+        try: client.reset_state()
+        except Exception: pass
+        try: client.set_all_cells(3750)
+        except Exception: pass
+        try: client.set_all_temps(250)
+        except Exception: pass
     except Exception as e:
         pytest.skip(f"Pico LTC emulator unreachable: {e}")
     try:

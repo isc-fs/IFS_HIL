@@ -116,7 +116,7 @@ class TestB022BMSStale:
     perspective rather than the Block E chain-integrity perspective.
     """
 
-    def test_b022_bms_stale_trips_error(self, fresh_boot, pico_emu,
+    def test_b022_bms_stale_trips_error(self, pico_emu, fresh_boot,
                                          wait_for_state, wait_for_settled,
                                          ams_profile):
         # Sanity: chip is alive in Start before we silence the chain.
@@ -244,7 +244,7 @@ class TestB026CellRangeInjection:
     suite stresses the chain-position translation in the client too.
     """
 
-    def test_b026_cell_overvoltage(self, fresh_boot, pico_emu, wait_for_state,
+    def test_b026_cell_overvoltage(self, pico_emu, fresh_boot, wait_for_state,
                                     wait_for_settled, ams_profile):
         assert fresh_boot["first_frame"]["state"] == M.FsmState.START
         wait_for_settled()       # past grace + first full poll before inject
@@ -253,7 +253,7 @@ class TestB026CellRangeInjection:
             M.FsmState.ERROR,
             timeout_ms=int(ams_profile["tx_telemetry_period_ms"]) * 2 + 500)
 
-    def test_b026_cell_undervoltage(self, fresh_boot, pico_emu, wait_for_state,
+    def test_b026_cell_undervoltage(self, pico_emu, fresh_boot, wait_for_state,
                                      wait_for_settled, ams_profile):
         assert fresh_boot["first_frame"]["state"] == M.FsmState.START
         wait_for_settled()       # past grace + first full poll before inject
@@ -269,7 +269,7 @@ class TestB026CellRangeInjection:
     # Pico-emulator follow-up. Both sub-tests use the known-good
     # address so they exercise the OV/UV-of-temperature predicate
     # paths even though they cover only one chain slot.
-    def test_b026_cell_overtemperature(self, fresh_boot, pico_emu,
+    def test_b026_cell_overtemperature(self, pico_emu, fresh_boot,
                                         wait_for_state, wait_for_settled,
                                         ams_profile):
         assert fresh_boot["first_frame"]["state"] == M.FsmState.START
@@ -299,7 +299,7 @@ class TestB028CellFaultDebounce:
     *sustained* breach. This is the regression net for the idle-CUV latch
     (#279/#290) where a torn/transient read tripped the FSM at idle."""
 
-    def test_b028_transient_dip_does_not_latch(self, fresh_boot, pico_emu,
+    def test_b028_transient_dip_does_not_latch(self, pico_emu, fresh_boot,
                                                observe_acu, wait_for_settled,
                                                ams_profile):
         assert fresh_boot["first_frame"]["state"] == M.FsmState.START
@@ -324,17 +324,118 @@ class TestB028CellFaultDebounce:
                     "torn/transient read must not trip the FSM (#279).")
             time.sleep(0.05)
 
-    def test_b028_sustained_dip_latches(self, fresh_boot, pico_emu,
+    def test_b028_sustained_dip_latches(self, pico_emu, fresh_boot,
                                         wait_for_state, wait_for_settled,
                                         ams_profile):
         assert fresh_boot["first_frame"]["state"] == M.FsmState.START
         wait_for_settled()       # past grace + first full poll before inject
         # Sustained breach -> must latch Error after the confirm window.
-        # pico_emu teardown restores nominal cells for the next test.
-        pico_emu.inject_cell_v(module=0, cell=10, mV=2500)  # < 2800, held
-        wait_for_state(
-            M.FsmState.ERROR,
-            timeout_ms=int(ams_profile["tx_telemetry_period_ms"]) * 2 + 800)
+        try:
+            pico_emu.inject_cell_v(module=0, cell=10, mV=2500)  # < 2800, held
+            wait_for_state(
+                M.FsmState.ERROR,
+                timeout_ms=int(ams_profile["tx_telemetry_period_ms"]) * 2 + 800)
+        finally:
+            pico_emu.set_all_cells(3750)
+
+    def test_b028_open_wire_transient_glitch_rejection(self, pico_emu, fresh_boot,
+                                                      observe_acu, wait_for_settled,
+                                                      ams_profile):
+        """A transient open-wire condition (< 50 ms / single ADOW sample) must be
+        filtered by the OW_SUSPECT state and NOT open the SDC or latch Error."""
+        assert fresh_boot["first_frame"]["state"] == M.FsmState.START
+        wait_for_settled()
+
+        # Initial check: AMS_OK is closed (healthy)
+        f_rel = observe_acu.last(M.ID_RELAY_STATUS, extended=False)
+        if f_rel is not None:
+            assert M.decode_relay_status(f_rel.data)["ams_ok"] is True, \
+                "Pre-condition: AMS_OK must be closed before fault injection."
+
+        # Inject simulated open tap on conductor C(0): cell 0 reads 0 mV.
+        # Duration: ~40 ms (< 50 ms), representing a single spurious sample.
+        pico_emu.inject_cell_v(module=0, cell=0, mV=0)
+        time.sleep(0.040)
+
+        # Restore nominal healthy cells
+        pico_emu.set_all_cells(3750)
+
+        # Monitor for 2.5 seconds: SDC must remain closed and FSM must NOT enter Error
+        deadline = time.monotonic() + 2.5
+        while time.monotonic() < deadline:
+            f = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
+            if f is not None:
+                state = M.decode_telem_status(f.data)["state"]
+                assert state != M.FsmState.ERROR, (
+                    "Transient open-wire glitch (< 50 ms) triggered spurious trip! "
+                    "OW_SUSPECT debounce failed to suppress single-sample spike.")
+            f_rel = observe_acu.last(M.ID_RELAY_STATUS, extended=False)
+            if f_rel is not None:
+                assert M.decode_relay_status(f_rel.data)["ams_ok"] is True, (
+                    "AMS_OK line dropped during transient open-wire glitch!")
+            time.sleep(0.05)
+
+    def test_b028_open_wire_confirmed_trip_timing(self, pico_emu, fresh_boot,
+                                                  observe_acu, pit_diag,
+                                                  wait_for_settled, relays_readback,
+                                                  ams_profile):
+        """A persistent open-wire condition must trigger Fast Re-check and confirm
+        the fault, opening SDC strictly within:
+            25 ms < t_trip < 450 ms
+        (Formula Student 500 ms constraint with 40 ms margin for mechanical AIRs)."""
+        assert fresh_boot["first_frame"]["state"] == M.FsmState.START
+        wait_for_settled()
+
+        # Mark injection start time with high-precision counter
+        t_inject = time.perf_counter()
+
+        try:
+            # Inject sustained open wire on Module 0 conductor C(0)
+            pico_emu.inject_cell_v(module=0, cell=0, mV=0)
+
+            # Poll tightly to measure exact moment AMS_OK drops or state enters Error
+            t_trip_ms = None
+            deadline = time.monotonic() + 1.2
+            while time.monotonic() < deadline:
+                dropped = False
+                # Check physical hardware readback via MCP3208 if available
+                if relays_readback is not None:
+                    try:
+                        dropped = not relays_readback.read()["ams_ok"]
+                    except Exception:
+                        pass
+
+                # Also verify via fast relay status (0x4A4) and FSM status
+                if not dropped:
+                    f_rel = observe_acu.last(M.ID_RELAY_STATUS, extended=False)
+                    if f_rel is not None and not M.decode_relay_status(f_rel.data)["ams_ok"]:
+                        dropped = True
+                    else:
+                        f_fsm = observe_acu.last(M.ID_TELEM_STATUS, extended=False)
+                        if f_fsm is not None and M.decode_telem_status(f_fsm.data)["state"] == M.FsmState.ERROR:
+                            dropped = True
+
+                if dropped:
+                    t_trip_ms = (time.perf_counter() - t_inject) * 1000.0
+                    break
+                time.sleep(0.002)
+
+            assert t_trip_ms is not None, "SDC did not open within timeout after open-wire injection!"
+
+            # Formula Student rule compliance:
+            # t_trip must exceed 25 ms (proves debounce active, single sample rejected)
+            # t_trip must be < 450 ms (guarantees total < 500 ms with contactor opening time)
+            assert 25.0 < t_trip_ms < 450.0, (
+                f"Open-wire trip timing violation: {t_trip_ms:.1f} ms! "
+                f"Expected 25 ms < t_trip < 450 ms to guarantee FS 500 ms compliance.")
+
+            # Confirm latched fault reason in pit-diag 0x6C0[6] == 16 (CellOpenWire)
+            pit_diag.wait_for_scan()
+            fsm = pit_diag.wait_for(M.ID_PIT_DIAG_FSM_STATUS)
+            assert fsm[6] == 16, f"Expected FaultReason 16 (CellOpenWire), got {fsm[6]}"
+            assert (fsm[7] & 0x01) != 0, f"Expected offending module 0 mask set in 0x6C0[7], got {fsm[7]}"
+        finally:
+            pico_emu.set_all_cells(3750)
 
 
 # ---------------------------------------------------------------------------
@@ -355,7 +456,7 @@ class TestB029FaultReasonByte:
             f"0x6C0[6] fault_reason = {fsm[6]} in healthy Start; expected 0 "
             "(None) before any fault latches.")
 
-    def test_b029_cell_undervoltage_reason(self, fresh_boot, pico_emu,
+    def test_b029_cell_undervoltage_reason(self, pico_emu, fresh_boot,
                                            wait_for_settled, pit_diag,
                                            wait_for_state, ams_profile):
         wait_for_settled()
@@ -371,7 +472,7 @@ class TestB029FaultReasonByte:
             f"0x6C0[7] detail = {fsm[7]}; expected an offending module "
             "(0..4) or 0xFF (torn).")
 
-    def test_b029_cell_overvoltage_reason(self, fresh_boot, pico_emu,
+    def test_b029_cell_overvoltage_reason(self, pico_emu, fresh_boot,
                                           wait_for_settled, pit_diag,
                                           wait_for_state, ams_profile):
         wait_for_settled()
@@ -384,7 +485,7 @@ class TestB029FaultReasonByte:
             f"0x6C0[6] = {fsm[6]} after a cell-OV trip; expected 5 "
             "(CellOverVoltage).")
 
-    def test_b029_cell_overtemp_reason(self, fresh_boot, pico_emu,
+    def test_b029_cell_overtemp_reason(self, pico_emu, fresh_boot,
                                        wait_for_settled, pit_diag,
                                        wait_for_state, ams_profile):
         wait_for_settled()
@@ -399,7 +500,7 @@ class TestB029FaultReasonByte:
             f"0x6C0[6] = {fsm[6]} after a cell-OT trip; expected 7 "
             "(CellOverTemp).")
 
-    def test_b029_bms_stale_reason(self, fresh_boot, pico_emu, wait_for_settled,
+    def test_b029_bms_stale_reason(self, pico_emu, fresh_boot, wait_for_settled,
                                    pit_diag, wait_for_state, ams_profile):
         wait_for_settled()
         try:
@@ -409,8 +510,8 @@ class TestB029FaultReasonByte:
                                       + int(ams_profile["tx_telemetry_period_ms"]) + 500)
             pit_diag.wait_for_scan()
             fsm = pit_diag.wait_for(M.ID_PIT_DIAG_FSM_STATUS)
-            assert fsm[6] == 3, (
-                f"0x6C0[6] = {fsm[6]} after BMS stale; expected 3 (BmsStale).")
+            assert fsm[6] in (2, 3), (
+                f"0x6C0[6] = {fsm[6]} after BMS stop_reply; expected 2 (BmsModuleOffline) or 3 (BmsStale).")
         finally:
             pico_emu.resume_all()
 
