@@ -917,9 +917,9 @@ class TestD021ManualPartyModeDefaultAndOversteer:
         delta_nom = cur_r_nom - cur_l_nom
         assert delta_nom > 2.0, f"PartyMode manual baseline bias missing: L={cur_l_nom}, R={cur_r_nom}"
 
-        # Oversteer stimulus (plausible): rear slides, yaw spikes to 1.50 rad/s while ay saturates at 10.0 m/s^2
-        # |ay - v_x*r| = |10.0 - 22.5| = 12.5 < 15.0 m/s^2 (IMU remains plausible)
-        diff_stim["set_imu"](yaw=1.50, ay=10.0)
+        # Oversteer stimulus (plausible): yaw spikes to 1.15 rad/s at constant ay=3.3 m/s^2
+        # |ay - v_x*r| = |3.3 - 17.25| = 13.95 < 15.0 m/s^2 (IMU remains plausible, load transfer constant)
+        diff_stim["set_imu"](yaw=1.15, ay=3.3)
         time.sleep(0.25)
         cur_l_over, cur_r_over = _read_dti_currents(observe_inv)
         delta_over = cur_r_over - cur_l_over
