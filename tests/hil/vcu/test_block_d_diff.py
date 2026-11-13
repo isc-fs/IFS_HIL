@@ -27,6 +27,7 @@ accelerations using bench DACs and simulated CAN telemetry:
   D-022 MingoMode on LWS fault: IMU curvature estimation + Virtual LSD without steering sensor
   D-023 PassiveMode on total sensor loss: inverter-only Virtual LSD above min_velocity_mps & 50/50 on jack-stand
   D-024 Full recovery ladder: Passive -> Mingo (LWS recovery) -> Party (debounced IMU recovery)
+  D-025 Stress edge cases: intermittent IMU CAN flapping (<150 ms) and compound LWS+IMU+wheelspin fault
 
 Hardware interfacing:
   - DUT: IFS09-CE-ECU seated in MLC4 carrier slot.
@@ -1037,3 +1038,44 @@ class TestD024PassiveToMingoToPartyRecovery:
         cur_l_pty, cur_r_pty = _read_dti_currents(observe_inv)
         assert cur_r_pty > cur_l_pty + 2.0, f"Mingo -> Party recovery failed: L={cur_l_pty:.2f} A, R={cur_r_pty:.2f} A"
         assert cur_l_pty > 5.0 and cur_r_pty > 5.0, "Recovery caused unexpected torque drop"
+
+
+class TestD025FlappingAndCompoundFault:
+    def test_d025_flapping_and_compound_fault(self, fresh_boot, inv_heartbeat, acu_inject,
+                                              diff_stim, pedals, start_button, pit_diag,
+                                              observe_inv, vcu_profile):
+        """D-025: Stress tests intermittent IMU CAN flapping (<150 ms debounce window) without torque
+        dropouts, followed by simultaneous LWS+IMU loss mid-corner with rear wheelspin."""
+        if _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag,
+                      vcu_profile) != S.ACTIVE:
+            pytest.skip("FSM never reached Active -- check DAC/gates")
+
+        # Establish cornering in PartyMode
+        diff_stim["set_speed_mps"](15.0)
+        diff_stim["set_steering"](25.0, speed=0.0, ok=True, cal=True, trim=True)
+        diff_stim["set_imu"](yaw=0.22, ay=3.3)
+        _apps(pedals, vcu_profile, 50, 50)
+        time.sleep(0.30)
+
+        # 1. Intermittent IMU flapping (<150 ms bursts): must remain smooth in MingoMode
+        for _ in range(3):
+            diff_stim["stop_imu"]()
+            time.sleep(0.08)
+            diff_stim["set_imu"](yaw=0.22, ay=3.3)
+            time.sleep(0.08)
+            cur_l, cur_r = _read_dti_currents(observe_inv)
+            assert cur_l > 5.0 and cur_r > 5.0, f"IMU flapping caused torque dropout: L={cur_l}, R={cur_r}"
+            assert cur_r > cur_l, f"IMU flapping lost outside bias: L={cur_l}, R={cur_r}"
+
+        # 2. Compound simultaneous fault: LWS + IMU both drop mid-corner + right wheelspin (+40% ERPM)
+        erpm_base = _speed_to_erpm(15.0, vcu_profile)
+        diff_stim["stop_steering"]()
+        diff_stim["stop_imu"]()
+        diff_stim["set_erpm"](erpm_base, int(erpm_base * 1.40))
+        time.sleep(0.25)
+
+        cur_l_comp, cur_r_comp = _read_dti_currents(observe_inv)
+        assert cur_l_comp > 5.0 and cur_r_comp > 5.0, "Compound fault must keep drive alive"
+        assert cur_r_comp < cur_l_comp - 0.5, (
+            f"Compound fault PassiveMode failed Virtual LSD trim: L={cur_l_comp:.2f} A, R={cur_r_comp:.2f} A"
+        )
