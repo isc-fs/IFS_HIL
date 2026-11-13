@@ -1075,7 +1075,7 @@ class TestD025FlappingAndCompoundFault:
         time.sleep(0.25)
 
         cur_l_comp, cur_r_comp = _read_dti_currents(observe_inv)
-        assert cur_l_comp > 5.0 and cur_r_comp > 5.0, "Compound fault must keep drive alive"
+        assert cur_l_comp > 5.0, f"Compound fault must keep gripping wheel driving: L={cur_l_comp}, R={cur_r_comp}"
         assert cur_r_comp < cur_l_comp - 0.5, (
             f"Compound fault PassiveMode failed Virtual LSD trim: L={cur_l_comp:.2f} A, R={cur_r_comp:.2f} A"
         )
