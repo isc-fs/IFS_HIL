@@ -554,6 +554,9 @@ class TestD011SteeringSpeedDynamicFeedforward:
             pytest.skip("FSM never reached Active -- check DAC/gates")
 
         diff_stim["set_speed_mps"](15.0)
+        # Dynamic steering-speed feedforward is a MingoMode feature
+        diff_stim["stop_imu"]()
+        time.sleep(0.1)
         # Static turn left at 20 deg, 0 deg/s steering rate
         diff_stim["set_steering"](20.0, speed=0.0, ok=True, cal=True, trim=True)
         _apps(pedals, vcu_profile, 50, 50)
@@ -890,11 +893,14 @@ class TestD020ClosedLoopYawCorrectionReaction:
             f"Understeer reaction failed: nominal={delta_nom:.2f} A, understeer={delta_under:.2f} A"
         )
 
-        # 2. Dynamic turn-in steering stomp (+150 deg/s steering rate)
-        diff_stim["set_steering"](25.0, speed=150.0, ok=True, cal=True, trim=True)
-        time.sleep(0.15)
-        cur_l_dyn, cur_r_dyn = _read_dti_currents(observe_inv)
-        assert cur_r_dyn > cur_r_nom + 0.3, "Dynamic steer speed feedforward failed to boost outside wheel"
+        # 2. Oversteer stimulus: measured yaw spikes to 1.15 rad/s -> PID + spin guard reduces outside bias
+        diff_stim["set_imu"](yaw=1.15, ay=3.3)
+        time.sleep(0.25)
+        cur_l_over, cur_r_over = _read_dti_currents(observe_inv)
+        delta_over = cur_r_over - cur_l_over
+        assert delta_over < delta_nom - 0.3, (
+            f"Oversteer stabilization failed: nom={delta_nom:.2f} A, over={delta_over:.2f} A"
+        )
 
 
 class TestD021ManualPartyModeDefaultAndOversteer:
