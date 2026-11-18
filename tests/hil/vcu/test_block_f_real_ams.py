@@ -124,7 +124,7 @@ class TestF006RealAmsFaultInhibitsEcu:
 
         try:
             pico.set_all_cells(3600)
-            pico.set_all_temps(25.0)
+            pico.set_all_temps(250)   # deci-Celsius (25.0 C)
             # Wait past AMS boot grace + first poll + debounce
             time.sleep(3.5)
 

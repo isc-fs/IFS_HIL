@@ -86,7 +86,7 @@ class TestF003StaleFailSafe:
                                        observe_inv, vcu_profile):
         """F-003: stopping all AMS frames (0x020/0x4A0/0x12C) while Active lapses
         AMS-fresh within 200 ms, drops ok_precharge, leaves Active, and cuts torque."""
-        inv_heartbeat["vdc_ready"]()
+        inv_heartbeat["vdc_ready"](500)
         acu_inject["set_precharge"](1)
         acu_inject["set_ams_state"](3)
         acu_inject["set_v_cell"](3600)
@@ -103,7 +103,7 @@ class TestF003StaleFailSafe:
         lo2, hi2 = int(vcu_profile["apps2_adc_min"]), int(vcu_profile["apps2_adc_max"])
         pedals["set_apps1"](int(lo1 + 0.50 * (hi1 - lo1)))
         pedals["set_apps2"](int(lo2 + 0.50 * (hi2 - lo2)))
-        time.sleep(0.4)
+        time.sleep(0.5)
 
         base_torq = _read_drive_torque(observe_inv)
         assert base_torq is not None and base_torq > 5.0, \
@@ -132,7 +132,7 @@ class TestF004LowCellDerate:
                                           vcu_profile):
         """F-004: 0x12C v_cell_min <= CellVRawFloorMv (2850 mV) caps torque to
         CellVDerateFloorPct (13% / ~20 Nm), and recovers when cell voltage returns."""
-        inv_heartbeat["vdc_ready"]()
+        inv_heartbeat["vdc_ready"](500)
         acu_inject["set_precharge"](1)
         acu_inject["set_ams_state"](3)
         acu_inject["set_v_cell"](3600)
