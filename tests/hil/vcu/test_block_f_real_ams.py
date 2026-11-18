@@ -41,7 +41,14 @@ def real_ams(mlc_powered):
     c.close()
     if mA < 50:
         pytest.skip(f"AMS not drawing current on MLC2 ({mA:.0f} mA) -- not seated?")
-    return {"current_mA": mA}
+    try:
+        yield {"current_mA": mA}
+    finally:
+        c = _broker()
+        try:
+            c.call("tca.write_pin", addr=0x20, port=0, pin=AMS_RELAY_PIN, value=False)
+        finally:
+            c.close()
 
 
 def _wait_fsm(pit_diag, pred, timeout_s):
