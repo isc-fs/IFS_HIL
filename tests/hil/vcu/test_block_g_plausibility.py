@@ -120,3 +120,28 @@ class TestG003ImplausibleApps:
         time.sleep(0.4)
         assert abs(_torque(observe_inv) or 0) <= 2, \
             f"torque {_torque(observe_inv)} commanded on a failed/low APPS"
+
+
+class TestG004AppsTransientGlitch:
+    def test_g004_t11_8_9_transient_glitch_no_trip(self, fresh_boot, inv_heartbeat, acu_inject,
+                                                     pedals, start_button, pit_diag, observe_acu,
+                                                     observe_inv, vcu_profile):
+        """G-004: T.11.8.9 100 ms persistence window rejects a brief (< 60 ms) APPS
+        disagreement glitch without latching t11_8_9 or cutting torque."""
+        if _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag,
+                      vcu_profile) != S.ACTIVE:
+            pytest.skip("FSM never reached Active -- check DAC/gates")
+        _apps(pedals, vcu_profile, 60, 60)
+        time.sleep(0.35)
+        assert abs(_torque(observe_inv) or 0) > 10, "baseline torque missing"
+
+        # Brief 50 ms disagreement (< 100 ms T.11.8.9 debounce)
+        _apps(pedals, vcu_profile, 80, 40)
+        time.sleep(0.05)
+        _apps(pedals, vcu_profile, 60, 60)
+        time.sleep(0.25)
+
+        assert not (_flags(observe_acu) & M.PIT_FLAG_T11_8_9), \
+            "t11_8_9 latched on transient <100 ms APPS glitch"
+        assert abs(_torque(observe_inv) or 0) > 10, \
+            f"torque unexpectedly cut after transient APPS glitch: {_torque(observe_inv)}"

@@ -1079,3 +1079,155 @@ class TestD025FlappingAndCompoundFault:
         assert cur_r_comp < cur_l_comp - 0.5, (
             f"Compound fault PassiveMode failed Virtual LSD trim: L={cur_l_comp:.2f} A, R={cur_r_comp:.2f} A"
         )
+
+
+class TestD026SteeringSpeedDirectionality:
+    def test_d026_steering_speed_sign_and_static_decay(self, fresh_boot, inv_heartbeat, acu_inject,
+                                                       diff_stim, pedals, start_button, pit_diag,
+                                                       observe_inv, vcu_profile):
+        """D-026: Verifies steering angular velocity feedforward directionality on 0x2B0:
+        turning into a left corner (positive angle_delta + speed) boosts outside bias
+        relative to static hold, and reversing direction (negative angle_delta) reduces it."""
+        if _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag,
+                      vcu_profile) != S.ACTIVE:
+            pytest.skip("FSM never reached Active -- check DAC/gates")
+
+        diff_stim["set_speed_mps"](15.0)
+        diff_stim["set_imu"](yaw=0.22, ay=3.3)
+        diff_stim["set_steering"](25.0, speed=0.0, ok=True, cal=True, trim=True)
+        _apps(pedals, vcu_profile, 50, 50)
+        time.sleep(0.35)
+
+        cur_l_stat, cur_r_stat = _read_dti_currents(observe_inv)
+        delta_stat = cur_r_stat - cur_l_stat
+        assert delta_stat > 2.0, f"Static cornering baseline missing: L={cur_l_stat}, R={cur_r_stat}"
+
+        # Positive angle_delta (25 -> 28 deg) with high steering rate (350 deg/s)
+        diff_stim["set_steering"](28.0, speed=350.0, ok=True, cal=True, trim=True)
+        time.sleep(0.12)
+        cur_l_in, cur_r_in = _read_dti_currents(observe_inv)
+        delta_in = cur_r_in - cur_l_in
+        assert delta_in > delta_stat + 0.3, (
+            f"Positive turn-in steering speed did not boost outside bias: stat={delta_stat:.2f}, in={delta_in:.2f}"
+        )
+
+        # Negative angle_delta (28 -> 20 deg) with steering rate (350 deg/s) -> counter-bias
+        diff_stim["set_steering"](20.0, speed=350.0, ok=True, cal=True, trim=True)
+        time.sleep(0.12)
+        cur_l_out, cur_r_out = _read_dti_currents(observe_inv)
+        delta_out = cur_r_out - cur_l_out
+        assert delta_out < delta_in - 0.5, (
+            f"Negative unwind steering speed did not reduce bias: in={delta_in:.2f}, out={delta_out:.2f}"
+        )
+
+
+class TestD027CrossBusLwsImuRx:
+    def test_d027_lws_and_imu_on_inv_bus_cross_bus_rx(self, fresh_boot, inv_heartbeat, acu_inject,
+                                                       diff_stim, pedals, start_button, pit_diag,
+                                                       observe_inv, vcu_profile):
+        """D-027: Verifies vehicle_service cross-bus RX -- LWS (0x2B0) and IMU (0x201)
+        received on the Inverter bus (can0) instead of ACU bus (can2) still engage
+        PartyMode torque vectoring."""
+        import threading
+        from tools.firmware_test.acu_stim import AcuStim
+
+        if _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag,
+                      vcu_profile) != S.ACTIVE:
+            pytest.skip("FSM never reached Active -- check DAC/gates")
+
+        # Silence LWS/IMU on ACU bus, keep DTI ERPM on INV bus
+        diff_stim["stop_steering"]()
+        diff_stim["stop_imu"]()
+        diff_stim["set_speed_mps"](15.0)
+        _apps(pedals, vcu_profile, 50, 50)
+
+        inv_stim = AcuStim(channel=vcu_profile["bus_inv"])
+        inv_stim.start()
+        run_flag = {"on": True}
+
+        def inv_sensor_loop():
+            p_lws = M.encode_lws_standard(28.0, 0.0, ok=True, cal=True, trim=True)
+            p_imu = M.encode_xsens_imu(0.24, 3.5, 0.0)
+            while run_flag["on"]:
+                try:
+                    inv_stim.send_raw(M.ID_LWS_STANDARD, p_lws, is_extended_id=False)
+                    inv_stim.send_raw(M.ID_XSENS_IMU, p_imu, is_extended_id=False)
+                except Exception:
+                    pass
+                time.sleep(0.015)
+
+        th = threading.Thread(target=inv_sensor_loop, daemon=True)
+        th.start()
+        try:
+            time.sleep(0.35)
+            cur_l, cur_r = _read_dti_currents(observe_inv)
+            assert cur_r > cur_l + 2.0, (
+                f"Cross-bus LWS+IMU on INV bus failed to engage PartyMode bias: L={cur_l:.2f} A, R={cur_r:.2f} A"
+            )
+        finally:
+            run_flag["on"] = False
+            time.sleep(0.05)
+            inv_stim.stop()
+
+
+class TestD028DvModeElectronicDifferential:
+    def test_d028_dv_mode_electronic_differential(self, fresh_boot, inv_heartbeat, acu_inject,
+                                                  udv_inject, diff_stim, pedals, pit_diag,
+                                                  observe_inv, vcu_profile):
+        """D-028: Enters Autonomous/DV ACTIVE via 0x510 + hard brake, commands 50%
+        torque via 0x507 while cornering -> verifies PartyMode outside bias, then
+        drops LWS+IMU -> verifies PassiveMode symmetric drive."""
+        inv_heartbeat["vdc_ready"](500)
+        acu_inject["set_precharge"](1)
+        acu_inject["set_ams_state"](3)
+        acu_inject["set_v_cell"](3600)
+        if _wait_fsm(pit_diag, lambda s: s >= S.WAIT_START_BRAKE, 4.0) is None:
+            pytest.skip("FSM never reached WAIT_START_BRAKE -- check DAC/gates")
+
+        pedals["set_brake"](int(vcu_profile["brake_dv_hard_raw"]) + 200)
+        udv_inject["set_r2d"](1)
+        inv_heartbeat["set_state"](int(vcu_profile["inv_state_ready"]))
+        if _wait_fsm(pit_diag, lambda s: s == S.ACTIVE,
+                     float(vcu_profile["r2d_delay_ms"]) / 1000.0 + 5.0) != S.ACTIVE:
+            pytest.skip("FSM never reached DV ACTIVE -- check DAC/gates")
+
+        pedals["set_brake"](0)
+        diff_stim["set_speed_mps"](15.0)
+        diff_stim["set_steering"](25.0, speed=0.0, ok=True, cal=True, trim=True)
+        diff_stim["set_imu"](yaw=0.22, ay=3.3)
+        udv_inject["set_torque"](50)
+        time.sleep(0.35)
+
+        cur_l, cur_r = _read_dti_currents(observe_inv)
+        assert cur_l > 5.0 and cur_r > 5.0, f"DV torque missing: L={cur_l}, R={cur_r}"
+        assert cur_r > cur_l + 2.0, f"DV PartyMode outside bias missing: L={cur_l:.2f} A, R={cur_r:.2f} A"
+
+        # Drop LWS + IMU in DV mode -> PassiveMode symmetric drive
+        diff_stim["stop_steering"]()
+        diff_stim["stop_imu"]()
+        time.sleep(0.25)
+        cur_l_p, cur_r_p = _read_dti_currents(observe_inv)
+        assert cur_l_p > 5.0 and cur_r_p > 5.0, "DV PassiveMode dropped torque"
+        assert abs(cur_l_p - cur_r_p) < 1.0, f"DV PassiveMode not symmetric: L={cur_l_p:.2f} A, R={cur_r_p:.2f} A"
+
+
+class TestD029TrailBrakingTorqueVectoring:
+    def test_d029_trail_braking_preserves_torque_vectoring(self, fresh_boot, inv_heartbeat, acu_inject,
+                                                           diff_stim, pedals, start_button, pit_diag,
+                                                           observe_inv, vcu_profile):
+        """D-029: With EV.2.3 retired, simultaneous heavy brake (> BrakePressedRaw) +
+        APPS in a corner preserves PartyMode outside-wheel torque vectoring."""
+        if _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag,
+                      vcu_profile) != S.ACTIVE:
+            pytest.skip("FSM never reached Active -- check DAC/gates")
+
+        diff_stim["set_speed_mps"](15.0)
+        diff_stim["set_steering"](25.0, speed=0.0, ok=True, cal=True, trim=True)
+        diff_stim["set_imu"](yaw=0.22, ay=3.3)
+        _apps(pedals, vcu_profile, 50, 50)
+        pedals["set_brake"](int(vcu_profile["brake_apps_raw"]) + 400)
+        time.sleep(0.35)
+
+        cur_l, cur_r = _read_dti_currents(observe_inv)
+        assert cur_l > 5.0 and cur_r > 5.0, f"Trail-braking cut drive torque: L={cur_l}, R={cur_r}"
+        assert cur_r > cur_l + 1.5, f"Trail-braking lost cornering TV bias: L={cur_l:.2f} A, R={cur_r:.2f} A"

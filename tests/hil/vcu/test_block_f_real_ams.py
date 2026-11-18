@@ -106,3 +106,48 @@ class TestF004AmsStaleFailsafe:
         finally:
             c.call("tca.write_pin", addr=0x20, port=0, pin=AMS_RELAY_PIN, value=True)   # restore
             c.close()
+
+
+class TestF006RealAmsFaultInhibitsEcu:
+    def test_f006_real_ams_fault_inhibits_ecu(self, real_ams, fresh_boot, inv_heartbeat,
+                                              pit_diag, observe_acu, observe_inv):
+        """F-006: closed-loop AMS + ECU fault propagation — inject a real cell
+        overvoltage on the Pico LTC emulator -> live AMS (MLC2) trips to Error
+        (0x4A0[0]=5) -> ECU (MLC4) enters AmsError and commands zero torque."""
+        from tools.pico_ltc_emulator.host.pico_ltc_client import PicoLtcClient
+        try:
+            pico = PicoLtcClient()
+        except Exception as e:
+            pytest.skip(f"Pico LTC emulator unavailable for closed-loop fault: {e}")
+
+        try:
+            pico.set_all_cells(3600)
+            pico.set_all_temps(25.0)
+            # Wait past AMS boot grace + first poll + debounce
+            time.sleep(3.5)
+
+            # Inject cell overvoltage (4250 mV > 4200 mV) into the live AMS
+            pico.set_all_cells(4250)
+            deadline = time.monotonic() + 5.0
+            ams_err = False
+            while time.monotonic() < deadline:
+                f0 = observe_acu.last(0x4A0, extended=False)
+                if f0 is not None and f0.data[0] == 5:
+                    ams_err = True
+                    break
+                time.sleep(0.05)
+            assert ams_err, "live AMS did not trip to Error (0x4A0[0]=5) on 4250 mV OV"
+
+            # ECU must enter AmsError (6) and command zero torque
+            s = _wait_fsm(pit_diag, lambda v: v == int(M.VcuFsmState.AMS_ERROR), 3.0)
+            assert s == int(M.VcuFsmState.AMS_ERROR), \
+                f"ECU FSM={M.VcuFsmState.name_of(s)} instead of AmsError after live AMS fault"
+            f_t = observe_inv.last(M.ID_INV_TORQUE, extended=False)
+            if f_t is not None:
+                assert abs(M.decode_inv_torque(f_t.data)["torque_nm"]) <= 2
+        finally:
+            try:
+                pico.set_all_cells(3600)
+                pico.close()
+            except Exception:
+                pass
