@@ -177,7 +177,7 @@ class TestF005AmsSessionGuard:
                                             vcu_profile):
         """F-005: mid-run 0x4A0[3] session_id change (AMS reboot guard) de-arms ECU
         out of Active and cuts torque to zero."""
-        inv_heartbeat["vdc_ready"]()
+        inv_heartbeat["vdc_ready"](500)
         acu_inject["set_precharge"](1)
         acu_inject["set_ams_state"](3)
         acu_inject["set_session"](1)
@@ -195,12 +195,12 @@ class TestF005AmsSessionGuard:
         lo2, hi2 = int(vcu_profile["apps2_adc_min"]), int(vcu_profile["apps2_adc_max"])
         pedals["set_apps1"](int(lo1 + 0.50 * (hi1 - lo1)))
         pedals["set_apps2"](int(lo2 + 0.50 * (hi2 - lo2)))
-        time.sleep(0.4)
+        time.sleep(0.5)
 
         # Simulate AMS reboot with new session ID
         acu_inject["set_session"](2)
         s = _wait_fsm(pit_diag, lambda v: v != int(M.VcuFsmState.ACTIVE), 2.0)
         assert s != int(M.VcuFsmState.ACTIVE), "ECU remained ACTIVE after AMS session_id changed"
-        f_torq = observe_inv.last(M.ID_INV_TORQUE, extended=False)
-        assert f_torq is not None and abs(M.decode_inv_torque(f_torq.data)["torque_nm"]) <= 2, \
-            "non-zero torque after AMS session_id change"
+        after_torq = _read_drive_torque(observe_inv)
+        assert after_torq is not None and after_torq <= 2.0, \
+            f"non-zero torque after AMS session_id change: {after_torq}"

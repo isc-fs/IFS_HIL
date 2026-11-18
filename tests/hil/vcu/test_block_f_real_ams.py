@@ -19,6 +19,7 @@ import time
 import pytest
 
 from tools.firmware_test.vcu import can_map as M
+from tests.hil.vcu.test_block_f_ams import _read_drive_torque
 
 AMS_RELAY_PIN = 1   # K2 = TCA 0x20 port0 pin1 = MLC2 (AMS)
 PRECHARGE = 1       # CtrlState::Precharge
@@ -151,9 +152,9 @@ class TestF006RealAmsFaultInhibitsEcu:
             s = _wait_fsm(pit_diag, lambda v: v == int(M.VcuFsmState.AMS_ERROR), 3.0)
             assert s == int(M.VcuFsmState.AMS_ERROR), \
                 f"ECU FSM={M.VcuFsmState.name_of(s)} instead of AmsError after live AMS fault"
-            f_t = observe_inv.last(M.ID_INV_TORQUE, extended=False)
-            if f_t is not None:
-                assert abs(M.decode_inv_torque(f_t.data)["torque_nm"]) <= 2
+            torq = _read_drive_torque(observe_inv)
+            if torq is not None:
+                assert torq <= 2.0, f"non-zero torque after live AMS fault: {torq}"
         finally:
             try:
                 pico.set_all_cells(3600)
