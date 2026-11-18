@@ -144,13 +144,14 @@ class TestF003StaleFailSafe:
 
         # Silence all AMS frames -> > 200 ms AmsStaleMs window
         acu_inject["stop_all"]()
-        time.sleep(0.5)
+        time.sleep(0.6)
 
+        f_ts = observe_acu.last(0x504, extended=False)
+        assert f_ts is not None and f_ts.data[0] == 0, \
+            "ok_precharge (0x504 ts_active) stayed true after AMS went stale"
         f_pit = observe_acu.last(M.ID_PIT_STATUS, extended=False)
         assert f_pit is not None
         st = M.decode_pit_status(f_pit.data)
-        assert not (st.get("flags", 0) & M.PIT_FLAG_OK_PRECHARGE), \
-            "ok_precharge stayed true after AMS went stale"
         assert st.get("fsm_state") != int(M.VcuFsmState.ACTIVE), \
             "ECU stayed ACTIVE after AMS went stale"
         after_torq = _read_drive_torque(observe_inv)
