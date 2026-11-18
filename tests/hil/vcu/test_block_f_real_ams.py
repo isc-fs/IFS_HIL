@@ -117,6 +117,8 @@ class TestF006RealAmsFaultInhibitsEcu:
         from tools.pico_ltc_emulator.host.pico_ltc_client import PicoLtcClient
         try:
             pico = PicoLtcClient()
+            pico.open()
+            pico.ping()
         except Exception as e:
             pytest.skip(f"Pico LTC emulator unavailable for closed-loop fault: {e}")
 

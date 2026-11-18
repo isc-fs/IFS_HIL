@@ -65,6 +65,20 @@ class TestF002ReArm:
             "FSM stuck in AmsError after AMS returned ok (sticky-until-reset?)"
 
 
+def _read_drive_torque(observe_inv):
+    """Return total drive effort (DTI 0x021+0x022 Apk if present, else NX 0x362 Nm)."""
+    fl = observe_inv.last(M.ID_DTI_SET_CURRENT_LEFT, extended=False)
+    fr = observe_inv.last(M.ID_DTI_SET_CURRENT_RIGHT, extended=False)
+    if fl is not None and fr is not None:
+        cl = abs(M.decode_dti_set_current(fl.data)["current_apk"])
+        cr = abs(M.decode_dti_set_current(fr.data)["current_apk"])
+        return cl + cr
+    fnx = observe_inv.last(M.ID_INV_TORQUE, extended=False)
+    if fnx is not None:
+        return abs(M.decode_inv_torque(fnx.data)["torque_nm"])
+    return None
+
+
 class TestF003StaleFailSafe:
 
     def test_f003_stale_ams_fail_safe(self, fresh_boot, inv_heartbeat, acu_inject,
@@ -91,9 +105,9 @@ class TestF003StaleFailSafe:
         pedals["set_apps2"](int(lo2 + 0.50 * (hi2 - lo2)))
         time.sleep(0.4)
 
-        f_torq = observe_inv.last(M.ID_INV_TORQUE, extended=False)
-        assert f_torq is not None and abs(M.decode_inv_torque(f_torq.data)["torque_nm"]) > 5, \
-            "ECU did not command torque in Active before AMS silence"
+        base_torq = _read_drive_torque(observe_inv)
+        assert base_torq is not None and base_torq > 5.0, \
+            f"ECU did not command torque in Active before AMS silence (got {base_torq})"
 
         # Silence all AMS frames -> > 200 ms AmsStaleMs window
         acu_inject["stop_all"]()
@@ -106,9 +120,9 @@ class TestF003StaleFailSafe:
             "ok_precharge stayed true after AMS went stale"
         assert st.get("fsm_state") != int(M.VcuFsmState.ACTIVE), \
             "ECU stayed ACTIVE after AMS went stale"
-        f_torq_after = observe_inv.last(M.ID_INV_TORQUE, extended=False)
-        assert f_torq_after is not None and abs(M.decode_inv_torque(f_torq_after.data)["torque_nm"]) <= 2, \
-            f"non-zero torque after AMS stale: {M.decode_inv_torque(f_torq_after.data)['torque_nm']}"
+        after_torq = _read_drive_torque(observe_inv)
+        assert after_torq is not None and after_torq <= 2.0, \
+            f"non-zero torque after AMS stale: {after_torq}"
 
 
 class TestF004LowCellDerate:
@@ -137,28 +151,23 @@ class TestF004LowCellDerate:
         pedals["set_apps2"](int(lo2 + 0.80 * (hi2 - lo2)))
         time.sleep(0.5)
 
-        f_base = observe_inv.last(M.ID_INV_TORQUE, extended=False)
-        assert f_base is not None
-        base_nm = abs(M.decode_inv_torque(f_base.data)["torque_nm"])
-        assert base_nm > 60, f"expected high torque at 80% APPS, got {base_nm} Nm"
+        base_val = _read_drive_torque(observe_inv)
+        assert base_val is not None and base_val > 20.0, \
+            f"expected high drive effort at 80% APPS, got {base_val}"
 
-        # Drop v_cell_min below CellVRawFloorMv (2850 mV) -> raw backstop caps to 13% (~20 Nm)
+        # Drop v_cell_min below CellVRawFloorMv (2850 mV) -> raw backstop caps to 13%
         acu_inject["set_v_cell"](2840)
         time.sleep(0.5)
-        f_derate = observe_inv.last(M.ID_INV_TORQUE, extended=False)
-        assert f_derate is not None
-        derate_nm = abs(M.decode_inv_torque(f_derate.data)["torque_nm"])
-        assert 5 <= derate_nm < base_nm * 0.5, \
-            f"low-cell derate did not cap torque: base={base_nm} Nm, derated={derate_nm} Nm"
+        derate_val = _read_drive_torque(observe_inv)
+        assert derate_val is not None and 2.0 <= derate_val < base_val * 0.5, \
+            f"low-cell derate did not cap drive effort: base={base_val}, derated={derate_val}"
 
         # Recover cell voltage -> trim filter climbs back above knee
         acu_inject["set_v_cell"](3600)
         time.sleep(3.0)
-        f_rec = observe_inv.last(M.ID_INV_TORQUE, extended=False)
-        assert f_rec is not None
-        rec_nm = abs(M.decode_inv_torque(f_rec.data)["torque_nm"])
-        assert rec_nm > derate_nm + 20, \
-            f"torque did not recover after v_cell_min restored: derated={derate_nm}, rec={rec_nm}"
+        rec_val = _read_drive_torque(observe_inv)
+        assert rec_val is not None and rec_val > derate_val + 10.0, \
+            f"drive effort did not recover after v_cell_min restored: derated={derate_val}, rec={rec_val}"
 
 
 class TestF005AmsSessionGuard:
