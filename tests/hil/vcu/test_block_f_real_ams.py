@@ -19,6 +19,7 @@ import time
 import pytest
 
 from tools.firmware_test.vcu import can_map as M
+from tests.hil.vcu.test_block_f_ams import _read_drive_torque
 
 AMS_RELAY_PIN = 1   # K2 = TCA 0x20 port0 pin1 = MLC2 (AMS)
 PRECHARGE = 1       # CtrlState::Precharge
@@ -41,7 +42,14 @@ def real_ams(mlc_powered):
     c.close()
     if mA < 50:
         pytest.skip(f"AMS not drawing current on MLC2 ({mA:.0f} mA) -- not seated?")
-    return {"current_mA": mA}
+    try:
+        yield {"current_mA": mA}
+    finally:
+        c = _broker()
+        try:
+            c.call("tca.write_pin", addr=0x20, port=0, pin=AMS_RELAY_PIN, value=False)
+        finally:
+            c.close()
 
 
 def _wait_fsm(pit_diag, pred, timeout_s):
@@ -106,3 +114,50 @@ class TestF004AmsStaleFailsafe:
         finally:
             c.call("tca.write_pin", addr=0x20, port=0, pin=AMS_RELAY_PIN, value=True)   # restore
             c.close()
+
+
+class TestF006RealAmsFaultInhibitsEcu:
+    def test_f006_real_ams_fault_inhibits_ecu(self, real_ams, fresh_boot, inv_heartbeat,
+                                              pit_diag, observe_acu, observe_inv):
+        """F-006: closed-loop AMS + ECU fault propagation — inject a real cell
+        overvoltage on the Pico LTC emulator -> live AMS (MLC2) trips to Error
+        (0x4A0[0]=5) -> ECU (MLC4) enters AmsError and commands zero torque."""
+        from tools.pico_ltc_emulator.host.pico_ltc_client import PicoLtcClient
+        try:
+            pico = PicoLtcClient()
+            pico.open()
+            pico.ping()
+        except Exception as e:
+            pytest.skip(f"Pico LTC emulator unavailable for closed-loop fault: {e}")
+
+        try:
+            pico.set_all_cells(3600)
+            pico.set_all_temps(250)   # deci-Celsius (25.0 C)
+            # Wait past AMS boot grace + first poll + debounce
+            time.sleep(3.5)
+
+            # Inject cell overvoltage (4250 mV > 4200 mV) into the live AMS
+            pico.set_all_cells(4250)
+            deadline = time.monotonic() + 5.0
+            ams_err = False
+            while time.monotonic() < deadline:
+                f0 = observe_acu.last(0x4A0, extended=False)
+                if f0 is not None and f0.data[0] == 5:
+                    ams_err = True
+                    break
+                time.sleep(0.05)
+            assert ams_err, "live AMS did not trip to Error (0x4A0[0]=5) on 4250 mV OV"
+
+            # ECU must enter AmsError (6) and command zero torque
+            s = _wait_fsm(pit_diag, lambda v: v == int(M.VcuFsmState.AMS_ERROR), 3.0)
+            assert s == int(M.VcuFsmState.AMS_ERROR), \
+                f"ECU FSM={M.VcuFsmState.name_of(s)} instead of AmsError after live AMS fault"
+            torq = _read_drive_torque(observe_inv)
+            if torq is not None:
+                assert torq <= 2.0, f"non-zero torque after live AMS fault: {torq}"
+        finally:
+            try:
+                pico.set_all_cells(3600)
+                pico.close()
+            except Exception:
+                pass

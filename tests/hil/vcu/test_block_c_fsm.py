@@ -43,7 +43,7 @@ class TestC001VdcConfigGate:
             pytest.skip("no pit-diag 0x700 on the configured bus -- confirm pit_diag_bus")
         assert held == S.WAIT_INV_VDC_CONFIG, \
             f"expected WAIT_INV_VDC_CONFIG, got {S.name_of(held)}"
-        inv_heartbeat["vdc_ready"]()
+        inv_heartbeat["vdc_ready"](500)
         adv = _wait_fsm(pit_diag, lambda s: s != S.WAIT_INV_VDC_CONFIG, 3.0)
         assert adv != S.WAIT_INV_VDC_CONFIG, "FSM did not leave WAIT_INV_VDC_CONFIG after 0x466"
 
@@ -53,7 +53,7 @@ class TestC002PrechargeGate:
                                       acu_inject, pit_diag):
         """C-002: past the vdc gate, the FSM does NOT reach WAIT_START_BRAKE
         without ok_precarga; it advances once 0x020[0]=1."""
-        inv_heartbeat["vdc_ready"]()
+        inv_heartbeat["vdc_ready"](500)
         stuck = _wait_fsm(pit_diag, lambda s: s >= S.WAIT_START_BRAKE, 2.5)
         if stuck is None:
             pytest.skip("no pit-diag 0x700 -- confirm pit_diag_bus")
@@ -73,7 +73,7 @@ class TestC004ReachesActive:
         inv_state==InvReadyState(4) drives the FSM all the way to ACTIVE.
         WaitInvStandby→Active gates on inv_state==4 (control.cpp), NOT the
         standby value 3 — feeding 3 stalls the FSM one step short."""
-        inv_heartbeat["vdc_ready"]()
+        inv_heartbeat["vdc_ready"](500)
         acu_inject["set_precharge"](1)
         if _wait_fsm(pit_diag, lambda s: s >= S.WAIT_START_BRAKE, 4.0) is None:
             pytest.skip("FSM never reached WAIT_START_BRAKE -- confirm pit-diag bus / gates")
@@ -92,3 +92,23 @@ class TestC005FsmObservable:
         if s is None:
             pytest.skip("no pit-diag 0x700 -- confirm pit_diag_bus")
         assert 0 <= s <= int(S.ACTIVE), f"0x700[0]={s} not a valid FSM state"
+
+
+class TestC006R2dRequiresBrake:
+    def test_c006_r2d_refused_without_brake(self, fresh_boot, inv_heartbeat,
+                                            acu_inject, pedals, start_button,
+                                            pit_diag):
+        """C-006 (FS EV.4.11): pressing Start in WAIT_START_BRAKE with brake=0
+        must NOT advance to R2D_DELAY or ACTIVE."""
+        inv_heartbeat["vdc_ready"](500)
+        acu_inject["set_precharge"](1)
+        acu_inject["set_ams_state"](3)
+        acu_inject["set_v_cell"](3600)
+        if _wait_fsm(pit_diag, lambda s: s == S.WAIT_START_BRAKE, 4.0) != S.WAIT_START_BRAKE:
+            pytest.skip("FSM never reached WAIT_START_BRAKE -- DAC/gates")
+        pedals["set_brake"](0)
+        start_button["press"]()
+        time.sleep(1.0)
+        s = pit_diag["read_fsm"](0.5)
+        assert s == S.WAIT_START_BRAKE, \
+            f"FSM left WAIT_START_BRAKE ({S.name_of(s)}) without brake pressed!"

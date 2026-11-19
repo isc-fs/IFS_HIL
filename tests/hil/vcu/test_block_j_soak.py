@@ -193,3 +193,121 @@ class TestJ002ReflashEndurance:
                         break
                     time.sleep(0.05)
             assert booted, f"cycle {i}: app didn't stream 0x100 after flash"
+
+
+class TestJ003ContinuousDiffEnduranceSoak:
+    def test_j003_continuous_diff_and_fault_soak(self, fresh_boot, inv_heartbeat, acu_inject,
+                                                 pedals, start_button, pit_diag,
+                                                 observe_acu, observe_inv, vcu_profile):
+        """J-003 (FS Endurance): Continuously cycles slalom cornering, trail-braking,
+        IMU dropout/recovery, and wheelspin Virtual LSD for VCU_ENDURANCE_S (default 180s)
+        while verifying 0x100 heartbeat, ACTIVE FSM stability, and zero resets."""
+        import math
+        import threading
+        from tools.firmware_test.acu_stim import AcuStim
+
+        dur_s = float(os.environ.get("VCU_ENDURANCE_S", "180"))
+        inv_heartbeat["vdc_ready"](500)
+        acu_inject["set_precharge"](1)
+        acu_inject["set_ams_state"](3)
+        acu_inject["set_v_cell"](3600)
+        if _wait_fsm(pit_diag, lambda s: s >= S.WAIT_START_BRAKE, 4.0) is None:
+            pytest.skip("FSM never reached WAIT_START_BRAKE -- DAC/gates")
+        pedals["set_brake"](int(vcu_profile["brake_arm_raw"]) + 200)
+        start_button["press"]()
+        inv_heartbeat["set_state"](int(vcu_profile["inv_state_ready"]))
+        if _wait_fsm(pit_diag, lambda s: s == S.ACTIVE,
+                     float(vcu_profile["r2d_delay_ms"]) / 1000.0 + 5.0) != S.ACTIVE:
+            pytest.skip("FSM never reached Active -- DAC/gates")
+        pedals["set_brake"](0)
+
+        h0 = _health(observe_acu)
+        if h0 is None:
+            pytest.skip("no 0x704 health frame")
+        rc0 = h0["reset_cause"]
+
+        stim_acu = AcuStim(channel=vcu_profile["bus_acu"])
+        stim_inv = AcuStim(channel=vcu_profile["bus_inv"])
+        stim_acu.start()
+        stim_inv.start()
+        st = {"run": True, "angle": 0.0, "yaw": 0.0, "ay": 0.0, "send_imu": True,
+              "erpm_l": 12000, "erpm_r": 12000}
+
+        def stim_loop():
+            while st["run"]:
+                try:
+                    stim_acu.send_raw(
+                        M.ID_LWS_STANDARD,
+                        M.encode_lws_standard(st["angle"], 0.0, ok=True, cal=True, trim=True),
+                        is_extended_id=False,
+                    )
+                    if st["send_imu"]:
+                        stim_acu.send_raw(
+                            M.ID_XSENS_IMU,
+                            M.encode_xsens_imu(st["yaw"], st["ay"], 0.0),
+                            is_extended_id=False,
+                        )
+                    stim_inv.send_raw(
+                        M.ID_DTI_ERPM_LEFT,
+                        M.encode_dti_erpm(st["erpm_l"], input_voltage_v=500.0),
+                        is_extended_id=False,
+                    )
+                    stim_inv.send_raw(
+                        M.ID_DTI_ERPM_RIGHT,
+                        M.encode_dti_erpm(st["erpm_r"], input_voltage_v=500.0),
+                        is_extended_id=False,
+                    )
+                except Exception:
+                    pass
+                time.sleep(0.015)
+
+        th = threading.Thread(target=stim_loop, daemon=True)
+        th.start()
+        try:
+            deadline = time.monotonic() + dur_s
+            step = 0
+            while time.monotonic() < deadline:
+                phase = step % 6
+                if phase in (0, 1):
+                    # Left / Right slalom cornering + varying APPS
+                    ang = 25.0 if phase == 0 else -25.0
+                    st.update(angle=ang, yaw=0.22 * (1 if phase == 0 else -1),
+                              ay=3.3 * (1 if phase == 0 else -1), send_imu=True,
+                              erpm_l=12000, erpm_r=12000)
+                    pedals["set_brake"](0)
+                    _apps(pedals, vcu_profile, 55)
+                elif phase == 2:
+                    # Trail-braking in corner
+                    pedals["set_brake"](int(vcu_profile["brake_apps_raw"]) + 300)
+                    _apps(pedals, vcu_profile, 45)
+                elif phase == 3:
+                    # IMU dropout -> MingoMode fallback
+                    pedals["set_brake"](0)
+                    st.update(send_imu=False)
+                elif phase == 4:
+                    # Wheelspin +40% right -> Virtual LSD trim
+                    st.update(send_imu=True, erpm_l=12000, erpm_r=16800)
+                else:
+                    # Zero-pedal lift-off
+                    _apps(pedals, vcu_profile, 0)
+                    st.update(angle=0.0, yaw=0.0, ay=0.0, erpm_l=12000, erpm_r=12000)
+
+                time.sleep(1.0)
+                step += 1
+
+                assert observe_acu.last(M.ID_HEARTBEAT, extended=False) is not None, \
+                    f"0x100 heartbeat lost at step {step}"
+                fsm = pit_diag["read_fsm"](0.4)
+                assert fsm == S.ACTIVE, f"FSM left ACTIVE ({S.name_of(fsm)}) at step {step}"
+                h = _health(observe_acu)
+                assert h is not None and h["reset_cause"] == rc0, \
+                    f"reset_cause changed during endurance soak at step {step}"
+                fl = observe_inv.last(M.ID_DTI_SET_CURRENT_LEFT, extended=False)
+                fr = observe_inv.last(M.ID_DTI_SET_CURRENT_RIGHT, extended=False)
+                assert fl is not None and fr is not None, \
+                    f"DTI current frames missing at step {step}"
+        finally:
+            st["run"] = False
+            time.sleep(0.05)
+            stim_acu.stop()
+            stim_inv.stop()

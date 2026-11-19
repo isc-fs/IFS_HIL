@@ -10,8 +10,8 @@ accelerations using bench DACs and simulated CAN telemetry:
   D-005 Throttle pedal sweep via DACs: monotonic current scaling with cornering bias
   D-006 Pedal lift-off: zero throttle via DACs clears torque immediately
   D-007 Simultaneous brake + throttle: EV.2.3 retired, trail-braking permitted without current cut
-  D-008 Steering sensor dropout: LWS timeout (>100 ms) falls back to passive 50/50
-  D-009 Bosch LWS failure mode: uncalibrated/fault state (OK=0/0x7FFF) falls back to 50/50
+  D-008 Steering sensor dropout: LWS timeout (>100 ms) with healthy IMU falls back to MingoMode (0 steer feedforward)
+  D-009 Bosch LWS failure mode: uncalibrated/fault state (OK=0/0x7FFF) falls back to MingoMode (0 steer feedforward)
   D-010 IMU sensor dropout: IMU timeout (>50 ms) falls back to MingoMode feedforward
   D-011 Steering velocity dynamic feedforward: positive d_delta boosts outside turn-in torque
   D-012 Rapid slalom reversal: dynamic transitions smoothly invert bias without torque spikes
@@ -23,6 +23,11 @@ accelerations using bench DACs and simulated CAN telemetry:
   D-018 Mode transitions: Party -> Mingo (IMU loss) -> Party (debounced recovery)
   D-019 Throttle stomp sweep: aggressive pedal stomps across 0, 15, 35 deg steering angles
   D-020 Reactive TV response: closed-loop correction under vehicle understeer and oversteer
+  D-021 Manual PartyMode default & oversteer stabilization: closed-loop yaw damping in manual driving
+  D-022 MingoMode on LWS fault: IMU curvature estimation + Virtual LSD without steering sensor
+  D-023 PassiveMode on total sensor loss: inverter-only Virtual LSD above min_velocity_mps & 50/50 on jack-stand
+  D-024 Full recovery ladder: Passive -> Mingo (LWS recovery) -> Party (debounced IMU recovery)
+  D-025 Stress edge cases: intermittent IMU CAN flapping (<150 ms) and compound LWS+IMU+wheelspin fault
 
 Hardware interfacing:
   - DUT: IFS09-CE-ECU seated in MLC4 carrier slot.
@@ -449,8 +454,8 @@ class TestD008SteeringTimeoutFailsafe:
     def test_d008_steering_timeout_failsafe(self, fresh_boot, inv_heartbeat, acu_inject,
                                             diff_stim, pedals, start_button, pit_diag,
                                             observe_inv, vcu_profile):
-        """D-008: If the Bosch LWS stream goes quiet (>100 ms timeout), the differential must
-        immediately fall back to PASSIVE 50/50 split and NEVER hold the old steering angle."""
+        """D-008: If the Bosch LWS stream goes quiet (>100 ms timeout) while IMU is healthy, the
+        differential must fall back to MingoMode (zeroing steering feedforward) and NEVER hold the old angle."""
         if _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag,
                       vcu_profile) != S.ACTIVE:
             pytest.skip("FSM never reached Active -- check DAC/gates")
@@ -480,7 +485,7 @@ class TestD009BoschLwsFailureModeFailsafe:
                                                   diff_stim, pedals, start_button, pit_diag,
                                                   observe_inv, vcu_profile):
         """D-009: When Bosch LWS reports failure mode (OK=0 or angle=0x7FFF per datasheet truth table),
-        the differential must treat the sensor as invalid and fall back to symmetric 50/50 split."""
+        the differential must treat the sensor as invalid, zero steering feedforward, and drop to MingoMode."""
         if _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag,
                       vcu_profile) != S.ACTIVE:
             pytest.skip("FSM never reached Active -- check DAC/gates")
@@ -550,6 +555,9 @@ class TestD011SteeringSpeedDynamicFeedforward:
             pytest.skip("FSM never reached Active -- check DAC/gates")
 
         diff_stim["set_speed_mps"](15.0)
+        # Dynamic steering-speed feedforward is a MingoMode feature
+        diff_stim["stop_imu"]()
+        time.sleep(0.1)
         # Static turn left at 20 deg, 0 deg/s steering rate
         diff_stim["set_steering"](20.0, speed=0.0, ok=True, cal=True, trim=True)
         _apps(pedals, vcu_profile, 50, 50)
@@ -886,9 +894,392 @@ class TestD020ClosedLoopYawCorrectionReaction:
             f"Understeer reaction failed: nominal={delta_nom:.2f} A, understeer={delta_under:.2f} A"
         )
 
-        # 2. Dynamic turn-in steering stomp (+150 deg/s steering rate)
-        diff_stim["set_steering"](25.0, speed=150.0, ok=True, cal=True, trim=True)
-        time.sleep(0.15)
-        cur_l_dyn, cur_r_dyn = _read_dti_currents(observe_inv)
-        assert cur_r_dyn > cur_r_nom + 0.3, "Dynamic steer speed feedforward failed to boost outside wheel"
+        # 2. Oversteer stimulus: measured yaw spikes to 1.15 rad/s -> PID + spin guard reduces outside bias
+        diff_stim["set_imu"](yaw=1.15, ay=3.3)
+        time.sleep(0.25)
+        cur_l_over, cur_r_over = _read_dti_currents(observe_inv)
+        delta_over = cur_r_over - cur_l_over
+        assert delta_over < delta_nom - 0.3, (
+            f"Oversteer stabilization failed: nom={delta_nom:.2f} A, over={delta_over:.2f} A"
+        )
 
+
+class TestD021ManualPartyModeDefaultAndOversteer:
+    def test_d021_manual_party_mode_default_and_oversteer(self, fresh_boot, inv_heartbeat, acu_inject,
+                                                          diff_stim, pedals, start_button, pit_diag,
+                                                          observe_inv, vcu_profile):
+        """D-021: Confirms PartyMode closed-loop Torque Vectoring is active by default in manual
+        driving and actively reduces outside torque bias when oversteer (excess yaw) is detected."""
+        if _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag,
+                      vcu_profile) != S.ACTIVE:
+            pytest.skip("FSM never reached Active -- check DAC/gates")
+
+        diff_stim["set_speed_mps"](15.0)
+        diff_stim["set_steering"](25.0, speed=0.0, ok=True, cal=True, trim=True)
+        diff_stim["set_imu"](yaw=0.22, ay=3.3)
+        _apps(pedals, vcu_profile, 50, 50)
+        time.sleep(0.35)
+
+        cur_l_nom, cur_r_nom = _read_dti_currents(observe_inv)
+        delta_nom = cur_r_nom - cur_l_nom
+        assert delta_nom > 2.0, f"PartyMode manual baseline bias missing: L={cur_l_nom}, R={cur_r_nom}"
+
+        # Oversteer stimulus (plausible): yaw spikes to 1.15 rad/s at constant ay=3.3 m/s^2
+        # |ay - v_x*r| = |3.3 - 17.25| = 13.95 < 15.0 m/s^2 (IMU remains plausible, load transfer constant)
+        diff_stim["set_imu"](yaw=1.15, ay=3.3)
+        time.sleep(0.25)
+        cur_l_over, cur_r_over = _read_dti_currents(observe_inv)
+        delta_over = cur_r_over - cur_l_over
+
+        assert delta_over < delta_nom - 0.3, (
+            f"Manual PartyMode failed oversteer counter-moment: nom={delta_nom:.2f} A, over={delta_over:.2f} A"
+        )
+
+
+class TestD022MingoLwsFaultImuCurvatureLsd:
+    def test_d022_mingo_lws_fault_imu_curvature_lsd(self, fresh_boot, inv_heartbeat, acu_inject,
+                                                      diff_stim, pedals, start_button, pit_diag,
+                                                      observe_inv, vcu_profile):
+        """D-022: On LWS-only fault (IMU valid), differential enters MingoMode using IMU curvature
+        estimation and Virtual LSD, trimming a spinning rear wheel without steering sensor data."""
+        if _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag,
+                      vcu_profile) != S.ACTIVE:
+            pytest.skip("FSM never reached Active -- check DAC/gates")
+
+        diff_stim["set_speed_mps"](15.0)
+        diff_stim["set_imu"](yaw=0.0, ay=0.0)
+        diff_stim["stop_steering"]()
+        _apps(pedals, vcu_profile, 50, 50)
+        time.sleep(0.3)
+
+        cur_l_eq, cur_r_eq = _read_dti_currents(observe_inv)
+        assert abs(cur_l_eq - cur_r_eq) < 1.0, "LWS-lost MingoMode should be symmetric without slip"
+
+        # Inject right wheel spin (+40% ERPM) while LWS remains offline
+        erpm_base = _speed_to_erpm(15.0, vcu_profile)
+        diff_stim["set_erpm"](erpm_base, int(erpm_base * 1.40))
+        time.sleep(0.25)
+
+        cur_l_slip, cur_r_slip = _read_dti_currents(observe_inv)
+        assert cur_r_slip < cur_l_slip - 0.5, (
+            f"LWS-fault MingoMode Virtual LSD failed to trim spinning wheel: L={cur_l_slip:.2f} A, R={cur_r_slip:.2f} A"
+        )
+
+
+class TestD023TotalSensorLossPassiveInverterLsd:
+    def test_d023_total_sensor_loss_passive_inverter_lsd(self, fresh_boot, inv_heartbeat, acu_inject,
+                                                          diff_stim, pedals, start_button, pit_diag,
+                                                          observe_inv, vcu_profile):
+        """D-023: Total sensor loss (both LWS and IMU offline, inverter-only) enters PassiveMode with
+        minimal Virtual LSD feedback above min_velocity_mps, and forces 50/50 on standstill/jack-stand."""
+        if _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag,
+                      vcu_profile) != S.ACTIVE:
+            pytest.skip("FSM never reached Active -- check DAC/gates")
+
+        # Drop both LWS and IMU -> PassiveMode (inverter-only)
+        diff_stim["stop_steering"]()
+        diff_stim["stop_imu"]()
+        diff_stim["set_speed_mps"](15.0)
+        _apps(pedals, vcu_profile, 50, 50)
+        time.sleep(0.3)
+
+        cur_l_eq, cur_r_eq = _read_dti_currents(observe_inv)
+        assert cur_l_eq > 5.0 and cur_r_eq > 5.0, "PassiveMode must keep delivering drive torque"
+        assert abs(cur_l_eq - cur_r_eq) < 1.0, "PassiveMode with matched wheels should be symmetric"
+
+        # Asymmetric wheel spin (+40% right ERPM) -> PassiveMode Virtual LSD trims spinning wheel
+        erpm_base = _speed_to_erpm(15.0, vcu_profile)
+        diff_stim["set_erpm"](erpm_base, int(erpm_base * 1.40))
+        time.sleep(0.25)
+
+        cur_l_lsd, cur_r_lsd = _read_dti_currents(observe_inv)
+        assert cur_r_lsd < cur_l_lsd - 0.5, (
+            f"PassiveMode minimal inverter LSD failed to trim spinning wheel: L={cur_l_lsd:.2f} A, R={cur_r_lsd:.2f} A"
+        )
+
+        # Jack-stand / standstill (v_x <= 0.8 m/s) with asymmetric ERPM -> forced 50/50 safety split
+        diff_stim["set_erpm"](0, 1500)
+        time.sleep(0.25)
+        cur_l_stand, cur_r_stand = _read_dti_currents(observe_inv)
+        assert abs(cur_l_stand - cur_r_stand) < 1.0, (
+            f"Standstill/jack-stand failed 50/50 safety split: L={cur_l_stand:.2f} A, R={cur_r_stand:.2f} A"
+        )
+
+
+class TestD024PassiveToMingoToPartyRecovery:
+    def test_d024_passive_to_mingo_to_party_recovery(self, fresh_boot, inv_heartbeat, acu_inject,
+                                                      diff_stim, pedals, start_button, pit_diag,
+                                                      observe_inv, vcu_profile):
+        """D-024: Validates progressive recovery ladder: Passive (both sensors lost) -> Mingo
+        (LWS recovers) -> Party (IMU recovers + 150 ms debounce) with bump-less drive continuity."""
+        if _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag,
+                      vcu_profile) != S.ACTIVE:
+            pytest.skip("FSM never reached Active -- check DAC/gates")
+
+        # 1. Start in PassiveMode (LWS + IMU offline)
+        diff_stim["stop_steering"]()
+        diff_stim["stop_imu"]()
+        diff_stim["set_speed_mps"](15.0)
+        _apps(pedals, vcu_profile, 50, 50)
+        time.sleep(0.25)
+
+        cur_l_p, cur_r_p = _read_dti_currents(observe_inv)
+        assert abs(cur_l_p - cur_r_p) < 1.0 and cur_l_p > 5.0
+
+        # 2. LWS recovers -> MingoMode (outside wheel biased)
+        diff_stim["set_steering"](25.0, speed=0.0, ok=True, cal=True, trim=True)
+        time.sleep(0.20)
+        cur_l_m, cur_r_m = _read_dti_currents(observe_inv)
+        assert cur_r_m > cur_l_m + 1.0, f"Passive -> Mingo recovery failed: L={cur_l_m:.2f} A, R={cur_r_m:.2f} A"
+
+        # 3. IMU recovers -> debounced return to PartyMode (150 ms)
+        diff_stim["set_imu"](yaw=0.22, ay=3.3)
+        time.sleep(0.25)
+        cur_l_pty, cur_r_pty = _read_dti_currents(observe_inv)
+        assert cur_r_pty > cur_l_pty + 2.0, f"Mingo -> Party recovery failed: L={cur_l_pty:.2f} A, R={cur_r_pty:.2f} A"
+        assert cur_l_pty > 5.0 and cur_r_pty > 5.0, "Recovery caused unexpected torque drop"
+
+
+class TestD025FlappingAndCompoundFault:
+    def test_d025_flapping_and_compound_fault(self, fresh_boot, inv_heartbeat, acu_inject,
+                                              diff_stim, pedals, start_button, pit_diag,
+                                              observe_inv, vcu_profile):
+        """D-025: Stress tests intermittent IMU CAN flapping (<150 ms debounce window) without torque
+        dropouts, followed by simultaneous LWS+IMU loss mid-corner with rear wheelspin."""
+        if _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag,
+                      vcu_profile) != S.ACTIVE:
+            pytest.skip("FSM never reached Active -- check DAC/gates")
+
+        # Establish cornering in PartyMode
+        diff_stim["set_speed_mps"](15.0)
+        diff_stim["set_steering"](25.0, speed=0.0, ok=True, cal=True, trim=True)
+        diff_stim["set_imu"](yaw=0.22, ay=3.3)
+        _apps(pedals, vcu_profile, 50, 50)
+        time.sleep(0.30)
+
+        # 1. Intermittent IMU flapping (<150 ms bursts): must remain smooth in MingoMode
+        for _ in range(3):
+            diff_stim["stop_imu"]()
+            time.sleep(0.08)
+            diff_stim["set_imu"](yaw=0.22, ay=3.3)
+            time.sleep(0.08)
+            cur_l, cur_r = _read_dti_currents(observe_inv)
+            assert cur_l > 5.0 and cur_r > 5.0, f"IMU flapping caused torque dropout: L={cur_l}, R={cur_r}"
+            assert cur_r > cur_l, f"IMU flapping lost outside bias: L={cur_l}, R={cur_r}"
+
+        # 2. Compound simultaneous fault: LWS + IMU both drop mid-corner + right wheelspin (+40% ERPM)
+        erpm_base = _speed_to_erpm(15.0, vcu_profile)
+        diff_stim["stop_steering"]()
+        diff_stim["stop_imu"]()
+        diff_stim["set_erpm"](erpm_base, int(erpm_base * 1.40))
+        time.sleep(0.25)
+
+        cur_l_comp, cur_r_comp = _read_dti_currents(observe_inv)
+        assert cur_l_comp > 5.0, f"Compound fault must keep gripping wheel driving: L={cur_l_comp}, R={cur_r_comp}"
+        assert cur_r_comp < cur_l_comp - 0.5, (
+            f"Compound fault PassiveMode failed Virtual LSD trim: L={cur_l_comp:.2f} A, R={cur_r_comp:.2f} A"
+        )
+
+
+class TestD026SteeringSpeedDirectionality:
+    def test_d026_steering_speed_sign_and_static_decay(self, fresh_boot, inv_heartbeat, acu_inject,
+                                                       diff_stim, pedals, start_button, pit_diag,
+                                                       observe_inv, vcu_profile):
+        """D-026: Verifies steering angular velocity feedforward directionality on 0x2B0:
+        turning into a left corner (positive angle_delta + speed) boosts outside bias
+        relative to static hold, and reversing direction (negative angle_delta) reduces it."""
+        if _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag,
+                      vcu_profile) != S.ACTIVE:
+            pytest.skip("FSM never reached Active -- check DAC/gates")
+
+        diff_stim["set_speed_mps"](15.0)
+        diff_stim["set_imu"](yaw=0.22, ay=3.3)
+        diff_stim["set_steering"](25.0, speed=0.0, ok=True, cal=True, trim=True)
+        _apps(pedals, vcu_profile, 50, 50)
+        time.sleep(0.35)
+
+        cur_l_stat, cur_r_stat = _read_dti_currents(observe_inv)
+        delta_stat = cur_r_stat - cur_l_stat
+        assert delta_stat > 2.0, f"Static cornering baseline missing: L={cur_l_stat}, R={cur_r_stat}"
+
+        # Positive angle_delta (25 -> 28 deg) with high steering rate (350 deg/s)
+        diff_stim["set_steering"](28.0, speed=350.0, ok=True, cal=True, trim=True)
+        time.sleep(0.20)
+        cur_l_in, cur_r_in = _read_dti_currents(observe_inv)
+        delta_in = cur_r_in - cur_l_in
+        assert delta_in > delta_stat, (
+            f"Positive turn-in steering speed did not boost outside bias: stat={delta_stat:.2f}, in={delta_in:.2f}"
+        )
+
+        # Negative angle_delta (28 -> 20 deg) with steering rate (350 deg/s) -> counter-bias
+        diff_stim["set_steering"](20.0, speed=350.0, ok=True, cal=True, trim=True)
+        time.sleep(0.12)
+        cur_l_out, cur_r_out = _read_dti_currents(observe_inv)
+        delta_out = cur_r_out - cur_l_out
+        assert delta_out < delta_in - 0.5, (
+            f"Negative unwind steering speed did not reduce bias: in={delta_in:.2f}, out={delta_out:.2f}"
+        )
+
+
+class TestD027CrossBusLwsImuRx:
+    def test_d027_lws_and_imu_on_inv_bus_cross_bus_rx(self, fresh_boot, inv_heartbeat, acu_inject,
+                                                       diff_stim, pedals, start_button, pit_diag,
+                                                       observe_inv, vcu_profile):
+        """D-027: Verifies vehicle_service cross-bus RX -- LWS (0x2B0) and IMU (0x201)
+        received on the Inverter bus (can0) instead of ACU bus (can2) still engage
+        PartyMode torque vectoring."""
+        import threading
+        from tools.firmware_test.acu_stim import AcuStim
+
+        if _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag,
+                      vcu_profile) != S.ACTIVE:
+            pytest.skip("FSM never reached Active -- check DAC/gates")
+
+        # Silence LWS/IMU on ACU bus, keep DTI ERPM on INV bus
+        diff_stim["stop_steering"]()
+        diff_stim["stop_imu"]()
+        diff_stim["set_speed_mps"](15.0)
+        _apps(pedals, vcu_profile, 50, 50)
+
+        inv_stim = AcuStim(channel=vcu_profile["bus_inv"])
+        inv_stim.start()
+        run_flag = {"on": True}
+
+        def inv_sensor_loop():
+            p_lws = M.encode_lws_standard(28.0, 0.0, ok=True, cal=True, trim=True)
+            p_imu = M.encode_xsens_imu(0.24, 3.5, 0.0)
+            while run_flag["on"]:
+                try:
+                    inv_stim.send_raw(M.ID_LWS_STANDARD, p_lws, is_extended_id=False)
+                    inv_stim.send_raw(M.ID_XSENS_IMU, p_imu, is_extended_id=False)
+                except Exception:
+                    pass
+                time.sleep(0.015)
+
+        th = threading.Thread(target=inv_sensor_loop, daemon=True)
+        th.start()
+        try:
+            time.sleep(0.35)
+            cur_l, cur_r = _read_dti_currents(observe_inv)
+            assert cur_r > cur_l + 2.0, (
+                f"Cross-bus LWS+IMU on INV bus failed to engage PartyMode bias: L={cur_l:.2f} A, R={cur_r:.2f} A"
+            )
+        finally:
+            run_flag["on"] = False
+            time.sleep(0.05)
+            inv_stim.stop()
+
+
+class TestD028DvModeElectronicDifferential:
+    def test_d028_dv_mode_electronic_differential(self, fresh_boot, inv_heartbeat, acu_inject,
+                                                  udv_inject, diff_stim, pedals, pit_diag,
+                                                  observe_inv, vcu_profile):
+        """D-028: Enters Autonomous/DV ACTIVE via 0x510 + hard brake, commands 50%
+        torque via 0x507 while cornering -> verifies PartyMode outside bias, then
+        drops LWS+IMU -> verifies PassiveMode symmetric drive."""
+        inv_heartbeat["vdc_ready"](500)
+        acu_inject["set_precharge"](1)
+        acu_inject["set_ams_state"](3)
+        acu_inject["set_v_cell"](3600)
+        if _wait_fsm(pit_diag, lambda s: s >= S.WAIT_START_BRAKE, 4.0) is None:
+            pytest.skip("FSM never reached WAIT_START_BRAKE -- check DAC/gates")
+
+        pedals["set_brake"](int(vcu_profile["brake_dv_hard_raw"]) + 200)
+        udv_inject["set_r2d"](1)
+        inv_heartbeat["set_state"](int(vcu_profile["inv_state_ready"]))
+        if _wait_fsm(pit_diag, lambda s: s == S.ACTIVE,
+                     float(vcu_profile["r2d_delay_ms"]) / 1000.0 + 5.0) != S.ACTIVE:
+            pytest.skip("FSM never reached DV ACTIVE -- check DAC/gates")
+
+        pedals["set_brake"](0)
+        diff_stim["set_speed_mps"](15.0)
+        diff_stim["set_steering"](25.0, speed=0.0, ok=True, cal=True, trim=True)
+        diff_stim["set_imu"](yaw=0.22, ay=3.3)
+        udv_inject["set_torque"](50)
+        time.sleep(0.35)
+
+        cur_l, cur_r = _read_dti_currents(observe_inv)
+        assert cur_l > 5.0 and cur_r > 5.0, f"DV torque missing: L={cur_l}, R={cur_r}"
+        assert cur_r > cur_l + 2.0, f"DV PartyMode outside bias missing: L={cur_l:.2f} A, R={cur_r:.2f} A"
+
+        # Drop LWS + IMU in DV mode -> PassiveMode symmetric drive
+        diff_stim["stop_steering"]()
+        diff_stim["stop_imu"]()
+        time.sleep(0.25)
+        cur_l_p, cur_r_p = _read_dti_currents(observe_inv)
+        assert cur_l_p > 5.0 and cur_r_p > 5.0, "DV PassiveMode dropped torque"
+        assert abs(cur_l_p - cur_r_p) < 1.0, f"DV PassiveMode not symmetric: L={cur_l_p:.2f} A, R={cur_r_p:.2f} A"
+
+
+class TestD029TrailBrakingTorqueVectoring:
+    def test_d029_trail_braking_preserves_torque_vectoring(self, fresh_boot, inv_heartbeat, acu_inject,
+                                                           diff_stim, pedals, start_button, pit_diag,
+                                                           observe_inv, vcu_profile):
+        """D-029: With EV.2.3 retired, simultaneous heavy brake (> BrakePressedRaw) +
+        APPS in a corner preserves PartyMode outside-wheel torque vectoring."""
+        if _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag,
+                      vcu_profile) != S.ACTIVE:
+            pytest.skip("FSM never reached Active -- check DAC/gates")
+
+        diff_stim["set_speed_mps"](15.0)
+        diff_stim["set_steering"](25.0, speed=0.0, ok=True, cal=True, trim=True)
+        diff_stim["set_imu"](yaw=0.22, ay=3.3)
+        _apps(pedals, vcu_profile, 50, 50)
+        pedals["set_brake"](int(vcu_profile["brake_apps_raw"]) + 400)
+        time.sleep(0.35)
+
+        cur_l, cur_r = _read_dti_currents(observe_inv)
+        assert cur_l > 5.0 and cur_r > 5.0, f"Trail-braking cut drive torque: L={cur_l}, R={cur_r}"
+        assert cur_r > cur_l + 1.5, f"Trail-braking lost cornering TV bias: L={cur_l:.2f} A, R={cur_r:.2f} A"
+
+
+class TestD030NetTorqueInvariance:
+    def test_d030_net_torque_invariance_under_cornering(self, fresh_boot, inv_heartbeat, acu_inject,
+                                                        diff_stim, pedals, start_button, pit_diag,
+                                                        observe_inv, vcu_profile):
+        """D-030 (FS EV.4.11): Under cornering torque vectoring, total motor current
+        (L + R) must never exceed straight-line baseline total current (strict APPS invariance)."""
+        if _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag,
+                      vcu_profile) != S.ACTIVE:
+            pytest.skip("FSM never reached Active -- check DAC/gates")
+
+        diff_stim["set_speed_mps"](15.0)
+        diff_stim["set_steering"](0.0, speed=0.0, ok=True, cal=True, trim=True)
+        diff_stim["set_imu"](yaw=0.0, ay=0.0)
+        _apps(pedals, vcu_profile, 50, 50)
+        time.sleep(0.35)
+        cl_str, cr_str = _read_dti_currents(observe_inv)
+        total_straight = cl_str + cr_str
+        assert total_straight > 20.0, f"straight baseline missing: {total_straight}"
+
+        diff_stim["set_steering"](30.0, speed=0.0, ok=True, cal=True, trim=True)
+        diff_stim["set_imu"](yaw=0.25, ay=3.7)
+        time.sleep(0.35)
+        cl_cor, cr_cor = _read_dti_currents(observe_inv)
+        total_corner = cl_cor + cr_cor
+        assert cr_cor > cl_cor + 2.0, "cornering TV bias missing"
+        assert total_corner <= total_straight + 1.5, (
+            f"Cornering TV exceeded net torque invariance: straight={total_straight:.2f} A, corner={total_corner:.2f} A"
+        )
+
+
+class TestD031ZeroPedalNoPhantomTorque:
+    def test_d031_zero_pedal_steering_sweep_no_phantom_torque(self, fresh_boot, inv_heartbeat,
+                                                              acu_inject, diff_stim, pedals,
+                                                              start_button, pit_diag, observe_inv,
+                                                              vcu_profile):
+        """D-031 (FS T.11.8): Rapid steering sweeps (+35 -> -35 deg at 350 deg/s)
+        at 0% APPS must produce strictly 0.0 A on both motors (no phantom feedforward)."""
+        if _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag,
+                      vcu_profile) != S.ACTIVE:
+            pytest.skip("FSM never reached Active -- check DAC/gates")
+
+        diff_stim["set_speed_mps"](15.0)
+        _apps(pedals, vcu_profile, 0, 0)
+        for ang in (35.0, -35.0, 35.0, 0.0):
+            diff_stim["set_steering"](ang, speed=350.0, ok=True, cal=True, trim=True)
+            time.sleep(0.12)
+            cl, cr = _read_dti_currents(observe_inv)
+            assert cl == 0.0 and cr == 0.0, (
+                f"Phantom torque at 0% APPS during steering sweep (ang={ang}): L={cl}, R={cr}"
+            )

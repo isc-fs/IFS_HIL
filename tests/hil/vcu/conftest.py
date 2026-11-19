@@ -217,7 +217,8 @@ def inv_heartbeat(vcu_profile):
     bus = vcu_profile["bus_inv"]
     _skip_if_no_can(bus)
     st = {"inv_state": 0, "vdc": 0, "cnt": 0, "send_vdc": False, "run": True,
-          "rpm": 0, "send_rpm": False, "temps": (0, 0, 0, 0), "send_temps": False}
+          "rpm": 0, "send_rpm": False, "temps": (0, 0, 0, 0), "send_temps": False,
+          "send_dti": False, "dti_vdc": 500.0}
     stim = AcuStim(channel=bus)
     stim.start()
 
@@ -238,6 +239,10 @@ def inv_heartbeat(vcu_profile):
                 if st["send_temps"]:
                     stim.send_raw(M.ID_INV_TEMPS, M.encode_inv_temps(*st["temps"]),
                                   is_extended_id=False)
+                if st["send_dti"]:
+                    p_dti = M.encode_dti_erpm(0, input_voltage_v=st["dti_vdc"])
+                    stim.send_raw(M.ID_DTI_ERPM_LEFT, p_dti, is_extended_id=False)
+                    stim.send_raw(M.ID_DTI_ERPM_RIGHT, p_dti, is_extended_id=False)
             except Exception:
                 pass
             time.sleep(0.05)
@@ -248,6 +253,7 @@ def inv_heartbeat(vcu_profile):
     st["set_rpm"] = lambda r: st.update(rpm=int(r), send_rpm=True)
     st["set_temps"] = lambda b, p, m1, m2: st.update(
         temps=(int(b), int(p), int(m1), int(m2)), send_temps=True)
+    st["enable_dti"] = lambda v=500.0: st.update(send_dti=True, dti_vdc=float(v))
     yield st
     st["run"] = False
     time.sleep(0.1)
