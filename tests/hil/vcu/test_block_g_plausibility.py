@@ -60,7 +60,9 @@ def _apps_raw(vcu_profile, which, pct):
 
 
 def _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag, vcu_profile):
-    inv_heartbeat["vdc_ready"]()
+    inv_heartbeat["vdc_ready"](500)
+    acu_inject["set_ams_state"](3)
+    acu_inject["set_v_cell"](3600)
     acu_inject["set_precharge"](1)
     if _wait_fsm(pit_diag, lambda s: s >= S.WAIT_START_BRAKE, 4.0) is None:
         pytest.skip("FSM never reached WAIT_START_BRAKE -- DAC/gates")
