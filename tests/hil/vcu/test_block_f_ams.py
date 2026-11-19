@@ -39,6 +39,8 @@ class TestF001AmsErrorInhibits:
                                         observe_acu):
         """F-001: AMS 0x4A0[0]=5 (AMS Error) -> ECU FSM enters AmsError and the
         commanded torque is zero."""
+        inv_heartbeat["vdc_ready"](500)
+        acu_inject["set_v_cell"](3600)
         acu_inject["set_ams_state"](5)
         s = _wait_fsm(pit_diag, lambda v: v == _AMS_ERROR, 4.0)
         assert s == _AMS_ERROR, \
@@ -53,10 +55,12 @@ class TestF001AmsErrorInhibits:
 
 class TestF002ReArm:
 
-    def test_f002_rearm_on_ams_ok(self, fresh_boot, acu_inject, pit_diag):
+    def test_f002_rearm_on_ams_ok(self, fresh_boot, inv_heartbeat, acu_inject, pit_diag):
         """F-002: when the AMS recovers (0x4A0[0]=0), the ECU leaves AmsError.
         If AmsError is hard-sticky (only clears on reset), this surfaces that as
         a spec/firmware decision."""
+        inv_heartbeat["vdc_ready"](500)
+        acu_inject["set_v_cell"](3600)
         acu_inject["set_ams_state"](5)
         assert _wait_fsm(pit_diag, lambda v: v == _AMS_ERROR, 4.0) == _AMS_ERROR, \
             "never entered AmsError to begin with"
@@ -306,6 +310,8 @@ class TestF008AmsErrorMidActive:
         time.sleep(0.7)
         assert (_read_drive_torque(observe_inv) or 0) > 5.0, "baseline torque missing in Active"
 
+        inv_heartbeat["vdc_ready"](500)
+        acu_inject["set_v_cell"](3600)
         acu_inject["set_ams_state"](5)
         s = _wait_fsm(pit_diag, lambda v: v == _AMS_ERROR, 2.0)
         assert s == _AMS_ERROR, f"expected AmsError on 0x4A0[0]=5 mid-Active, got {s}"

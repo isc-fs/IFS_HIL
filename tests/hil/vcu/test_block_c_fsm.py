@@ -43,7 +43,7 @@ class TestC001VdcConfigGate:
             pytest.skip("no pit-diag 0x700 on the configured bus -- confirm pit_diag_bus")
         assert held == S.WAIT_INV_VDC_CONFIG, \
             f"expected WAIT_INV_VDC_CONFIG, got {S.name_of(held)}"
-        inv_heartbeat["vdc_ready"]()
+        inv_heartbeat["vdc_ready"](500)
         adv = _wait_fsm(pit_diag, lambda s: s != S.WAIT_INV_VDC_CONFIG, 3.0)
         assert adv != S.WAIT_INV_VDC_CONFIG, "FSM did not leave WAIT_INV_VDC_CONFIG after 0x466"
 
@@ -53,7 +53,7 @@ class TestC002PrechargeGate:
                                       acu_inject, pit_diag):
         """C-002: past the vdc gate, the FSM does NOT reach WAIT_START_BRAKE
         without ok_precarga; it advances once 0x020[0]=1."""
-        inv_heartbeat["vdc_ready"]()
+        inv_heartbeat["vdc_ready"](500)
         stuck = _wait_fsm(pit_diag, lambda s: s >= S.WAIT_START_BRAKE, 2.5)
         if stuck is None:
             pytest.skip("no pit-diag 0x700 -- confirm pit_diag_bus")
@@ -73,7 +73,7 @@ class TestC004ReachesActive:
         inv_state==InvReadyState(4) drives the FSM all the way to ACTIVE.
         WaitInvStandby→Active gates on inv_state==4 (control.cpp), NOT the
         standby value 3 — feeding 3 stalls the FSM one step short."""
-        inv_heartbeat["vdc_ready"]()
+        inv_heartbeat["vdc_ready"](500)
         acu_inject["set_precharge"](1)
         if _wait_fsm(pit_diag, lambda s: s >= S.WAIT_START_BRAKE, 4.0) is None:
             pytest.skip("FSM never reached WAIT_START_BRAKE -- confirm pit-diag bus / gates")
