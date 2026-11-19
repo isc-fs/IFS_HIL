@@ -42,7 +42,15 @@ def _flags(observe_acu):
 
 def _torque(observe_inv):
     f = observe_inv.last(M.ID_INV_TORQUE, extended=False)
-    return M.decode_inv_torque(f.data)["torque_nm"] if f is not None else None
+    if f is not None:
+        return M.decode_inv_torque(f.data)["torque_nm"]
+    fl = observe_inv.last(M.ID_DTI_SET_CURRENT_LEFT, extended=False)
+    fr = observe_inv.last(M.ID_DTI_SET_CURRENT_RIGHT, extended=False)
+    if fl is not None and fr is not None:
+        return abs(M.decode_dti_set_current(fl.data)["current_apk"]) + abs(
+            M.decode_dti_set_current(fr.data)["current_apk"]
+        )
+    return None
 
 
 def _apps_raw(vcu_profile, which, pct):
