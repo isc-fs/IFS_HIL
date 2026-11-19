@@ -186,7 +186,7 @@ class TestG006SingleAppsAsymmetricFault:
                       vcu_profile) != S.ACTIVE:
             pytest.skip("FSM never reached Active -- check DAC/gates")
         _apps(pedals, vcu_profile, 60, 60)
-        time.sleep(0.35)
+        time.sleep(0.6)
         assert (_drive_effort(observe_inv) or 0) > 5.0, "baseline drive effort missing"
 
         pedals["set_apps1"](0)

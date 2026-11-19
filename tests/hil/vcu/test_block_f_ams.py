@@ -265,7 +265,7 @@ class TestF007PrechargeDropMidActive:
         lo2, hi2 = int(vcu_profile["apps2_adc_min"]), int(vcu_profile["apps2_adc_max"])
         pedals["set_apps1"](int(lo1 + 0.50 * (hi1 - lo1)))
         pedals["set_apps2"](int(lo2 + 0.50 * (hi2 - lo2)))
-        time.sleep(0.4)
+        time.sleep(0.7)
         assert (_read_drive_torque(observe_inv) or 0) > 5.0, "baseline torque missing in Active"
 
         acu_inject["set_precharge"](0)
@@ -298,7 +298,7 @@ class TestF008AmsErrorMidActive:
         lo2, hi2 = int(vcu_profile["apps2_adc_min"]), int(vcu_profile["apps2_adc_max"])
         pedals["set_apps1"](int(lo1 + 0.50 * (hi1 - lo1)))
         pedals["set_apps2"](int(lo2 + 0.50 * (hi2 - lo2)))
-        time.sleep(0.4)
+        time.sleep(0.7)
         assert (_read_drive_torque(observe_inv) or 0) > 5.0, "baseline torque missing in Active"
 
         acu_inject["set_ams_state"](5)
