@@ -35,7 +35,7 @@ def _wait_fsm(pit_diag, pred, timeout_s):
 
 class TestF001AmsErrorInhibits:
 
-    def test_f001_ams_error_to_amserror(self, fresh_boot, acu_inject, pit_diag,
+    def test_f001_ams_error_to_amserror(self, fresh_boot, inv_heartbeat, acu_inject, pit_diag,
                                         observe_acu):
         """F-001: AMS 0x4A0[0]=5 (AMS Error) -> ECU FSM enters AmsError and the
         commanded torque is zero."""
