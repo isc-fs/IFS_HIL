@@ -239,3 +239,69 @@ class TestF005AmsSessionGuard:
         after_torq = _read_drive_torque(observe_inv)
         assert after_torq is not None and after_torq <= 2.0, \
             f"non-zero torque after AMS session_id change: {after_torq}"
+
+
+class TestF007PrechargeDropMidActive:
+
+    def test_f007_precharge_drop_mid_active_cuts_torque(self, fresh_boot, inv_heartbeat,
+                                                        acu_inject, pedals, start_button,
+                                                        pit_diag, observe_inv, vcu_profile):
+        """F-007 (FS EV.6/EV.7): dropping 0x020[0] ok_precharge to 0 while ACTIVE
+        (even with 0x4A0[0]=3 Run) must exit ACTIVE and cut torque to zero."""
+        inv_heartbeat["vdc_ready"](500)
+        acu_inject["set_precharge"](1)
+        acu_inject["set_ams_state"](3)
+        acu_inject["set_v_cell"](3600)
+        if _wait_fsm(pit_diag, lambda s: s >= int(M.VcuFsmState.WAIT_START_BRAKE), 4.0) is None:
+            pytest.skip("FSM never reached WAIT_START_BRAKE -- DAC/gates")
+        pedals["set_brake"](int(vcu_profile["brake_arm_raw"]) + 200)
+        start_button["press"]()
+        inv_heartbeat["set_state"](int(vcu_profile["inv_state_ready"]))
+        if _wait_fsm(pit_diag, lambda s: s == int(M.VcuFsmState.ACTIVE),
+                     float(vcu_profile["r2d_delay_ms"]) / 1000.0 + 5.0) != int(M.VcuFsmState.ACTIVE):
+            pytest.skip("FSM never reached Active -- DAC/gates")
+        pedals["set_brake"](0)
+        lo1, hi1 = int(vcu_profile["apps1_adc_min"]), int(vcu_profile["apps1_adc_max"])
+        lo2, hi2 = int(vcu_profile["apps2_adc_min"]), int(vcu_profile["apps2_adc_max"])
+        pedals["set_apps1"](int(lo1 + 0.50 * (hi1 - lo1)))
+        pedals["set_apps2"](int(lo2 + 0.50 * (hi2 - lo2)))
+        time.sleep(0.4)
+        assert (_read_drive_torque(observe_inv) or 0) > 5.0, "baseline torque missing in Active"
+
+        acu_inject["set_precharge"](0)
+        s = _wait_fsm(pit_diag, lambda v: v != int(M.VcuFsmState.ACTIVE), 2.0)
+        assert s != int(M.VcuFsmState.ACTIVE), "ECU stayed ACTIVE after ok_precharge dropped to 0"
+        assert (_read_drive_torque(observe_inv) or 0) <= 2.0, "torque not cut after ok_precharge dropped"
+
+
+class TestF008AmsErrorMidActive:
+
+    def test_f008_ams_error_mid_active_cuts_torque_and_latches(self, fresh_boot, inv_heartbeat,
+                                                               acu_inject, pedals, start_button,
+                                                               pit_diag, observe_inv, vcu_profile):
+        """F-008 (FS EV.7): AMS 0x4A0[0]=5 (Error) while ACTIVE with 50% APPS must
+        immediately enter AmsError and cut torque to zero."""
+        inv_heartbeat["vdc_ready"](500)
+        acu_inject["set_precharge"](1)
+        acu_inject["set_ams_state"](3)
+        acu_inject["set_v_cell"](3600)
+        if _wait_fsm(pit_diag, lambda s: s >= int(M.VcuFsmState.WAIT_START_BRAKE), 4.0) is None:
+            pytest.skip("FSM never reached WAIT_START_BRAKE -- DAC/gates")
+        pedals["set_brake"](int(vcu_profile["brake_arm_raw"]) + 200)
+        start_button["press"]()
+        inv_heartbeat["set_state"](int(vcu_profile["inv_state_ready"]))
+        if _wait_fsm(pit_diag, lambda s: s == int(M.VcuFsmState.ACTIVE),
+                     float(vcu_profile["r2d_delay_ms"]) / 1000.0 + 5.0) != int(M.VcuFsmState.ACTIVE):
+            pytest.skip("FSM never reached Active -- DAC/gates")
+        pedals["set_brake"](0)
+        lo1, hi1 = int(vcu_profile["apps1_adc_min"]), int(vcu_profile["apps1_adc_max"])
+        lo2, hi2 = int(vcu_profile["apps2_adc_min"]), int(vcu_profile["apps2_adc_max"])
+        pedals["set_apps1"](int(lo1 + 0.50 * (hi1 - lo1)))
+        pedals["set_apps2"](int(lo2 + 0.50 * (hi2 - lo2)))
+        time.sleep(0.4)
+        assert (_read_drive_torque(observe_inv) or 0) > 5.0, "baseline torque missing in Active"
+
+        acu_inject["set_ams_state"](5)
+        s = _wait_fsm(pit_diag, lambda v: v == _AMS_ERROR, 2.0)
+        assert s == _AMS_ERROR, f"expected AmsError on 0x4A0[0]=5 mid-Active, got {s}"
+        assert (_read_drive_torque(observe_inv) or 0) <= 2.0, "torque not cut in AmsError"

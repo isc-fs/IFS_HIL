@@ -145,3 +145,52 @@ class TestG004AppsTransientGlitch:
             "t11_8_9 latched on transient <100 ms APPS glitch"
         assert abs(_torque(observe_inv) or 0) > 10, \
             f"torque unexpectedly cut after transient APPS glitch: {_torque(observe_inv)}"
+
+
+def _drive_effort(observe_inv):
+    """Return total drive effort (DTI 0x021+0x022 Apk if present, else NX 0x362 Nm)."""
+    fl = observe_inv.last(M.ID_DTI_SET_CURRENT_LEFT, extended=False)
+    fr = observe_inv.last(M.ID_DTI_SET_CURRENT_RIGHT, extended=False)
+    if fl is not None and fr is not None:
+        return abs(M.decode_dti_set_current(fl.data)["current_apk"]) + abs(
+            M.decode_dti_set_current(fr.data)["current_apk"]
+        )
+    fnx = observe_inv.last(M.ID_INV_TORQUE, extended=False)
+    return abs(M.decode_inv_torque(fnx.data)["torque_nm"]) if fnx is not None else None
+
+
+class TestG005AppsShortToVcc:
+    def test_g005_apps_short_to_vcc_no_torque(self, fresh_boot, inv_heartbeat, acu_inject,
+                                              pedals, start_button, pit_diag, observe_inv,
+                                              vcu_profile):
+        """G-005 (FS T.11.8.9): APPS1/2 shorted to VCC (4095 raw, out of range)
+        must safe-fail to zero torque."""
+        if _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag,
+                      vcu_profile) != S.ACTIVE:
+            pytest.skip("FSM never reached Active -- check DAC/gates")
+        pedals["set_apps1"](4095)
+        pedals["set_apps2"](4095)
+        time.sleep(0.4)
+        effort = _drive_effort(observe_inv)
+        assert (effort or 0) <= 2.0, f"non-zero drive effort {effort} on APPS short-to-VCC"
+
+
+class TestG006SingleAppsAsymmetricFault:
+    def test_g006_single_apps_asymmetric_fault_cuts_torque(self, fresh_boot, inv_heartbeat,
+                                                            acu_inject, pedals, start_button,
+                                                            pit_diag, observe_acu, observe_inv,
+                                                            vcu_profile):
+        """G-006 (FS T.11.8.9): while driving at 60% APPS, dropping APPS1 to 0
+        (single-channel open/short) trips t11_8_9 after 100 ms and cuts torque to 0."""
+        if _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag,
+                      vcu_profile) != S.ACTIVE:
+            pytest.skip("FSM never reached Active -- check DAC/gates")
+        _apps(pedals, vcu_profile, 60, 60)
+        time.sleep(0.35)
+        assert (_drive_effort(observe_inv) or 0) > 5.0, "baseline drive effort missing"
+
+        pedals["set_apps1"](0)
+        time.sleep(0.35)
+        assert _flags(observe_acu) & M.PIT_FLAG_T11_8_9, "t11_8_9 not set on single-channel APPS1 drop"
+        assert (_drive_effort(observe_inv) or 0) <= 2.0, \
+            f"drive effort not cut on single-channel APPS1 drop: {_drive_effort(observe_inv)}"

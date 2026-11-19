@@ -385,3 +385,50 @@ class TestL014UdvDoesNotFeedAmsGate:
         # #101's "0x700 b2.3 falls" assumed a gated flag -> flag to the ECU team.
         assert _last(observe_acu, M.ID_DV_TS_ACTIVE, M.decode_ts_active)["ts_active"] == 0, \
             "0x504 ts_active held alive by uDV traffic (uDV wrongly refreshed AMS freshness)"
+
+
+class TestL015AppsIgnoredInDvActive:
+    def test_l015_apps_ignored_during_dv_active(self, fresh_boot, inv_heartbeat, acu_inject,
+                                                udv_inject, pedals, observe_acu, observe_inv,
+                                                vcu_profile):
+        """L-015 (FS T.14): While in DV ACTIVE, pressing manual APPS to 80% must NOT
+        override the 0x507 autonomous torque command (20%)."""
+        inv_heartbeat["vdc_ready"](500)
+        acu_inject["set_precharge"](1)
+        acu_inject["set_ams_state"](3)
+        acu_inject["set_v_cell"](3600)
+        if _wait_fsm(observe_acu, lambda s: s >= S.WAIT_START_BRAKE, 4.0) != S.WAIT_START_BRAKE:
+            pytest.skip("FSM never reached WAIT_START_BRAKE -- DAC/gates")
+        pedals["set_brake"](int(vcu_profile["brake_dv_hard_raw"]) + 200)
+        udv_inject["set_r2d"](1)
+        inv_heartbeat["set_state"](int(vcu_profile["inv_state_ready"]))
+        if _wait_fsm(observe_acu, lambda s: s == S.ACTIVE,
+                     float(vcu_profile["r2d_delay_ms"]) / 1000.0 + 5.0) != S.ACTIVE:
+            pytest.skip("FSM never reached DV ACTIVE -- DAC/gates")
+        pedals["set_brake"](0)
+        udv_inject["set_torque"](20)
+        time.sleep(0.35)
+
+        fl_0 = observe_inv.last(M.ID_DTI_SET_CURRENT_LEFT, extended=False)
+        fr_0 = observe_inv.last(M.ID_DTI_SET_CURRENT_RIGHT, extended=False)
+        if fl_0 is not None and fr_0 is not None:
+            base = abs(M.decode_dti_set_current(fl_0.data)["current_apk"]) + abs(
+                M.decode_dti_set_current(fr_0.data)["current_apk"]
+            )
+            pedals["set_apps1"](_apps_raw(vcu_profile, "apps1", 80))
+            pedals["set_apps2"](_apps_raw(vcu_profile, "apps2", 80))
+            time.sleep(0.35)
+            fl_1 = observe_inv.last(M.ID_DTI_SET_CURRENT_LEFT, extended=False)
+            fr_1 = observe_inv.last(M.ID_DTI_SET_CURRENT_RIGHT, extended=False)
+            after = abs(M.decode_dti_set_current(fl_1.data)["current_apk"]) + abs(
+                M.decode_dti_set_current(fr_1.data)["current_apk"]
+            )
+            assert abs(after - base) < 3.0, f"Manual APPS leaked into DV torque: base={base}, after={after}"
+        else:
+            t0 = _torque_nm(observe_inv)
+            pedals["set_apps1"](_apps_raw(vcu_profile, "apps1", 80))
+            pedals["set_apps2"](_apps_raw(vcu_profile, "apps2", 80))
+            time.sleep(0.35)
+            t1 = _torque_nm(observe_inv)
+            assert t0 is not None and t1 is not None and abs(t1 - t0) <= 5, \
+                f"Manual APPS leaked into DV torque: base={t0}, after={t1}"

@@ -92,3 +92,23 @@ class TestC005FsmObservable:
         if s is None:
             pytest.skip("no pit-diag 0x700 -- confirm pit_diag_bus")
         assert 0 <= s <= int(S.ACTIVE), f"0x700[0]={s} not a valid FSM state"
+
+
+class TestC006R2dRequiresBrake:
+    def test_c006_r2d_refused_without_brake(self, fresh_boot, inv_heartbeat,
+                                            acu_inject, pedals, start_button,
+                                            pit_diag):
+        """C-006 (FS EV.4.11): pressing Start in WAIT_START_BRAKE with brake=0
+        must NOT advance to R2D_DELAY or ACTIVE."""
+        inv_heartbeat["vdc_ready"](500)
+        acu_inject["set_precharge"](1)
+        acu_inject["set_ams_state"](3)
+        acu_inject["set_v_cell"](3600)
+        if _wait_fsm(pit_diag, lambda s: s == S.WAIT_START_BRAKE, 4.0) != S.WAIT_START_BRAKE:
+            pytest.skip("FSM never reached WAIT_START_BRAKE -- DAC/gates")
+        pedals["set_brake"](0)
+        start_button["press"]()
+        time.sleep(1.0)
+        s = pit_diag["read_fsm"](0.5)
+        assert s == S.WAIT_START_BRAKE, \
+            f"FSM left WAIT_START_BRAKE ({S.name_of(s)}) without brake pressed!"

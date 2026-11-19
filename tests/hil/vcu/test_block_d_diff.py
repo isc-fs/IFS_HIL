@@ -1231,3 +1231,55 @@ class TestD029TrailBrakingTorqueVectoring:
         cur_l, cur_r = _read_dti_currents(observe_inv)
         assert cur_l > 5.0 and cur_r > 5.0, f"Trail-braking cut drive torque: L={cur_l}, R={cur_r}"
         assert cur_r > cur_l + 1.5, f"Trail-braking lost cornering TV bias: L={cur_l:.2f} A, R={cur_r:.2f} A"
+
+
+class TestD030NetTorqueInvariance:
+    def test_d030_net_torque_invariance_under_cornering(self, fresh_boot, inv_heartbeat, acu_inject,
+                                                        diff_stim, pedals, start_button, pit_diag,
+                                                        observe_inv, vcu_profile):
+        """D-030 (FS EV.4.11): Under cornering torque vectoring, total motor current
+        (L + R) must never exceed straight-line baseline total current (strict APPS invariance)."""
+        if _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag,
+                      vcu_profile) != S.ACTIVE:
+            pytest.skip("FSM never reached Active -- check DAC/gates")
+
+        diff_stim["set_speed_mps"](15.0)
+        diff_stim["set_steering"](0.0, speed=0.0, ok=True, cal=True, trim=True)
+        diff_stim["set_imu"](yaw=0.0, ay=0.0)
+        _apps(pedals, vcu_profile, 50, 50)
+        time.sleep(0.35)
+        cl_str, cr_str = _read_dti_currents(observe_inv)
+        total_straight = cl_str + cr_str
+        assert total_straight > 20.0, f"straight baseline missing: {total_straight}"
+
+        diff_stim["set_steering"](30.0, speed=0.0, ok=True, cal=True, trim=True)
+        diff_stim["set_imu"](yaw=0.25, ay=3.7)
+        time.sleep(0.35)
+        cl_cor, cr_cor = _read_dti_currents(observe_inv)
+        total_corner = cl_cor + cr_cor
+        assert cr_cor > cl_cor + 2.0, "cornering TV bias missing"
+        assert total_corner <= total_straight + 1.5, (
+            f"Cornering TV exceeded net torque invariance: straight={total_straight:.2f} A, corner={total_corner:.2f} A"
+        )
+
+
+class TestD031ZeroPedalNoPhantomTorque:
+    def test_d031_zero_pedal_steering_sweep_no_phantom_torque(self, fresh_boot, inv_heartbeat,
+                                                              acu_inject, diff_stim, pedals,
+                                                              start_button, pit_diag, observe_inv,
+                                                              vcu_profile):
+        """D-031 (FS T.11.8): Rapid steering sweeps (+35 -> -35 deg at 350 deg/s)
+        at 0% APPS must produce strictly 0.0 A on both motors (no phantom feedforward)."""
+        if _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag,
+                      vcu_profile) != S.ACTIVE:
+            pytest.skip("FSM never reached Active -- check DAC/gates")
+
+        diff_stim["set_speed_mps"](15.0)
+        _apps(pedals, vcu_profile, 0, 0)
+        for ang in (35.0, -35.0, 35.0, 0.0):
+            diff_stim["set_steering"](ang, speed=350.0, ok=True, cal=True, trim=True)
+            time.sleep(0.12)
+            cl, cr = _read_dti_currents(observe_inv)
+            assert cl == 0.0 and cr == 0.0, (
+                f"Phantom torque at 0% APPS during steering sweep (ang={ang}): L={cl}, R={cr}"
+            )
