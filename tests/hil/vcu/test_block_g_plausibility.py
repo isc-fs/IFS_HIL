@@ -61,6 +61,7 @@ def _apps_raw(vcu_profile, which, pct):
 
 def _to_active(inv_heartbeat, acu_inject, pedals, start_button, pit_diag, vcu_profile):
     inv_heartbeat["vdc_ready"](500)
+    inv_heartbeat["enable_dti"](500.0)
     acu_inject["set_ams_state"](3)
     acu_inject["set_v_cell"](3600)
     acu_inject["set_precharge"](1)

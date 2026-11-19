@@ -120,6 +120,7 @@ class TestF003StaleFailSafe:
         """F-003: stopping all AMS frames (0x020/0x4A0/0x12C) while Active lapses
         AMS-fresh within 200 ms, drops ok_precharge, leaves Active, and cuts torque."""
         inv_heartbeat["vdc_ready"](500)
+        inv_heartbeat["enable_dti"](500.0)
         acu_inject["set_precharge"](1)
         acu_inject["set_ams_state"](3)
         acu_inject["set_v_cell"](3600)
@@ -167,6 +168,7 @@ class TestF004LowCellDerate:
         """F-004: 0x12C v_cell_min <= CellVRawFloorMv (2850 mV) caps torque to
         CellVDerateFloorPct (13% / ~20 Nm), and recovers when cell voltage returns."""
         inv_heartbeat["vdc_ready"](500)
+        inv_heartbeat["enable_dti"](500.0)
         acu_inject["set_precharge"](1)
         acu_inject["set_ams_state"](3)
         acu_inject["set_v_cell"](3600)
@@ -213,6 +215,7 @@ class TestF005AmsSessionGuard:
         """F-005: mid-run 0x4A0[3] session_id change (AMS reboot guard) de-arms ECU
         out of Active and cuts torque to zero."""
         inv_heartbeat["vdc_ready"](500)
+        inv_heartbeat["enable_dti"](500.0)
         acu_inject["set_precharge"](1)
         acu_inject["set_ams_state"](3)
         acu_inject["set_session"](1)
@@ -249,6 +252,7 @@ class TestF007PrechargeDropMidActive:
         """F-007 (FS EV.6/EV.7): dropping 0x020[0] ok_precharge to 0 while ACTIVE
         (even with 0x4A0[0]=3 Run) must exit ACTIVE and cut torque to zero."""
         inv_heartbeat["vdc_ready"](500)
+        inv_heartbeat["enable_dti"](500.0)
         acu_inject["set_precharge"](1)
         acu_inject["set_ams_state"](3)
         acu_inject["set_v_cell"](3600)
@@ -282,6 +286,7 @@ class TestF008AmsErrorMidActive:
         """F-008 (FS EV.7): AMS 0x4A0[0]=5 (Error) while ACTIVE with 50% APPS must
         immediately enter AmsError and cut torque to zero."""
         inv_heartbeat["vdc_ready"](500)
+        inv_heartbeat["enable_dti"](500.0)
         acu_inject["set_precharge"](1)
         acu_inject["set_ams_state"](3)
         acu_inject["set_v_cell"](3600)
